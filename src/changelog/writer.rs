@@ -13,7 +13,7 @@ use super::parser::{find_insertion_point, read_changelog};
 /// Write changelog entries to a file.
 ///
 /// - Creates the file with header if it doesn't exist
-/// - Backs up existing file to .changelog.md.bak
+/// - Backs up existing file to `<filename>.md.bak` (e.g., `CHANGELOG.md.bak`)
 /// - Handles [Unreleased] section conversion per spec
 pub fn write_changelog(
     path: &Path,
@@ -84,11 +84,14 @@ pub fn generate_summary(output: &ChangelogOutput) -> String {
     let details: Vec<String> = counts
         .iter()
         .map(|(cat, count)| {
-            if *count == 1 {
-                format!("1 {}", cat)
-            } else {
-                format!("{} {}s", count, cat)
-            }
+            // Capitalize first letter
+            let capitalized = cat
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_default()
+                + &cat[1..];
+            format!("{}: {}", capitalized, count)
         })
         .collect();
 
@@ -152,7 +155,7 @@ mod tests {
 
         let summary = generate_summary(&output);
         assert!(summary.contains("3 entries"));
-        assert!(summary.contains("2 addeds"));
-        assert!(summary.contains("1 fixed"));
+        assert!(summary.contains("Added: 2"));
+        assert!(summary.contains("Fixed: 1"));
     }
 }

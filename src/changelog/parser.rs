@@ -29,11 +29,10 @@ pub fn read_changelog(path: &Path) -> Result<Option<ParsedChangelog>, ChangelogE
     // Find the latest versioned release
     let latest_version = changelog
         .iter()
-        .filter(|(title, _)| {
+        .find(|(title, _)| {
             let t = title.to_lowercase();
             t != "unreleased" && !t.is_empty()
         })
-        .next()
         .map(|(title, _)| extract_version_from_title(title));
 
     Ok(Some(ParsedChangelog {
@@ -78,11 +77,9 @@ pub fn find_insertion_point(content: &str) -> usize {
                 // Find the next ## section or end of file
                 for (j, next_line) in lines[i + 1..].iter().enumerate() {
                     if next_line.starts_with("## ") {
-                        // Calculate byte position
-                        let mut byte_pos = 0;
-                        for k in 0..=(i + j) {
-                            byte_pos += lines[k].len() + 1; // +1 for newline
-                        }
+                        // Calculate byte position using iterators
+                        let byte_pos: usize =
+                            lines.iter().take(i + j + 1).map(|l| l.len() + 1).sum();
                         return byte_pos;
                     }
                 }
@@ -90,10 +87,7 @@ pub fn find_insertion_point(content: &str) -> usize {
                 return content.len();
             } else {
                 // First section is not Unreleased, insert before it
-                let mut byte_pos = 0;
-                for k in 0..i {
-                    byte_pos += lines[k].len() + 1;
-                }
+                let byte_pos: usize = lines.iter().take(i).map(|l| l.len() + 1).sum();
                 return byte_pos;
             }
         }

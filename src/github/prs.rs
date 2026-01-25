@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use octocrab::Octocrab;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::error::GitHubError;
 
@@ -19,8 +20,9 @@ pub struct PullRequest {
 /// Maximum PR body length to prevent token exhaustion (per spec: 10KB).
 const MAX_BODY_LENGTH: usize = 10 * 1024;
 
-/// Fetch merged PRs from a GitHub repository.
+/// Fetch merged PRs from a GitHub repository using a token.
 ///
+/// This is the main entry point that constructs the octocrab client.
 /// Fetches PRs merged between the given dates.
 pub async fn fetch_merged_prs(
     token: &str,
@@ -32,8 +34,21 @@ pub async fn fetch_merged_prs(
     let octocrab = Octocrab::builder()
         .personal_token(token.to_string())
         .build()
-        .map_err(GitHubError::FetchPRs)?;
+        .map_err(|e| GitHubError::FetchPRs(Box::new(e)))?;
 
+    fetch_merged_prs_with_client(&octocrab, owner, repo, since, until).await
+}
+
+/// Fetch merged PRs using a pre-configured octocrab client.
+///
+/// This allows dependency injection for testing with mock servers.
+pub async fn fetch_merged_prs_with_client(
+    octocrab: &Octocrab,
+    owner: &str,
+    repo: &str,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+) -> Result<Vec<PullRequest>, GitHubError> {
     let mut all_prs = Vec::new();
     let mut page = 1u32;
 
@@ -52,21 +67,27 @@ pub async fn fetch_merged_prs(
         let prs_page = match result {
             Ok(page) => page,
             Err(e) => {
-                let err_str = e.to_string();
-                // Check for rate limiting
-                if err_str.contains("rate limit") {
+                // Check error content using both Display and Debug output
+                // to handle different octocrab error formats
+                let err_display = e.to_string();
+                let err_debug = format!("{:?}", e);
+                let err_lower = err_display.to_lowercase();
+                let debug_lower = err_debug.to_lowercase();
+
+                // Check for rate limiting (GitHub returns 403 with rate limit message)
+                if err_lower.contains("rate limit") || debug_lower.contains("rate limit") {
                     return Err(GitHubError::RateLimited {
                         reset_time: "unknown".to_string(),
                     });
                 }
-                // Check for not found
-                if err_str.contains("Not Found") {
+                // Check for not found (GitHub returns 404)
+                if err_display.contains("Not Found") || err_debug.contains("Not Found") {
                     return Err(GitHubError::RepositoryNotFound {
                         owner: owner.to_string(),
                         repo: repo.to_string(),
                     });
                 }
-                return Err(GitHubError::FetchPRs(e));
+                return Err(GitHubError::FetchPRs(Box::new(e)));
             }
         };
 
@@ -129,6 +150,10 @@ pub async fn fetch_merged_prs(
 
         // Safety limit to prevent infinite loops
         if page > 50 {
+            warn!(
+                "Reached 50-page safety limit while fetching PRs for {}/{}",
+                owner, repo
+            );
             break;
         }
     }

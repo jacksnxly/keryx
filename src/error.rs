@@ -5,9 +5,6 @@ use thiserror::Error;
 /// Errors from git operations.
 #[derive(Error, Debug)]
 pub enum GitError {
-    #[error("Not a git repository: {0}")]
-    NotARepository(String),
-
     #[error("Failed to open repository: {0}")]
     OpenRepository(#[source] git2::Error),
 
@@ -17,14 +14,8 @@ pub enum GitError {
     #[error("Failed to parse commit: {0}")]
     ParseCommit(#[source] git2::Error),
 
-    #[error("No tags found in repository")]
-    NoTagsFound,
-
     #[error("Failed to walk commit history: {0}")]
     RevwalkError(#[source] git2::Error),
-
-    #[error("Invalid commit range: {from} to {to}")]
-    InvalidRange { from: String, to: String },
 }
 
 /// Errors from GitHub API operations.
@@ -34,7 +25,7 @@ pub enum GitHubError {
     AuthenticationFailed,
 
     #[error("Failed to fetch PRs: {0}")]
-    FetchPRs(#[source] octocrab::Error),
+    FetchPRs(#[source] Box<octocrab::Error>),
 
     #[error("Rate limited by GitHub API. Resets at: {reset_time}")]
     RateLimited { reset_time: String },

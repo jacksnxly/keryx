@@ -1,6 +1,7 @@
 //! Commit range resolution.
 
 use git2::{Oid, Repository};
+use tracing::warn;
 
 use crate::error::GitError;
 
@@ -84,16 +85,16 @@ fn find_root_commit(repo: &Repository) -> Result<Oid, GitError> {
     let mut root_oid = head_commit.id();
 
     for oid_result in revwalk {
-        if let Ok(oid) = oid_result {
-            root_oid = oid;
+        match oid_result {
+            Ok(oid) => root_oid = oid,
+            Err(e) => {
+                warn!(
+                    "Error during revwalk traversal: {}. Continuing with last valid commit.",
+                    e
+                );
+            }
         }
     }
 
     Ok(root_oid)
-}
-
-#[cfg(test)]
-mod tests {
-    // Integration tests would require a real git repository
-    // These would be in tests/ directory
 }

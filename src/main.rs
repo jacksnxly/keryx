@@ -1,6 +1,8 @@
 //! keryx - CLI entry point.
 
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -14,6 +16,70 @@ use keryx::claude::{build_prompt, check_claude_installed, generate_with_retry, p
 use keryx::git::{commits::fetch_commits, range::resolve_range, tags::get_latest_tag};
 use keryx::github::{auth::get_github_token, prs::{fetch_merged_prs, parse_github_remote}};
 use keryx::version::calculate_next_version;
+
+/// Result from the background update check.
+struct UpdateResult {
+    /// Whether an update is available.
+    update_available: bool,
+}
+
+/// Handles background update checking without output interleaving.
+///
+/// Spawns a thread to check for updates and provides a method to
+/// display the notification at a controlled time (end of program).
+struct UpdateChecker {
+    /// Receiver for update check result.
+    receiver: Receiver<UpdateResult>,
+    /// Thread handle (kept to prevent detachment).
+    _handle: JoinHandle<()>,
+}
+
+impl UpdateChecker {
+    /// Start the background update check.
+    ///
+    /// Spawns a thread that checks for updates and sends the result
+    /// through a channel. The check is non-blocking from the caller's
+    /// perspective.
+    fn start(verbose: bool) -> Self {
+        let (sender, receiver) = mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            let result = match check_for_update() {
+                Ok(update_available) => UpdateResult { update_available },
+                Err(e) => {
+                    if verbose {
+                        debug!("Update check failed: {}", e);
+                    }
+                    UpdateResult { update_available: false }
+                }
+            };
+
+            // Send result; ignore error if receiver is dropped
+            let _ = sender.send(result);
+        });
+
+        UpdateChecker {
+            receiver,
+            _handle: handle,
+        }
+    }
+
+    /// Print update notification if an update is available.
+    ///
+    /// Uses non-blocking try_recv() to check if the update check has
+    /// completed. If an update is available, prints the notification.
+    /// All errors are handled silently (disconnected channel, etc.).
+    fn maybe_notify(&self) {
+        if let Ok(result) = self.receiver.try_recv() {
+            if result.update_available {
+                print_update_notification();
+            }
+        }
+        // Silently ignore:
+        // - TryRecvError::Empty (update check not finished yet)
+        // - TryRecvError::Disconnected (thread panicked or channel closed)
+    }
+}
 
 /// Generate release notes from commits and PRs using Claude.
 #[derive(Parser, Debug)]
@@ -77,35 +143,26 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set tracing subscriber");
 
-    // Check for updates in background (non-blocking notification)
-    check_for_updates_background(cli.verbose);
+    // Start background update check (non-blocking)
+    let update_checker = UpdateChecker::start(cli.verbose);
 
-    match cli.command {
+    // Run the requested command
+    let result = match cli.command {
         Some(Commands::Update) => run_update().await,
         None => run_generate(cli).await,
-    }
+    };
+
+    // Print update notification at the very end (if available)
+    // This prevents output interleaving with main program output
+    update_checker.maybe_notify();
+
+    result
 }
 
-/// Check for updates in background and print notification if available.
+/// Check if an update is available (without printing).
 ///
-/// Errors are logged at debug level instead of being silently ignored.
-/// Use `--verbose` flag to see update check errors.
-fn check_for_updates_background(verbose: bool) {
-    // Spawn a background task to check for updates
-    // This is fire-and-forget - we don't wait for it
-    std::thread::spawn(move || {
-        if let Err(e) = check_and_notify_update() {
-            // Log errors at debug level for troubleshooting (visible with --verbose)
-            // This replaces silent error swallowing with proper logging
-            if verbose {
-                debug!("Update check failed: {}", e);
-            }
-        }
-    });
-}
-
-/// Check if an update is available and print a notification.
-fn check_and_notify_update() -> Result<(), Box<dyn std::error::Error>> {
+/// Returns true if a newer version is available, false otherwise.
+fn check_for_update() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     use axoupdater::{AxoUpdater, Version};
 
     let current_version: Version = env!("CARGO_PKG_VERSION").parse()?;
@@ -113,17 +170,17 @@ fn check_and_notify_update() -> Result<(), Box<dyn std::error::Error>> {
     let mut updater = AxoUpdater::new_for("keryx");
     updater.set_current_version(current_version)?;
 
-    // Only check, don't update
-    if updater.is_update_needed_sync()? {
-        eprintln!();
-        eprintln!("\x1b[33m╭───────────────────────────────────────────────╮\x1b[0m");
-        eprintln!("\x1b[33m│\x1b[0m  A new version of keryx is available!        \x1b[33m│\x1b[0m");
-        eprintln!("\x1b[33m│\x1b[0m  Run \x1b[36mkeryx update\x1b[0m to upgrade                 \x1b[33m│\x1b[0m");
-        eprintln!("\x1b[33m╰───────────────────────────────────────────────╯\x1b[0m");
-        eprintln!();
-    }
+    Ok(updater.is_update_needed_sync()?)
+}
 
-    Ok(())
+/// Print the update notification banner to stderr.
+fn print_update_notification() {
+    eprintln!();
+    eprintln!("\x1b[33m╭───────────────────────────────────────────────╮\x1b[0m");
+    eprintln!("\x1b[33m│\x1b[0m  A new version of keryx is available!        \x1b[33m│\x1b[0m");
+    eprintln!("\x1b[33m│\x1b[0m  Run \x1b[36mkeryx update\x1b[0m to upgrade                 \x1b[33m│\x1b[0m");
+    eprintln!("\x1b[33m╰───────────────────────────────────────────────╯\x1b[0m");
+    eprintln!();
 }
 
 /// Run the self-update command.

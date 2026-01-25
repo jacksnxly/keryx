@@ -55,8 +55,3 @@ pub async fn run_claude(prompt: &str) -> Result<String, ClaudeError> {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     Ok(stdout)
 }
-
-#[cfg(test)]
-mod tests {
-    // Integration tests would require actual Claude CLI
-}

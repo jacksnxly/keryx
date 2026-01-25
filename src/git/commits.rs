@@ -22,21 +22,22 @@ pub enum CommitType {
     Chore,
 }
 
-impl CommitType {
-    /// Parse a commit type from a string.
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for CommitType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "feat" => Some(Self::Feat),
-            "fix" => Some(Self::Fix),
-            "docs" => Some(Self::Docs),
-            "style" => Some(Self::Style),
-            "refactor" => Some(Self::Refactor),
-            "perf" => Some(Self::Perf),
-            "test" => Some(Self::Test),
-            "build" => Some(Self::Build),
-            "ci" => Some(Self::Ci),
-            "chore" => Some(Self::Chore),
-            _ => None,
+            "feat" => Ok(Self::Feat),
+            "fix" => Ok(Self::Fix),
+            "docs" => Ok(Self::Docs),
+            "style" => Ok(Self::Style),
+            "refactor" => Ok(Self::Refactor),
+            "perf" => Ok(Self::Perf),
+            "test" => Ok(Self::Test),
+            "build" => Ok(Self::Build),
+            "ci" => Ok(Self::Ci),
+            "chore" => Ok(Self::Chore),
+            _ => Err(format!("Unknown commit type: {}", s)),
         }
     }
 }
@@ -94,7 +95,7 @@ pub fn parse_commit_message(message: &str) -> (Option<CommitType>, Option<String
         let scope = caps.get(2).map(|m| m.as_str().to_string());
         let breaking_mark = caps.get(3).is_some();
 
-        let commit_type = CommitType::from_str(type_str);
+        let commit_type = type_str.parse::<CommitType>().ok();
         let breaking = breaking_mark || breaking_in_footer;
 
         return (commit_type, scope, breaking);

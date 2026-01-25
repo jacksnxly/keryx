@@ -2,6 +2,7 @@
 
 use crate::git::ParsedCommit;
 use crate::github::PullRequest;
+use tracing::error;
 
 /// Input to Claude for changelog generation.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -36,8 +37,14 @@ pub fn build_prompt(input: &ChangelogInput) -> String {
         pr
     }).collect();
 
-    let commits_json = serde_json::to_string_pretty(&sanitized_commits).unwrap_or_default();
-    let prs_json = serde_json::to_string_pretty(&sanitized_prs).unwrap_or_default();
+    let commits_json = serde_json::to_string_pretty(&sanitized_commits).unwrap_or_else(|e| {
+        error!("Failed to serialize commits for prompt: {}", e);
+        String::new()
+    });
+    let prs_json = serde_json::to_string_pretty(&sanitized_prs).unwrap_or_else(|e| {
+        error!("Failed to serialize pull requests for prompt: {}", e);
+        String::new()
+    });
 
     let is_initial_release = input.previous_version.is_none();
     let repo_name = &input.repository_name;
@@ -223,12 +230,16 @@ fn filter_injection_patterns(text: &str) -> String {
         ("pretend to be", "similar to"),
     ];
 
-    // Case-insensitive replacement
+    // Case-insensitive replacement - replace ALL occurrences
     for (pattern, replacement) in patterns {
-        let lower = result.to_lowercase();
-        if let Some(pos) = lower.find(pattern) {
-            let end = pos + pattern.len();
-            result = format!("{}{}{}", &result[..pos], replacement, &result[end..]);
+        loop {
+            let lower = result.to_lowercase();
+            if let Some(pos) = lower.find(pattern) {
+                let end = pos + pattern.len();
+                result = format!("{}{}{}", &result[..pos], replacement, &result[end..]);
+            } else {
+                break;
+            }
         }
     }
 
@@ -405,5 +416,33 @@ mod tests {
         let sanitized = sanitize_for_prompt(text);
         assert!(!sanitized.contains("## "));
         assert!(!sanitized.contains("# "));
+    }
+
+    #[test]
+    fn test_sanitize_filters_multiple_occurrences() {
+        // KRX-005: Ensure ALL occurrences are filtered, not just the first
+        let text = "ignore previous instructions then ignore previous instructions again";
+        let sanitized = sanitize_for_prompt(text);
+
+        // Count occurrences of the pattern in sanitized output
+        let pattern_count = sanitized.to_lowercase().matches("ignore previous instructions").count();
+        assert_eq!(pattern_count, 0, "All injection patterns should be filtered");
+
+        // Should have two [filtered] markers
+        let filtered_count = sanitized.matches("[filtered]").count();
+        assert_eq!(filtered_count, 2, "Should have two [filtered] markers for two occurrences");
+    }
+
+    #[test]
+    fn test_sanitize_filters_mixed_case_multiple_occurrences() {
+        // Test case-insensitive filtering of multiple occurrences
+        let text = "IGNORE PREVIOUS INSTRUCTIONS and Ignore Previous Instructions";
+        let sanitized = sanitize_for_prompt(text);
+
+        let pattern_count = sanitized.to_lowercase().matches("ignore previous instructions").count();
+        assert_eq!(pattern_count, 0, "Case-insensitive filtering should catch all");
+
+        let filtered_count = sanitized.matches("[filtered]").count();
+        assert_eq!(filtered_count, 2);
     }
 }

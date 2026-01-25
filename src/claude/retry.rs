@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use async_trait::async_trait;
 use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 
@@ -10,15 +11,43 @@ use crate::error::ClaudeError;
 
 use super::subprocess::run_claude;
 
-/// Configuration per spec: 3 retries, base 1s, max 30s.
-const MAX_RETRIES: u32 = 3;
+/// Trait for executing Claude CLI commands.
+///
+/// This abstraction allows mocking the Claude subprocess in tests.
+#[cfg_attr(test, mockall::automock)]
+#[async_trait]
+pub trait ClaudeExecutor: Send + Sync {
+    /// Run Claude with the given prompt and return the raw response.
+    async fn run(&self, prompt: &str) -> Result<String, ClaudeError>;
+}
+
+/// Default executor that calls the real Claude CLI.
+pub struct DefaultExecutor;
+
+#[async_trait]
+impl ClaudeExecutor for DefaultExecutor {
+    async fn run(&self, prompt: &str) -> Result<String, ClaudeError> {
+        run_claude(prompt).await
+    }
+}
+
+/// Configuration: 3 total attempts, base 1s, max 30s.
+const MAX_ATTEMPTS: u32 = 3;
 const INITIAL_INTERVAL_SECS: u64 = 1;
 const MAX_INTERVAL_SECS: u64 = 30;
 
 /// Generate changelog entries with retry logic.
 ///
-/// Retries up to 3 times with exponential backoff on failure.
+/// Makes up to 3 attempts with exponential backoff on failure.
 pub async fn generate_with_retry(prompt: &str) -> Result<ChangelogOutput, ClaudeError> {
+    generate_with_retry_impl(prompt, &DefaultExecutor).await
+}
+
+/// Internal implementation that accepts any executor (for testing).
+pub(crate) async fn generate_with_retry_impl<E: ClaudeExecutor>(
+    prompt: &str,
+    executor: &E,
+) -> Result<ChangelogOutput, ClaudeError> {
     let mut backoff = ExponentialBackoff {
         initial_interval: Duration::from_secs(INITIAL_INTERVAL_SECS),
         max_interval: Duration::from_secs(MAX_INTERVAL_SECS),
@@ -29,15 +58,15 @@ pub async fn generate_with_retry(prompt: &str) -> Result<ChangelogOutput, Claude
     let mut attempts = 0;
     let mut last_error = None;
 
-    while attempts < MAX_RETRIES {
+    while attempts < MAX_ATTEMPTS {
         attempts += 1;
 
-        match try_generate(prompt).await {
+        match try_generate(prompt, executor).await {
             Ok(output) => return Ok(output),
             Err(e) => {
                 last_error = Some(e);
 
-                if attempts < MAX_RETRIES {
+                if attempts < MAX_ATTEMPTS {
                     if let Some(wait_duration) = backoff.next_backoff() {
                         tokio::time::sleep(wait_duration).await;
                     }
@@ -49,15 +78,18 @@ pub async fn generate_with_retry(prompt: &str) -> Result<ChangelogOutput, Claude
     // All retries exhausted
     if let Some(e) = last_error {
         // Log the actual error for debugging
-        eprintln!("All {} retry attempts failed. Last error: {}", MAX_RETRIES, e);
+        eprintln!("All {} attempts failed. Last error: {}", MAX_ATTEMPTS, e);
     }
 
     Err(ClaudeError::RetriesExhausted)
 }
 
 /// Single attempt to generate changelog.
-async fn try_generate(prompt: &str) -> Result<ChangelogOutput, ClaudeError> {
-    let response = run_claude(prompt).await?;
+async fn try_generate<E: ClaudeExecutor>(
+    prompt: &str,
+    executor: &E,
+) -> Result<ChangelogOutput, ClaudeError> {
+    let response = executor.run(prompt).await?;
 
     // Parse the JSON response
     parse_claude_response(&response)
@@ -81,6 +113,10 @@ fn parse_claude_response(response: &str) -> Result<ChangelogOutput, ClaudeError>
         envelope.result
     } else {
         // Fallback: treat as raw response
+        tracing::debug!(
+            "Could not parse as Claude CLI envelope, treating as raw response. \
+             This may indicate a Claude CLI version mismatch."
+        );
         response.to_string()
     };
 
@@ -175,6 +211,215 @@ fn extract_balanced_braces(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    // ============================================
+    // Retry Behavior Tests (using mocked executor)
+    // ============================================
+
+    /// Test that exactly 3 attempts are made before giving up.
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_exhausts_after_three_attempts() {
+        let mut mock = MockClaudeExecutor::new();
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        mock.expect_run()
+            .times(3)
+            .returning(move |_| {
+                call_count_clone.fetch_add(1, Ordering::SeqCst);
+                Err(ClaudeError::ExecutionFailed("test error".to_string()))
+            });
+
+        let result = generate_with_retry_impl("test prompt", &mock).await;
+
+        assert!(matches!(result, Err(ClaudeError::RetriesExhausted)));
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    }
+
+    /// Test successful response after 2 failures.
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_succeeds_after_failures() {
+        let mut mock = MockClaudeExecutor::new();
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        mock.expect_run()
+            .times(3)
+            .returning(move |_| {
+                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+                if count < 2 {
+                    Err(ClaudeError::ExecutionFailed("transient error".to_string()))
+                } else {
+                    // Return valid JSON on third attempt
+                    Ok(r#"{"entries": [{"category": "Added", "description": "Test feature"}]}"#
+                        .to_string())
+                }
+            });
+
+        let result = generate_with_retry_impl("test prompt", &mock).await;
+
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output.entries.len(), 1);
+        assert_eq!(output.entries[0].description, "Test feature");
+    }
+
+    /// Test immediate success on first attempt.
+    #[tokio::test(start_paused = true)]
+    async fn test_success_on_first_attempt() {
+        let mut mock = MockClaudeExecutor::new();
+
+        mock.expect_run()
+            .times(1)
+            .returning(|_| Ok(r#"{"entries": []}"#.to_string()));
+
+        let result = generate_with_retry_impl("test prompt", &mock).await;
+
+        assert!(result.is_ok());
+    }
+
+    /// Test that backoff timing includes delays between retries.
+    ///
+    /// Note: The backoff crate uses randomized jitter by default, so we only
+    /// verify that delays occur (are non-zero) rather than specific values.
+    #[tokio::test(start_paused = true)]
+    async fn test_backoff_delays_occur() {
+        use tokio::time::Instant;
+
+        let mut mock = MockClaudeExecutor::new();
+
+        let start = Instant::now();
+        let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let timestamps_clone = timestamps.clone();
+
+        mock.expect_run()
+            .times(3)
+            .returning(move |_| {
+                timestamps_clone.lock().unwrap().push(Instant::now());
+                Err(ClaudeError::ExecutionFailed("test".to_string()))
+            });
+
+        let _ = generate_with_retry_impl("test", &mock).await;
+
+        let ts = timestamps.lock().unwrap();
+        assert_eq!(ts.len(), 3);
+
+        // First call is immediate
+        let first_delay = ts[0].duration_since(start);
+        assert!(
+            first_delay.as_millis() < 100,
+            "First call should be immediate, was {:?}",
+            first_delay
+        );
+
+        // Second call has some backoff delay (with jitter, could be 0.5s-1.5s)
+        let second_delay = ts[1].duration_since(ts[0]);
+        assert!(
+            second_delay.as_millis() >= 100,
+            "Second delay should have backoff, was {:?}",
+            second_delay
+        );
+
+        // Third call also has backoff delay
+        let third_delay = ts[2].duration_since(ts[1]);
+        assert!(
+            third_delay.as_millis() >= 100,
+            "Third delay should have backoff, was {:?}",
+            third_delay
+        );
+
+        // Total elapsed time should be significant (at least 500ms with jitter)
+        let total_elapsed = ts[2].duration_since(start);
+        assert!(
+            total_elapsed.as_millis() >= 500,
+            "Total elapsed time should show backoff occurred, was {:?}",
+            total_elapsed
+        );
+    }
+
+    /// Test that different error types are handled correctly.
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_with_different_errors() {
+        let mut mock = MockClaudeExecutor::new();
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        mock.expect_run()
+            .times(3)
+            .returning(move |_| {
+                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+                match count {
+                    0 => Err(ClaudeError::Timeout(30)),
+                    1 => Err(ClaudeError::NonZeroExit {
+                        code: 1,
+                        stderr: "error".to_string(),
+                    }),
+                    _ => Err(ClaudeError::ExecutionFailed("final error".to_string())),
+                }
+            });
+
+        let result = generate_with_retry_impl("test", &mock).await;
+
+        assert!(matches!(result, Err(ClaudeError::RetriesExhausted)));
+    }
+
+    /// Test that invalid JSON triggers retry.
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_on_invalid_json() {
+        let mut mock = MockClaudeExecutor::new();
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        mock.expect_run()
+            .times(2)
+            .returning(move |_| {
+                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Ok("not valid json".to_string())
+                } else {
+                    Ok(r#"{"entries": []}"#.to_string())
+                }
+            });
+
+        let result = generate_with_retry_impl("test", &mock).await;
+
+        assert!(result.is_ok());
+    }
+
+    /// Test success after exactly 1 failure.
+    #[tokio::test(start_paused = true)]
+    async fn test_retry_succeeds_after_one_failure() {
+        let mut mock = MockClaudeExecutor::new();
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        mock.expect_run()
+            .times(2)
+            .returning(move |_| {
+                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Err(ClaudeError::ExecutionFailed("first failure".to_string()))
+                } else {
+                    Ok(r#"{"entries": []}"#.to_string())
+                }
+            });
+
+        let result = generate_with_retry_impl("test", &mock).await;
+
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+
+    // ============================================
+    // JSON Extraction Tests (existing tests)
+    // ============================================
 
     #[test]
     fn test_extract_json_from_markdown() {

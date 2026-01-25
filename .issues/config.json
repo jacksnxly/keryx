@@ -1,0 +1,9 @@
+{
+  "prefix": "KRX",
+  "nextId": 17,
+  "created": "2026-01-25",
+  "statuses": ["backlog", "in-progress", "in-review", "done", "archived"],
+  "types": ["bug", "feature", "task", "improvement"],
+  "priorities": ["urgent", "high", "medium", "low", "none"],
+  "labels": ["error-handling", "silent-failure", "performance", "code-quality", "security", "bug", "ux", "concurrency", "api", "testing", "critical-gap", "documentation", "comment-rot", "clippy", "dead-code"]
+}
