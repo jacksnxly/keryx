@@ -1,0 +1,11 @@
+# Rust build artifacts
+/target
+
+# Backup files from rustfmt
+**/*.rs.bk
+
+# MSVC Windows debugging info
+*.pdb
+
+# Changelog backups
+*.bak
