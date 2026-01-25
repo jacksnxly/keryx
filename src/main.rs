@@ -109,12 +109,25 @@ async fn main() -> Result<()> {
 
     // Step 7: Build prompt and call Claude
     let repo_name = get_repo_name(&repo).unwrap_or_else(|| "repository".to_string());
+    let is_initial_release = base_version.is_none();
+
+    // For initial releases, gather extra context
+    let (project_description, cli_features) = if is_initial_release {
+        (
+            read_cargo_description(),
+            Some(get_cli_features()),
+        )
+    } else {
+        (None, None)
+    };
 
     let input = ChangelogInput {
         commits,
         pull_requests,
         previous_version: base_version.map(|v| v.to_string()),
         repository_name: repo_name,
+        project_description,
+        cli_features,
     };
 
     let prompt = build_prompt(&input);
@@ -189,4 +202,39 @@ fn print_changelog_preview(output: &keryx::ChangelogOutput, version: &Version) {
         }
         println!();
     }
+}
+
+/// Read project description from Cargo.toml.
+fn read_cargo_description() -> Option<String> {
+    let content = std::fs::read_to_string("Cargo.toml").ok()?;
+
+    // Simple parsing - look for description = "..."
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with("description") {
+            if let Some(start) = line.find('"') {
+                if let Some(end) = line.rfind('"') {
+                    if end > start {
+                        return Some(line[start + 1..end].to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Get CLI features for context.
+fn get_cli_features() -> Vec<String> {
+    vec![
+        "--set-version <VERSION>: Override auto-detected version".to_string(),
+        "--from <REF>: Start of commit range (tag, hash, or branch)".to_string(),
+        "--to <REF>: End of commit range (default: HEAD)".to_string(),
+        "-o, --output <PATH>: Changelog output path (default: CHANGELOG.md)".to_string(),
+        "--no-prs: Skip GitHub PR fetching, use commits only".to_string(),
+        "--dry-run: Preview without writing to file".to_string(),
+        "GitHub auth: Supports gh CLI, GITHUB_TOKEN, and GH_TOKEN".to_string(),
+        "Automatic backup: Creates .changelog.md.bak before modifying".to_string(),
+        "Handles [Unreleased] sections per Keep a Changelog spec".to_string(),
+    ]
 }

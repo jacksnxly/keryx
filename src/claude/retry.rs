@@ -63,13 +63,32 @@ async fn try_generate(prompt: &str) -> Result<ChangelogOutput, ClaudeError> {
     parse_claude_response(&response)
 }
 
+/// Claude CLI JSON envelope when using --output-format json
+#[derive(serde::Deserialize)]
+struct ClaudeCliResponse {
+    result: String,
+    #[serde(default)]
+    is_error: bool,
+}
+
 /// Parse Claude's JSON response into ChangelogOutput.
 fn parse_claude_response(response: &str) -> Result<ChangelogOutput, ClaudeError> {
-    // Claude's response may contain markdown code blocks, extract JSON
-    let json_str = extract_json(response);
+    // First, try to parse as Claude CLI JSON envelope
+    let content = if let Ok(envelope) = serde_json::from_str::<ClaudeCliResponse>(response) {
+        if envelope.is_error {
+            return Err(ClaudeError::ExecutionFailed(envelope.result));
+        }
+        envelope.result
+    } else {
+        // Fallback: treat as raw response
+        response.to_string()
+    };
+
+    // Now extract the changelog JSON from Claude's response text
+    let json_str = extract_json(&content);
 
     serde_json::from_str(&json_str)
-        .map_err(|e| ClaudeError::InvalidJson(format!("Failed to parse: {}. Response: {}", e, response)))
+        .map_err(|e| ClaudeError::InvalidJson(format!("Failed to parse: {}. Content: {}", e, content)))
 }
 
 /// Extract JSON from Claude's response (may be wrapped in markdown).
@@ -81,7 +100,15 @@ fn extract_json(response: &str) -> String {
         }
     }
 
-    // Try to find raw JSON (starts with {)
+    // Try to find raw JSON object with "entries" key (our expected format)
+    // This is more specific than just finding any { }
+    if let Some(start) = response.find("{\"entries\"") {
+        if let Some(end) = response[start..].find('}') {
+            return response[start..=start + end].to_string();
+        }
+    }
+
+    // Fallback: Try to find any JSON object
     if let Some(start) = response.find('{') {
         if let Some(end) = response.rfind('}') {
             return response[start..=end].to_string();
@@ -117,5 +144,23 @@ mod tests {
         let response = r#"Here is the result: {"entries": []} Hope this helps!"#;
         let json = extract_json(response);
         assert_eq!(json, r#"{"entries": []}"#);
+    }
+
+    #[test]
+    fn test_parse_claude_cli_envelope() {
+        let response = r#"{"type":"result","subtype":"success","is_error":false,"result":"```json\n{\"entries\": []}\n```\n\nNo user-facing changes."}"#;
+        let result = parse_claude_response(response);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().entries.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_claude_cli_envelope_with_entries() {
+        let response = r#"{"type":"result","is_error":false,"result":"```json\n{\"entries\": [{\"category\": \"Added\", \"description\": \"New feature\"}]}\n```"}"#;
+        let result = parse_claude_response(response);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output.entries.len(), 1);
+        assert_eq!(output.entries[0].description, "New feature");
     }
 }
