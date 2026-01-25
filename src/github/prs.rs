@@ -1,5 +1,7 @@
 //! PR fetching via octocrab.
 
+use std::num::NonZeroU64;
+
 use chrono::{DateTime, Utc};
 use octocrab::Octocrab;
 use serde::{Deserialize, Serialize};
@@ -10,7 +12,7 @@ use crate::error::GitHubError;
 /// Represents a GitHub PR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequest {
-    pub number: u64,
+    pub number: NonZeroU64,
     pub title: String,
     pub body: Option<String>,
     pub merged_at: Option<DateTime<Utc>>,
@@ -133,6 +135,18 @@ pub async fn fetch_merged_prs_with_client(
                 }
             }
 
+            // Validate PR number (0 is invalid, should never happen from GitHub API)
+            let number = match NonZeroU64::new(pr.number) {
+                Some(n) => n,
+                None => {
+                    warn!(
+                        "Skipping PR with invalid number 0 (title: {:?})",
+                        pr.title.as_deref().unwrap_or("<no title>")
+                    );
+                    continue;
+                }
+            };
+
             // Truncate body per spec (10KB max)
             let body = pr.body.map(|b| truncate_body(&b, MAX_BODY_LENGTH));
 
@@ -144,7 +158,7 @@ pub async fn fetch_merged_prs_with_client(
                 .collect();
 
             all_prs.push(PullRequest {
-                number: pr.number,
+                number,
                 title: pr.title.unwrap_or_default(),
                 body,
                 merged_at: Some(merged_at),
@@ -301,5 +315,33 @@ mod tests {
         // Should have truncated to approximately 3333 characters (9999 bytes) or less
         let truncated_part = result.strip_suffix("... [truncated]").unwrap();
         assert!(truncated_part.len() <= 10000);
+    }
+
+    #[test]
+    fn test_pullrequest_serialization_with_nonzero() {
+        use std::num::NonZeroU64;
+
+        let pr = PullRequest {
+            number: NonZeroU64::new(42).unwrap(),
+            title: "Test PR".to_string(),
+            body: Some("Body".to_string()),
+            merged_at: None,
+            labels: vec!["bug".to_string()],
+        };
+
+        // Serialize
+        let json = serde_json::to_string(&pr).expect("serialize");
+        assert!(json.contains("\"number\":42"));
+
+        // Deserialize
+        let parsed: PullRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.number.get(), 42);
+    }
+
+    #[test]
+    fn test_pullrequest_deserialize_rejects_zero() {
+        let json = r#"{"number":0,"title":"Test","body":null,"merged_at":null,"labels":[]}"#;
+        let result: Result<PullRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "Should reject PR with number 0");
     }
 }

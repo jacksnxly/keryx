@@ -2,13 +2,15 @@
 
 use std::path::Path;
 
+use semver::Version;
+
 use crate::error::ChangelogError;
 
 /// Parsed changelog information.
 #[derive(Debug)]
 pub struct ParsedChangelog {
     pub has_unreleased: bool,
-    pub latest_version: Option<String>,
+    pub latest_version: Option<Version>,
     pub raw_content: String,
 }
 
@@ -33,7 +35,7 @@ pub fn read_changelog(path: &Path) -> Result<Option<ParsedChangelog>, ChangelogE
             let t = title.to_lowercase();
             t != "unreleased" && !t.is_empty()
         })
-        .map(|(title, _)| extract_version_from_title(title));
+        .and_then(|(title, _)| extract_version_from_title(title));
 
     Ok(Some(ParsedChangelog {
         has_unreleased,
@@ -43,31 +45,34 @@ pub fn read_changelog(path: &Path) -> Result<Option<ParsedChangelog>, ChangelogE
 }
 
 /// Extract version number from a changelog section title.
-/// e.g., "[1.2.3] - 2024-01-01" -> "1.2.3"
-fn extract_version_from_title(title: &str) -> String {
+/// e.g., "[1.2.3] - 2024-01-01" -> Version { major: 1, minor: 2, patch: 3 }
+///
+/// Returns `None` if the version string cannot be parsed as a valid semver.
+fn extract_version_from_title(title: &str) -> Option<Version> {
     // Remove brackets and date
     let title = title.trim();
 
     // Handle [version] format
-    if title.starts_with('[') {
+    let version_str = if title.starts_with('[') {
         if let Some(end) = title.find(']') {
-            return title[1..end].to_string();
+            &title[1..end]
+        } else {
+            title
         }
-    }
+    } else if let Some(dash_pos) = title.find(" - ") {
+        // Handle version - date format
+        title[..dash_pos].trim()
+    } else {
+        title
+    };
 
-    // Handle version - date format
-    if let Some(dash_pos) = title.find(" - ") {
-        return title[..dash_pos].trim().to_string();
-    }
-
-    title.to_string()
+    Version::parse(version_str).ok()
 }
 
 /// Find the position to insert a new version section.
 /// Returns the byte offset after the header and any [Unreleased] section.
 pub fn find_insertion_point(content: &str) -> usize {
     let lines: Vec<&str> = content.lines().collect();
-    let mut pos = 0;
 
     for (i, line) in lines.iter().enumerate() {
         // Skip initial header (until first ## section)
@@ -91,11 +96,10 @@ pub fn find_insertion_point(content: &str) -> usize {
                 return byte_pos;
             }
         }
-
-        pos += line.len() + 1;
     }
 
-    pos
+    // No sections found, insert at end of content
+    content.len()
 }
 
 #[cfg(test)]
@@ -104,12 +108,23 @@ mod tests {
 
     #[test]
     fn test_extract_version_with_brackets() {
-        assert_eq!(extract_version_from_title("[1.2.3] - 2024-01-01"), "1.2.3");
+        assert_eq!(
+            extract_version_from_title("[1.2.3] - 2024-01-01"),
+            Some(Version::new(1, 2, 3))
+        );
     }
 
     #[test]
     fn test_extract_version_without_brackets() {
-        assert_eq!(extract_version_from_title("1.2.3 - 2024-01-01"), "1.2.3");
+        assert_eq!(
+            extract_version_from_title("1.2.3 - 2024-01-01"),
+            Some(Version::new(1, 2, 3))
+        );
+    }
+
+    #[test]
+    fn test_extract_version_invalid() {
+        assert_eq!(extract_version_from_title("not-a-version"), None);
     }
 
     #[test]

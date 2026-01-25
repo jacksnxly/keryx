@@ -75,13 +75,10 @@ pub(crate) async fn generate_with_retry_impl<E: ClaudeExecutor>(
         }
     }
 
-    // All retries exhausted
-    if let Some(e) = last_error {
-        // Log the actual error for debugging
-        eprintln!("All {} attempts failed. Last error: {}", MAX_ATTEMPTS, e);
-    }
-
-    Err(ClaudeError::RetriesExhausted)
+    // All retries exhausted - include the last error for debugging
+    Err(ClaudeError::RetriesExhausted(Box::new(
+        last_error.expect("last_error should be Some after failed retries"),
+    )))
 }
 
 /// Single attempt to generate changelog.
@@ -113,9 +110,10 @@ fn parse_claude_response(response: &str) -> Result<ChangelogOutput, ClaudeError>
         envelope.result
     } else {
         // Fallback: treat as raw response
-        tracing::debug!(
-            "Could not parse as Claude CLI envelope, treating as raw response. \
-             This may indicate a Claude CLI version mismatch."
+        tracing::warn!(
+            "Could not parse as Claude CLI envelope - treating as raw response. \
+             This may indicate a Claude CLI version mismatch. Consider running \
+             'claude --version' to check your installation."
         );
         response.to_string()
     };
@@ -235,7 +233,7 @@ mod tests {
 
         let result = generate_with_retry_impl("test prompt", &mock).await;
 
-        assert!(matches!(result, Err(ClaudeError::RetriesExhausted)));
+        assert!(matches!(result, Err(ClaudeError::RetriesExhausted(_))));
         assert_eq!(call_count.load(Ordering::SeqCst), 3);
     }
 
@@ -365,7 +363,13 @@ mod tests {
 
         let result = generate_with_retry_impl("test", &mock).await;
 
-        assert!(matches!(result, Err(ClaudeError::RetriesExhausted)));
+        // Verify the last error (ExecutionFailed) is preserved in the error chain
+        match result {
+            Err(ClaudeError::RetriesExhausted(inner)) => {
+                assert!(matches!(*inner, ClaudeError::ExecutionFailed(_)));
+            }
+            _ => panic!("Expected RetriesExhausted error"),
+        }
     }
 
     /// Test that invalid JSON triggers retry.

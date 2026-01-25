@@ -104,4 +104,44 @@ impl TestRepo {
         let commit = self.repo.find_commit(oid).expect("Failed to find commit");
         self.repo.branch(name, &commit, false).expect("Failed to create branch");
     }
+
+    /// Create a merge commit with two parents.
+    /// Returns the merge commit OID. Does not update HEAD.
+    pub fn merge_commit(&self, message: &str, parent1: Oid, parent2: Oid) -> Oid {
+        let sig = self.signature();
+
+        // Get both parent commits
+        let parent1_commit = self.repo.find_commit(parent1).expect("Failed to find parent1");
+        let parent2_commit = self.repo.find_commit(parent2).expect("Failed to find parent2");
+
+        // For test purposes, just use parent1's tree (simulates a trivial merge)
+        let tree = parent1_commit.tree().expect("Failed to get parent1 tree");
+
+        // Create the merge commit without updating HEAD
+        self.repo
+            .commit(
+                None, // Don't update any ref - avoids "first parent" check
+                &sig,
+                &sig,
+                message,
+                &tree,
+                &[&parent1_commit, &parent2_commit],
+            )
+            .expect("Failed to create merge commit")
+    }
+
+    /// Checkout a branch by name.
+    pub fn checkout_branch(&self, name: &str) {
+        let branch = self
+            .repo
+            .find_branch(name, git2::BranchType::Local)
+            .expect("Failed to find branch");
+        let commit = branch.get().peel_to_commit().expect("Failed to get commit");
+        self.repo
+            .set_head(&format!("refs/heads/{}", name))
+            .expect("Failed to set head");
+        self.repo
+            .checkout_tree(commit.as_object(), None)
+            .expect("Failed to checkout");
+    }
 }

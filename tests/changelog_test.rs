@@ -28,7 +28,7 @@ fn test_read_changelog_with_unreleased() {
     assert!(result.is_some());
     let parsed = result.unwrap();
     assert!(parsed.has_unreleased);
-    assert_eq!(parsed.latest_version, Some("1.0.0".to_string()));
+    assert_eq!(parsed.latest_version, Some(Version::new(1, 0, 0)));
 }
 
 #[test]
@@ -39,7 +39,7 @@ fn test_read_changelog_with_versions() {
     assert!(result.is_some());
     let parsed = result.unwrap();
     assert!(!parsed.has_unreleased);
-    assert_eq!(parsed.latest_version, Some("2.0.0".to_string()));
+    assert_eq!(parsed.latest_version, Some(Version::new(2, 0, 0)));
 }
 
 #[test]
@@ -166,4 +166,155 @@ fn test_write_changelog_inserts_before_existing_versions() {
 
     assert!(pos_3 < pos_2);
     assert!(pos_2 < pos_1);
+}
+
+// ============================================================================
+// Error path tests for write_changelog
+// ============================================================================
+
+#[cfg(unix)]
+mod write_failure_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn test_write_changelog_permission_denied_on_new_file() {
+        let temp_dir = common::temp_test_dir();
+
+        // Make directory read-only to prevent file creation
+        fs::set_permissions(temp_dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+        let output_path = temp_dir.path().join("CHANGELOG.md");
+
+        let entries = ChangelogOutput {
+            entries: vec![ChangelogEntry {
+                category: ChangelogCategory::Added,
+                description: "New feature".to_string(),
+            }],
+        };
+
+        let result = write_changelog(&output_path, &entries, &Version::new(1, 0, 0));
+
+        // Restore permissions so temp_dir can be cleaned up
+        fs::set_permissions(temp_dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_string = err.to_string();
+        assert!(
+            err_string.contains("Failed to write changelog"),
+            "Expected write error, got: {}",
+            err_string
+        );
+    }
+
+    #[test]
+    fn test_write_changelog_permission_denied_on_existing_file() {
+        let temp_dir = common::temp_test_dir();
+        let output_path = temp_dir.path().join("CHANGELOG.md");
+
+        // Create existing changelog
+        let initial_content = "# Changelog\n\n## [1.0.0] - 2024-01-01\n\n### Added\n\n- Initial\n";
+        fs::write(&output_path, initial_content).unwrap();
+
+        // Make directory read-only (prevents both backup creation and file write)
+        fs::set_permissions(temp_dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+        let entries = ChangelogOutput {
+            entries: vec![ChangelogEntry {
+                category: ChangelogCategory::Added,
+                description: "New in 2.0".to_string(),
+            }],
+        };
+
+        let result = write_changelog(&output_path, &entries, &Version::new(2, 0, 0));
+
+        // Restore permissions for cleanup
+        fs::set_permissions(temp_dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_string = err.to_string();
+        // Should fail on backup creation since directory is read-only
+        assert!(
+            err_string.contains("Failed to create backup")
+                || err_string.contains("Failed to write changelog"),
+            "Expected backup or write error, got: {}",
+            err_string
+        );
+
+        // Verify original file is intact
+        let content = fs::read_to_string(&output_path).unwrap();
+        assert_eq!(content, initial_content);
+    }
+
+    #[test]
+    fn test_write_changelog_backup_failure_preserves_original() {
+        let temp_dir = common::temp_test_dir();
+        let output_path = temp_dir.path().join("CHANGELOG.md");
+        let backup_path = temp_dir.path().join("CHANGELOG.md.bak");
+
+        // Create existing changelog
+        let initial_content = "# Changelog\n\n## [1.0.0] - 2024-01-01\n\n### Added\n\n- Initial\n";
+        fs::write(&output_path, initial_content).unwrap();
+
+        // Create a directory where the backup file would go (can't copy file over directory)
+        fs::create_dir(&backup_path).unwrap();
+
+        let entries = ChangelogOutput {
+            entries: vec![ChangelogEntry {
+                category: ChangelogCategory::Added,
+                description: "New in 2.0".to_string(),
+            }],
+        };
+
+        let result = write_changelog(&output_path, &entries, &Version::new(2, 0, 0));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_string = err.to_string();
+        assert!(
+            err_string.contains("Failed to create backup"),
+            "Expected backup error, got: {}",
+            err_string
+        );
+
+        // Verify original file is intact
+        let content = fs::read_to_string(&output_path).unwrap();
+        assert_eq!(content, initial_content);
+    }
+
+    #[test]
+    fn test_write_changelog_error_includes_io_error_details() {
+        let temp_dir = common::temp_test_dir();
+
+        // Make directory read-only
+        fs::set_permissions(temp_dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+        let output_path = temp_dir.path().join("CHANGELOG.md");
+
+        let entries = ChangelogOutput {
+            entries: vec![ChangelogEntry {
+                category: ChangelogCategory::Added,
+                description: "Test".to_string(),
+            }],
+        };
+
+        let result = write_changelog(&output_path, &entries, &Version::new(1, 0, 0));
+
+        // Restore permissions
+        fs::set_permissions(temp_dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+
+        // The error should provide context via thiserror's #[source]
+        // The Display impl should show the IO error details
+        let err_string = format!("{}", err);
+        assert!(
+            err_string.contains("Permission denied") || err_string.contains("denied"),
+            "Error should include IO error details: {}",
+            err_string
+        );
+    }
 }

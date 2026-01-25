@@ -1,7 +1,7 @@
 //! Commit range resolution.
 
 use git2::{Oid, Repository};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::error::GitError;
 
@@ -83,17 +83,24 @@ fn find_root_commit(repo: &Repository) -> Result<Oid, GitError> {
     revwalk.push(head_commit.id()).map_err(GitError::RevwalkError)?;
 
     let mut root_oid = head_commit.id();
+    let mut traversal_errors = Vec::new();
 
     for oid_result in revwalk {
         match oid_result {
             Ok(oid) => root_oid = oid,
             Err(e) => {
-                warn!(
-                    "Error during revwalk traversal: {}. Continuing with last valid commit.",
-                    e
-                );
+                debug!("Revwalk error: {}", e);
+                traversal_errors.push(e);
             }
         }
+    }
+
+    if !traversal_errors.is_empty() {
+        warn!(
+            "Encountered {} error(s) during commit traversal. Results may be incomplete. \
+             Run with --verbose for details.",
+            traversal_errors.len()
+        );
     }
 
     Ok(root_oid)

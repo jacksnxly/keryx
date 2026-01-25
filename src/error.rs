@@ -58,8 +58,11 @@ pub enum ClaudeError {
     #[error("Claude CLI exited with code {code}: {stderr}")]
     NonZeroExit { code: i32, stderr: String },
 
-    #[error("All retry attempts failed")]
-    RetriesExhausted,
+    #[error("All retry attempts failed: {0}")]
+    RetriesExhausted(#[source] Box<ClaudeError>),
+
+    #[error("Failed to serialize prompt data: {0}")]
+    SerializationFailed(String),
 }
 
 /// Errors from changelog operations.

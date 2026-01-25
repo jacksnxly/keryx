@@ -52,26 +52,42 @@ pub fn get_token_from_env() -> Result<String, GitHubError> {
 /// Try to get a token from the gh CLI.
 fn get_token_from_gh_cli() -> Option<String> {
     // First check if gh is authenticated
-    let status = Command::new("gh")
-        .args(["auth", "status"])
-        .output()
-        .ok()?;
+    let status = match Command::new("gh").args(["auth", "status"]).output() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("gh CLI not available or failed to execute: {}", e);
+            return None;
+        }
+    };
 
     if !status.status.success() {
+        tracing::debug!(
+            "gh auth status failed: {}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        );
         return None;
     }
 
     // Get the actual token
-    let output = Command::new("gh")
-        .args(["auth", "token"])
-        .output()
-        .ok()?;
+    let output = match Command::new("gh").args(["auth", "token"]).output() {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::debug!("gh auth token command failed to execute: {}", e);
+            return None;
+        }
+    };
 
     if output.status.success() {
         let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !token.is_empty() {
             return Some(token);
         }
+        tracing::debug!("gh auth token returned empty output");
+    } else {
+        tracing::debug!(
+            "gh auth token failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
 
     None

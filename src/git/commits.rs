@@ -1,11 +1,20 @@
 //! Commit fetching and conventional commit parsing.
 
+use std::sync::LazyLock;
+
 use chrono::{DateTime, TimeZone, Utc};
 use git2::{Commit, Repository};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::error::GitError;
+
+/// Regex for parsing conventional commit messages.
+/// Compiled once at first use using LazyLock.
+static COMMIT_REGEX: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
+    regex_lite::Regex::new(r"^(\w+)(?:\(([^)]+)\))?(!)?\s*:\s*")
+        .expect("Invalid commit regex pattern - this is a bug")
+});
 
 /// Conventional commit types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,11 +103,7 @@ pub fn parse_commit_message(message: &str) -> (Option<CommitType>, Option<String
     let breaking_in_footer = message.contains("BREAKING CHANGE:") || message.contains("BREAKING-CHANGE:");
 
     // Pattern: type(scope)!: description or type!: description or type(scope): description or type: description
-    let re_pattern = r"^(\w+)(?:\(([^)]+)\))?(!)?\s*:\s*";
-
-    let re = regex_lite::Regex::new(re_pattern).unwrap();
-
-    if let Some(caps) = re.captures(first_line) {
+    if let Some(caps) = COMMIT_REGEX.captures(first_line) {
         let type_str = caps.get(1).map(|m| m.as_str()).unwrap_or("");
         let scope = caps.get(2).map(|m| m.as_str().to_string());
         let breaking_mark = caps.get(3).is_some();

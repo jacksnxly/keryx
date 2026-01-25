@@ -2,6 +2,7 @@
 
 use git2::Repository;
 use semver::Version;
+use tracing::{debug, warn};
 
 use crate::error::GitError;
 
@@ -41,10 +42,17 @@ pub fn get_all_tags(repo: &Repository) -> Result<Vec<TagInfo>, GitError> {
             let version = get_version_from_tag(&name);
 
             // Resolve tag to commit (handle annotated tags)
-            let resolved_oid = if let Ok(tag_obj) = repo.find_tag(oid) {
-                tag_obj.target_id()
-            } else {
-                oid
+            let resolved_oid = match repo.find_tag(oid) {
+                Ok(tag_obj) => tag_obj.target_id(),
+                Err(e) => {
+                    debug!(
+                        tag = %name,
+                        error = %e,
+                        "Could not resolve annotated tag, using raw OID. \
+                         This is normal for lightweight tags."
+                    );
+                    oid
+                }
             };
 
             tags.push(TagInfo {
@@ -52,6 +60,11 @@ pub fn get_all_tags(repo: &Repository) -> Result<Vec<TagInfo>, GitError> {
                 oid: resolved_oid,
                 version,
             });
+        } else {
+            warn!(
+                "Skipping tag with OID {} - name is not valid UTF-8",
+                oid
+            );
         }
         true // Continue iteration
     })

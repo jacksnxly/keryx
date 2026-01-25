@@ -673,3 +673,37 @@ async fn test_pr_with_no_labels() {
     let prs = result.unwrap();
     assert!(prs[0].labels.is_empty());
 }
+
+// =============================================================================
+// NONZERO PR NUMBER TESTS
+// =============================================================================
+
+#[tokio::test]
+async fn test_skips_zero_pr_number() {
+    let server = MockServer::start().await;
+
+    let merged_at = Utc.with_ymd_and_hms(2024, 6, 15, 12, 0, 0).unwrap();
+    let valid_pr = mock_pr(1, "Valid PR", Some(merged_at), None, vec![]);
+
+    // Create a PR with number 0 (invalid, should be skipped)
+    let mut zero_pr = mock_pr(0, "Zero PR", Some(merged_at), None, vec![]);
+    // Ensure number is 0 in the JSON (mock_pr already sets it, but be explicit)
+    if let Value::Object(ref mut map) = zero_pr {
+        map.insert("number".into(), json!(0));
+    }
+
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(vec![valid_pr, zero_pr]))
+        .mount(&server)
+        .await;
+
+    let client = mock_client(&server).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+
+    assert!(result.is_ok());
+    let prs = result.unwrap();
+    // Only the valid PR should be returned (zero PR is skipped)
+    assert_eq!(prs.len(), 1);
+    assert_eq!(prs[0].title, "Valid PR");
+}

@@ -334,13 +334,13 @@ async fn run_generate(cli: Cli) -> Result<()> {
     let input = ChangelogInput {
         commits,
         pull_requests,
-        previous_version: base_version.map(|v| v.to_string()),
+        previous_version: base_version,
         repository_name: repo_name,
         project_description,
         cli_features,
     };
 
-    let prompt = build_prompt(&input);
+    let prompt = build_prompt(&input).context("Failed to build prompt for Claude")?;
 
     println!("Generating release notes with Claude...");
 

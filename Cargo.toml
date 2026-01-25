@@ -26,7 +26,7 @@ octocrab = "0.41"
 parse-changelog = "0.6"
 
 # Versioning
-semver = "1"
+semver = { version = "1", features = ["serde"] }
 
 # Error handling
 thiserror = "2"

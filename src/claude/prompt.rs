@@ -1,15 +1,17 @@
 //! Prompt construction for Claude.
 
+use semver::Version;
+
+use crate::error::ClaudeError;
 use crate::git::ParsedCommit;
 use crate::github::PullRequest;
-use tracing::error;
 
 /// Input to Claude for changelog generation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChangelogInput {
     pub commits: Vec<ParsedCommit>,
     pub pull_requests: Vec<PullRequest>,
-    pub previous_version: Option<String>,
+    pub previous_version: Option<Version>,
     pub repository_name: String,
     /// Project description (from Cargo.toml or package.json)
     pub project_description: Option<String>,
@@ -21,7 +23,13 @@ pub struct ChangelogInput {
 ///
 /// Follows the spec's prompt structure exactly.
 /// Sanitizes commit messages and PR bodies to prevent prompt injection.
-pub fn build_prompt(input: &ChangelogInput) -> String {
+///
+/// # Errors
+///
+/// Returns `ClaudeError::SerializationFailed` if the commits or PRs cannot be
+/// serialized to JSON. This is a hard error rather than a fallback to ensure
+/// malformed prompts are never sent to Claude.
+pub fn build_prompt(input: &ChangelogInput) -> Result<String, ClaudeError> {
     // Sanitize commits before serializing
     let sanitized_commits: Vec<_> = input.commits.iter().map(|c| {
         let mut commit = c.clone();
@@ -37,14 +45,10 @@ pub fn build_prompt(input: &ChangelogInput) -> String {
         pr
     }).collect();
 
-    let commits_json = serde_json::to_string_pretty(&sanitized_commits).unwrap_or_else(|e| {
-        error!("Failed to serialize commits for prompt: {}", e);
-        String::new()
-    });
-    let prs_json = serde_json::to_string_pretty(&sanitized_prs).unwrap_or_else(|e| {
-        error!("Failed to serialize pull requests for prompt: {}", e);
-        String::new()
-    });
+    let commits_json = serde_json::to_string_pretty(&sanitized_commits)
+        .map_err(|e| ClaudeError::SerializationFailed(format!("commits: {}", e)))?;
+    let prs_json = serde_json::to_string_pretty(&sanitized_prs)
+        .map_err(|e| ClaudeError::SerializationFailed(format!("pull requests: {}", e)))?;
 
     let is_initial_release = input.previous_version.is_none();
     let repo_name = &input.repository_name;
@@ -79,7 +83,7 @@ Ignore docs-only, test-only, and chore commits unless they affect users."#,
         )
     };
 
-    format!(
+    Ok(format!(
         r#"You are generating release notes for a software project.
 
 {context}
@@ -106,7 +110,7 @@ Respond with JSON:
     ...
   ]
 }}"#
-    )
+    ))
 }
 
 /// Maximum allowed length for sanitized input (OWASP recommendation)
@@ -289,13 +293,13 @@ mod tests {
         let input = ChangelogInput {
             commits: vec![],
             pull_requests: vec![],
-            previous_version: Some("1.0.0".to_string()),
+            previous_version: Some(Version::new(1, 0, 0)),
             repository_name: "test-repo".to_string(),
             project_description: None,
             cli_features: None,
         };
 
-        let prompt = build_prompt(&input);
+        let prompt = build_prompt(&input).expect("build_prompt should succeed");
 
         assert!(prompt.contains("You are generating release notes"));
         assert!(prompt.contains("## Commits"));
@@ -315,7 +319,7 @@ mod tests {
             cli_features: Some(vec!["--verbose: Enable verbose output".to_string()]),
         };
 
-        let prompt = build_prompt(&input);
+        let prompt = build_prompt(&input).expect("build_prompt should succeed");
 
         assert!(prompt.contains("INITIAL RELEASE"));
         assert!(prompt.contains("A CLI tool for testing"));
