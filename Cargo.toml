@@ -1,0 +1,43 @@
+[package]
+name = "keryx"
+version = "0.1.0"
+edition = "2021"
+description = "A CLI tool that generates release notes from merged PRs and conventional commits"
+license = "MIT"
+repository = "https://github.com/jacksnxly/keryx"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Git
+git2 = "0.19"
+
+# GitHub
+octocrab = "0.41"
+
+# Changelog
+parse-changelog = "0.6"
+
+# Versioning
+semver = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Retry logic
+backoff = { version = "0.4", features = ["tokio"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Regex for conventional commit parsing
+regex-lite = "0.1"
