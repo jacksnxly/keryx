@@ -1,7 +1,7 @@
 //! keryx - CLI entry point.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 
 use anyhow::{bail, Context, Result};
@@ -48,14 +48,27 @@ impl UpdateChecker {
                 Ok(update_available) => UpdateResult { update_available },
                 Err(e) => {
                     if verbose {
-                        debug!("Update check failed: {}", e);
+                        // Provide actionable error messages based on error content
+                        let error_str = e.to_string().to_lowercase();
+                        if error_str.contains("network") || error_str.contains("connection") || error_str.contains("dns") {
+                            warn!("Update check failed (network error): {}. Check your internet connection.", e);
+                        } else if error_str.contains("parse") || error_str.contains("version") {
+                            warn!("Update check failed (version parse error): {}. This may indicate a corrupted install.", e);
+                        } else if error_str.contains("not found") || error_str.contains("404") {
+                            warn!("Update check failed (release not found): {}. No releases may be available yet.", e);
+                        } else {
+                            warn!("Update check failed: {}. Run with --verbose for more details.", e);
+                        }
                     }
                     UpdateResult { update_available: false }
                 }
             };
 
-            // Send result; ignore error if receiver is dropped
-            let _ = sender.send(result);
+            // Send result to main thread
+            if sender.send(result).is_err() {
+                // Receiver was dropped - main thread exited early, this is expected
+                debug!("Update check completed but main thread already exited");
+            }
         });
 
         UpdateChecker {
@@ -68,16 +81,23 @@ impl UpdateChecker {
     ///
     /// Uses non-blocking try_recv() to check if the update check has
     /// completed. If an update is available, prints the notification.
-    /// All errors are handled silently (disconnected channel, etc.).
+    /// Logs a warning if the update thread terminated unexpectedly.
     fn maybe_notify(&self) {
-        if let Ok(result) = self.receiver.try_recv() {
-            if result.update_available {
+        match self.receiver.try_recv() {
+            Ok(result) if result.update_available => {
                 print_update_notification();
             }
+            Ok(_) => {
+                // No update available - this is normal
+            }
+            Err(TryRecvError::Empty) => {
+                // Update check not finished yet - this is expected for quick commands
+            }
+            Err(TryRecvError::Disconnected) => {
+                // Thread terminated unexpectedly (panic or other failure)
+                warn!("Update checker thread terminated unexpectedly. This may indicate a bug.");
+            }
         }
-        // Silently ignore:
-        // - TryRecvError::Empty (update check not finished yet)
-        // - TryRecvError::Disconnected (thread panicked or channel closed)
     }
 }
 

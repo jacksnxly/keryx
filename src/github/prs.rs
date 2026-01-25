@@ -20,6 +20,23 @@ pub struct PullRequest {
 /// Maximum PR body length to prevent token exhaustion (per spec: 10KB).
 const MAX_BODY_LENGTH: usize = 10 * 1024;
 
+/// Truncate a string to max_len characters, ensuring valid UTF-8 at the boundary.
+///
+/// Unlike byte slicing, this is safe for multi-byte characters (e.g., Japanese, emoji).
+fn truncate_body(body: &str, max_len: usize) -> String {
+    if body.len() <= max_len {
+        return body.to_string();
+    }
+
+    // Find a valid character boundary at or before max_len
+    let mut end = max_len;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    format!("{}... [truncated]", &body[..end])
+}
+
 /// Fetch merged PRs from a GitHub repository using a token.
 ///
 /// This is the main entry point that constructs the octocrab client.
@@ -117,13 +134,7 @@ pub async fn fetch_merged_prs_with_client(
             }
 
             // Truncate body per spec (10KB max)
-            let body = pr.body.map(|b| {
-                if b.len() > MAX_BODY_LENGTH {
-                    format!("{}... [truncated]", &b[..MAX_BODY_LENGTH])
-                } else {
-                    b
-                }
-            });
+            let body = pr.body.map(|b| truncate_body(&b, MAX_BODY_LENGTH));
 
             let labels = pr
                 .labels
@@ -223,5 +234,72 @@ mod tests {
     fn test_parse_invalid_url() {
         let result = parse_github_remote("https://gitlab.com/owner/repo");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_truncate_body_short_string() {
+        let body = "Hello, world!";
+        let result = truncate_body(body, 100);
+        assert_eq!(result, "Hello, world!");
+    }
+
+    #[test]
+    fn test_truncate_body_exact_length() {
+        let body = "Hello";
+        let result = truncate_body(body, 5);
+        assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn test_truncate_body_ascii_overflow() {
+        let body = "Hello, world!";
+        let result = truncate_body(body, 5);
+        assert_eq!(result, "Hello... [truncated]");
+    }
+
+    #[test]
+    fn test_truncate_body_multibyte_japanese() {
+        // Each Japanese character is 3 bytes
+        // "あいう" = 9 bytes total
+        let body = "あいう";
+        // Truncate at 5 bytes - should back up to byte 3 (end of first char)
+        let result = truncate_body(body, 5);
+        assert_eq!(result, "あ... [truncated]");
+        // Verify result is valid UTF-8
+        assert!(result.is_ascii() || std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_truncate_body_multibyte_emoji() {
+        // Emoji can be 4 bytes
+        // "😀😁😂" = 12 bytes total
+        let body = "😀😁😂";
+        // Truncate at 6 bytes - should back up to byte 4 (end of first emoji)
+        let result = truncate_body(body, 6);
+        assert_eq!(result, "😀... [truncated]");
+    }
+
+    #[test]
+    fn test_truncate_body_mixed_content() {
+        // Mix of ASCII and multi-byte
+        let body = "Hello あいう World";
+        // "Hello " = 6 bytes, "あ" = 3 bytes = 9 bytes at "Hello あ"
+        let result = truncate_body(body, 10);
+        // Should truncate after "Hello あ" (9 bytes), not mid-character
+        assert_eq!(result, "Hello あ... [truncated]");
+    }
+
+    #[test]
+    fn test_truncate_body_large_multibyte() {
+        // Test with many multi-byte characters exceeding MAX_BODY_LENGTH
+        let body = "あ".repeat(5000); // 15000 bytes
+        let result = truncate_body(&body, 10000);
+        // Should not panic, should be valid UTF-8
+        assert!(result.ends_with("... [truncated]"));
+        // Verify it's valid UTF-8
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+        // Should have truncated to approximately 3333 characters (9999 bytes) or less
+        let truncated_part = result.strip_suffix("... [truncated]").unwrap();
+        assert!(truncated_part.len() <= 10000);
     }
 }

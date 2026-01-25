@@ -3,6 +3,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use git2::{Commit, Repository};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::error::GitError;
 
@@ -59,10 +60,17 @@ impl ParsedCommit {
         let hash = commit.id().to_string();
         let message = commit.message().unwrap_or("").to_string();
         let time = commit.time();
-        let timestamp = Utc
-            .timestamp_opt(time.seconds(), 0)
-            .single()
-            .unwrap_or_else(Utc::now);
+        let timestamp = match Utc.timestamp_opt(time.seconds(), 0).single() {
+            Some(ts) => ts,
+            None => {
+                warn!(
+                    "Commit {} has invalid timestamp (seconds={}), using current time as fallback",
+                    hash,
+                    time.seconds()
+                );
+                Utc::now()
+            }
+        };
 
         let (commit_type, scope, breaking) = parse_commit_message(&message);
 
