@@ -6,23 +6,23 @@ use tokio::process::Command;
 use crate::error::ClaudeError;
 
 /// Check if Claude Code CLI is installed and accessible.
+///
+/// Uses the `which` crate for cross-platform executable detection.
+/// Works on Windows (where.exe), Unix (which), and WASI.
 pub async fn check_claude_installed() -> Result<(), ClaudeError> {
-    let output = Command::new("which")
-        .arg("claude")
-        .output()
-        .await
-        .map_err(|e| ClaudeError::SpawnFailed(e))?;
-
-    if !output.status.success() {
+    // Use `which` crate for cross-platform executable detection
+    // This replaces the Unix-only `which` command with a solution that
+    // works on Windows, macOS, Linux, and WASI
+    if which::which("claude").is_err() {
         return Err(ClaudeError::NotInstalled);
     }
 
-    // Verify it runs (check version)
+    // Verify it actually runs (check version)
     let version_check = Command::new("claude")
         .arg("--version")
         .output()
         .await
-        .map_err(|e| ClaudeError::SpawnFailed(e))?;
+        .map_err(ClaudeError::SpawnFailed)?;
 
     if !version_check.status.success() {
         return Err(ClaudeError::NotInstalled);

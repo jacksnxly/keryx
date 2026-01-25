@@ -6,35 +6,36 @@
 
 ## Session Objective
 
-Complete Phase 3 (Implementation) for keryx - build the full Rust CLI tool following the approved technical specification.
+Continue development of keryx CLI tool:
+1. Fix code review issues from Phase 4 audit
+2. Organize unit tests into proper structure
+3. Set up cargo-dist for binary distribution
+4. Implement self-update notification and command
 
 ## Files Modified
 
 ### Created
-- `Cargo.toml` - Project manifest with all dependencies per spec
-- `src/main.rs` - CLI entry point with clap argument parsing and main workflow
-- `src/lib.rs` - Public API re-exports
-- `src/error.rs` - Error types using thiserror (GitError, GitHubError, ClaudeError, ChangelogError, VersionError)
-- `src/git/mod.rs` - Git module exports
-- `src/git/commits.rs` - Commit fetching and conventional commit parsing
-- `src/git/tags.rs` - Tag enumeration and semver version extraction
-- `src/git/range.rs` - Commit range resolution (tag to HEAD, hash to hash, root to HEAD)
-- `src/github/mod.rs` - GitHub module exports
-- `src/github/auth.rs` - GitHub authentication (gh CLI → GITHUB_TOKEN → GH_TOKEN fallback)
-- `src/github/prs.rs` - PR fetching via octocrab with rate limit handling
-- `src/claude/mod.rs` - Claude module exports
-- `src/claude/subprocess.rs` - Claude CLI spawning via tokio::process::Command
-- `src/claude/prompt.rs` - Prompt construction following spec template
-- `src/claude/retry.rs` - Exponential backoff retry logic (3 retries, 1s base, 30s max)
-- `src/changelog/mod.rs` - Changelog module exports
-- `src/changelog/format.rs` - Keep a Changelog types and formatting utilities
-- `src/changelog/parser.rs` - Changelog reading using parse-changelog crate
-- `src/changelog/writer.rs` - Changelog writing with string templates and backup
-- `src/version/mod.rs` - Version module exports
-- `src/version/bump.rs` - Semver calculation from conventional commits
+- `.github/workflows/release.yml` - GitHub Actions workflow for automated releases
+- `dist-workspace.toml` - cargo-dist configuration for binary distribution
+- `LICENSE` - MIT license file
+- `tests/common/mod.rs` - Shared test utilities
+- `tests/fixtures/changelogs/empty.md` - Empty changelog fixture
+- `tests/fixtures/changelogs/with_unreleased.md` - Changelog with Unreleased section
+- `tests/fixtures/changelogs/with_versions.md` - Changelog with multiple versions
+- `tests/fixtures/responses/success_empty.json` - Mock Claude empty response
+- `tests/fixtures/responses/success_with_entries.json` - Mock Claude response with entries
+- `tests/fixtures/responses/error_response.json` - Mock Claude error response
+- `tests/fixtures/responses/malformed.json` - Mock malformed response
+- `tests/changelog_test.rs` - Integration tests for changelog parsing/writing (10 tests)
+- `tests/commit_parsing_test.rs` - Integration tests for conventional commits (10 tests)
+- `tests/response_parsing_test.rs` - Integration tests for Claude response parsing (5 tests)
+- `tests/version_test.rs` - Integration tests for version calculation (12 tests)
 
 ### Modified
-- None (all files created fresh this session)
+- `Cargo.toml` - Added tempfile dev-dependency, axoupdater dependency, profile.dist
+- `README.md` - Complete rewrite with installation instructions, usage, features
+- `src/main.rs` - Added subcommand structure, update command, background update check
+- `src/claude/prompt.rs` - Applied input sanitization to commit/PR data
 
 ### Deleted
 - None
@@ -43,78 +44,61 @@ Complete Phase 3 (Implementation) for keryx - build the full Rust CLI tool follo
 
 ### Main Changes
 
-Implemented the complete keryx CLI tool from scratch following the technical specification:
+1. **Input Sanitization Fix** (from code review)
+   - `sanitize_for_prompt()` now called on commit messages, PR titles, and PR bodies
+   - Prevents potential prompt injection attacks
+   - Located in `src/claude/prompt.rs:19-33`
 
-1. **CLI Interface** - clap v4 with derive macros providing:
-   - `--set-version` - explicit version override
-   - `--from`/`--to` - commit range specification
-   - `-o/--output` - changelog path (default: CHANGELOG.md)
-   - `--no-prs` - skip GitHub PR fetching
-   - `--dry-run` - preview without writing
+2. **Test Organization**
+   - Created `tests/` directory with integration tests
+   - Added test fixtures for changelogs and Claude responses
+   - Total tests: 75 (38 unit + 37 integration)
+   - Structure:
+     ```
+     tests/
+     ├── common/mod.rs
+     ├── fixtures/
+     │   ├── changelogs/
+     │   └── responses/
+     ├── changelog_test.rs
+     ├── commit_parsing_test.rs
+     ├── response_parsing_test.rs
+     └── version_test.rs
+     ```
 
-2. **Git Integration** - git2-rs for all operations:
-   - Conventional commit parsing (type, scope, breaking flag)
-   - Tag enumeration and semver version extraction
-   - Commit range resolution with fallback to root commit
+3. **cargo-dist Setup**
+   - Configured for GitHub releases with shell/PowerShell installers
+   - Targets: macOS (arm64/x86_64), Linux (arm64/x86_64), Windows (x86_64)
+   - Artifacts generated on release:
+     - `keryx-installer.sh` - Unix install script
+     - `keryx-installer.ps1` - Windows install script
+     - Platform-specific tarballs/zips
 
-3. **GitHub Integration** - octocrab for PR fetching:
-   - Auth chain: gh CLI → GITHUB_TOKEN → GH_TOKEN
-   - PR body truncation (10KB max) per spec
-   - Rate limit detection with immediate failure
-
-4. **Claude Integration** - subprocess spawning:
-   - Check claude CLI installation
-   - Prompt construction per spec template
-   - JSON response parsing with markdown extraction
-   - 3 retries with exponential backoff (backoff crate)
-
-5. **Changelog Operations** - parse-changelog + templates:
-   - Reading existing changelogs
-   - Keep a Changelog v1.1.0 format compliance
-   - Backup before modification (.changelog.md.bak)
-   - Unreleased section handling
-
-6. **Version Management** - semver crate:
-   - Auto-bumping based on commit types
-   - Breaking changes → major, feat → minor, fix → patch
+4. **Self-Update System**
+   - Added `keryx update` subcommand using axoupdater
+   - Background update check on startup (non-blocking notification)
+   - Integrates with cargo-dist install receipts
+   - Fallback to manual install command on failure
 
 ### Technical Decisions
 
 | Decision | Choice | Reasoning |
 |----------|--------|-----------|
-| Regex | regex-lite | Added for conventional commit parsing (not in spec but required) |
-| Version flag | `--set-version` | Avoid conflict with clap's built-in `-V/--version` |
-| Error display | eprintln for warnings | Non-blocking PR fetch failures shown as warnings |
+| Test structure | Separate `tests/` directory | Better organization, fixtures separate from code |
+| Distribution | cargo-dist | Industry standard for Rust, auto-generates installers |
+| Self-update | axoupdater library | Native integration with cargo-dist receipts |
+| Update check | Background thread | Non-blocking, doesn't slow down main command |
 
 ### Code Structure
 
 ```
-src/
-├── main.rs           # CLI entry, clap parsing, main workflow
-├── lib.rs            # Public API re-exports
-├── error.rs          # thiserror error types
-├── git/
-│   ├── mod.rs
-│   ├── commits.rs    # Conventional commit parsing
-│   ├── tags.rs       # Tag and version detection
-│   └── range.rs      # Commit range resolution
-├── github/
-│   ├── mod.rs
-│   ├── auth.rs       # gh CLI / env var auth
-│   └── prs.rs        # PR fetching via octocrab
-├── claude/
-│   ├── mod.rs
-│   ├── subprocess.rs # Claude CLI spawning
-│   ├── prompt.rs     # Prompt construction
-│   └── retry.rs      # Exponential backoff
-├── changelog/
-│   ├── mod.rs
-│   ├── format.rs     # Types and constants
-│   ├── parser.rs     # parse-changelog integration
-│   └── writer.rs     # String template output
-└── version/
-    ├── mod.rs
-    └── bump.rs       # Semver calculation
+src/main.rs changes:
+├── Cli struct now has optional subcommand
+├── Commands enum with Update variant
+├── check_for_updates_background() - spawns thread for update check
+├── check_and_notify_update() - displays notification box if update available
+├── run_update() - performs self-update via axoupdater
+└── run_generate() - original changelog generation (moved from main)
 ```
 
 ## Workflow Progress
@@ -123,58 +107,41 @@ src/
 |-------|----------|--------|
 | Brief | .agent/briefs/BRIEF-keryx-release-notes-2025-01-25.md | Complete |
 | Spec | .agent/specs/SPEC-keryx-release-notes-2025-01-25.md | Complete |
-| Implementation | src/**/*.rs (20 files) | **Complete** |
-| Review | N/A | Pending |
+| Implementation | src/**/*.rs | Complete |
+| Review | Code review audit | Passed (fixes applied) |
 
 ## Testing & Validation
 
-- **35 unit tests** - all passing
-- **cargo check** - compiles without warnings
-- **cargo build --release** - binary built successfully
-- **CLI help** - verified output matches spec
-
-Test coverage includes:
-- Conventional commit parsing (feat, fix, scope, breaking)
-- Semver version bumping
-- GitHub URL parsing (SSH and HTTPS)
-- Changelog formatting and insertion
-- JSON extraction from Claude responses
+- **75 tests** - all passing
+- **cargo check** - no warnings
+- **cargo build --release** - binary builds successfully
+- **CLI tested** - `keryx --help`, `keryx --dry-run`, `keryx update` all work
+- **Update command** - Works but shows "not configured" (expected without GitHub release)
 
 ## Current State
 
-Implementation is **complete** and ready for review. The binary is available at `./target/release/keryx`. All 15 implementation constraints from the spec have been satisfied:
-
-1. ✅ clap v4 with derive macros
-2. ✅ git2-rs for git operations
-3. ✅ octocrab for GitHub API
-4. ✅ tokio runtime
-5. ✅ parse-changelog for reading
-6. ✅ string templates for writing
-7. ✅ thiserror + anyhow hybrid
-8. ✅ GitHub auth order (gh CLI → env vars)
-9. ✅ 3 retries with exponential backoff
-10. ✅ Rate limit fail-fast
-11. ✅ semver crate
-12. ✅ backoff crate with tokio
-13. ✅ Claude CLI via tokio::process::Command
-14. ✅ Keep a Changelog v1.1.0 format
-15. ✅ Unreleased section handling
+Implementation is complete and ready for first release. All changes are uncommitted:
+- Code review fixes applied
+- Tests organized with fixtures
+- cargo-dist configured for distribution
+- Self-update system implemented
 
 ## Blockers/Issues
 
-- None blocking progress
-- Files not yet committed to git (unstaged)
+- Update check runs in background thread but may print during command output (cosmetic)
+- `keryx update` shows "not properly configured" until first GitHub release exists
 
 ## Next Steps
 
-1. **Run `/vctk-review-code`** - Audit implementation against spec
-2. **Commit changes** - Stage and commit all new files
-3. **Integration testing** - Test full workflow with real repository
-4. **Create initial CHANGELOG.md** - Use keryx to generate its own changelog
+1. **Commit all changes** - Stage and commit the session work
+2. **Push to GitHub** - Push to main branch
+3. **Create first release** - Tag v0.1.0 and push to trigger GitHub Actions
+4. **Test installation** - Verify curl install script works after release
+5. **Test self-update** - Install old version, verify `keryx update` works
 
 ## Related Documentation
 
 - `.agent/briefs/BRIEF-keryx-release-notes-2025-01-25.md` - Feature requirements
 - `.agent/specs/SPEC-keryx-release-notes-2025-01-25.md` - Technical specification
-- `research.md` - Changelog best practices research
-- `CLAUDE.md` - Project instructions and vibe-coding workflow
+- `README.md` - User documentation with installation/usage
+- `CHANGELOG.md` - Release notes for v0.1.0

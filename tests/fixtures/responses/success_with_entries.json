@@ -1,0 +1,6 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "result": "```json\n{\"entries\": [{\"category\": \"Added\", \"description\": \"New authentication system with OAuth2 support\"}, {\"category\": \"Fixed\", \"description\": \"Memory leak in connection pool\"}, {\"category\": \"Changed\", \"description\": \"Improved error messages for API failures\"}]}\n```"
+}

@@ -2,10 +2,12 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use clap::Parser;
+use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
 use git2::Repository;
 use semver::Version;
+use tracing::{debug, warn, Level};
+use tracing_subscriber::FmtSubscriber;
 
 use keryx::changelog::{write_changelog, writer::generate_summary};
 use keryx::claude::{build_prompt, check_claude_installed, generate_with_retry, prompt::ChangelogInput};
@@ -19,35 +21,147 @@ use keryx::version::calculate_next_version;
 #[command(about = "Generate release notes from commits and PRs using Claude")]
 #[command(version)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Explicit version to use (overrides auto-detection)
-    #[arg(long = "set-version")]
-    version: Option<Version>,
+    #[arg(long = "set-version", global = true)]
+    set_version: Option<Version>,
 
     /// Start of commit range (tag, commit hash, or branch)
-    #[arg(long)]
+    #[arg(long, global = true)]
     from: Option<String>,
 
     /// End of commit range (defaults to HEAD)
-    #[arg(long, default_value = "HEAD")]
+    #[arg(long, default_value = "HEAD", global = true)]
     to: String,
 
     /// Path to changelog file
-    #[arg(short = 'o', long, default_value = "CHANGELOG.md")]
+    #[arg(short = 'o', long, default_value = "CHANGELOG.md", global = true)]
     output: PathBuf,
 
     /// Skip GitHub PR fetching
-    #[arg(long)]
+    #[arg(long, global = true)]
     no_prs: bool,
 
     /// Dry run - print changelog without writing
-    #[arg(long)]
+    #[arg(long, global = true)]
     dry_run: bool,
+
+    /// Strict mode - fail on any errors instead of graceful degradation
+    #[arg(long, global = true)]
+    strict: bool,
+
+    /// Enable verbose/debug logging
+    #[arg(short, long, global = true)]
+    verbose: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Update keryx to the latest version
+    Update,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Initialize tracing subscriber for logging
+    let log_level = if cli.verbose { Level::DEBUG } else { Level::WARN };
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(log_level)
+        .with_writer(std::io::stderr)
+        .without_time()
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("Failed to set tracing subscriber");
+
+    // Check for updates in background (non-blocking notification)
+    check_for_updates_background(cli.verbose);
+
+    match cli.command {
+        Some(Commands::Update) => run_update().await,
+        None => run_generate(cli).await,
+    }
+}
+
+/// Check for updates in background and print notification if available.
+///
+/// Errors are logged at debug level instead of being silently ignored.
+/// Use `--verbose` flag to see update check errors.
+fn check_for_updates_background(verbose: bool) {
+    // Spawn a background task to check for updates
+    // This is fire-and-forget - we don't wait for it
+    std::thread::spawn(move || {
+        if let Err(e) = check_and_notify_update() {
+            // Log errors at debug level for troubleshooting (visible with --verbose)
+            // This replaces silent error swallowing with proper logging
+            if verbose {
+                debug!("Update check failed: {}", e);
+            }
+        }
+    });
+}
+
+/// Check if an update is available and print a notification.
+fn check_and_notify_update() -> Result<(), Box<dyn std::error::Error>> {
+    use axoupdater::{AxoUpdater, Version};
+
+    let current_version: Version = env!("CARGO_PKG_VERSION").parse()?;
+
+    let mut updater = AxoUpdater::new_for("keryx");
+    updater.set_current_version(current_version)?;
+
+    // Only check, don't update
+    if updater.is_update_needed_sync()? {
+        eprintln!();
+        eprintln!("\x1b[33m╭───────────────────────────────────────────────╮\x1b[0m");
+        eprintln!("\x1b[33m│\x1b[0m  A new version of keryx is available!        \x1b[33m│\x1b[0m");
+        eprintln!("\x1b[33m│\x1b[0m  Run \x1b[36mkeryx update\x1b[0m to upgrade                 \x1b[33m│\x1b[0m");
+        eprintln!("\x1b[33m╰───────────────────────────────────────────────╯\x1b[0m");
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+/// Run the self-update command.
+async fn run_update() -> Result<()> {
+    use axoupdater::{AxoUpdater, Version};
+
+    println!("Checking for updates...");
+
+    let current_version: Version = env!("CARGO_PKG_VERSION").parse()
+        .context("Failed to parse current version")?;
+
+    let mut updater = AxoUpdater::new_for("keryx");
+    updater.set_current_version(current_version)?;
+
+    // Enable output from the installer
+    updater.enable_installer_output();
+
+    // Use async version since we're in a tokio runtime
+    match updater.run().await {
+        Ok(Some(result)) => {
+            println!("\n\x1b[32m✓ Successfully updated keryx to v{}\x1b[0m", result.new_version);
+        }
+        Ok(None) => {
+            println!("keryx is already up to date (v{})", env!("CARGO_PKG_VERSION"));
+        }
+        Err(e) => {
+            eprintln!("\x1b[31mFailed to update: {}\x1b[0m", e);
+            eprintln!("\nYou can manually update by running:");
+            eprintln!("  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jacksnxly/keryx/releases/latest/download/keryx-installer.sh | sh");
+            return Err(e.into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Run the changelog generation command.
+async fn run_generate(cli: Cli) -> Result<()> {
     // Step 1: Check prerequisites
     check_claude_installed()
         .await
@@ -90,7 +204,26 @@ async fn main() -> Result<()> {
                 prs
             }
             Err(e) => {
-                eprintln!("Warning: Could not fetch PRs: {}. Continuing with commits only.", e);
+                // Issue #4 fix: Don't silently mask GitHub API failures
+                // In strict mode, fail fast. Otherwise, warn clearly about impact.
+                if cli.strict {
+                    bail!(
+                        "GitHub API error: {}. \n\
+                        Hint: Use --no-prs to skip PR fetching, or check your GitHub token.",
+                        e
+                    );
+                }
+
+                // Warn clearly about the impact (changelog may be incomplete)
+                warn!("GitHub API error: {}", e);
+                eprintln!();
+                eprintln!("\x1b[33m⚠ Warning: Could not fetch pull requests\x1b[0m");
+                eprintln!("  Error: {}", e);
+                eprintln!("  Impact: Changelog will be generated from commits only (may be incomplete)");
+                eprintln!("  Fix: Set GITHUB_TOKEN or run `gh auth login`");
+                eprintln!("  Hint: Use --strict to fail instead of continuing with partial data");
+                eprintln!();
+
                 Vec::new()
             }
         }
@@ -98,7 +231,7 @@ async fn main() -> Result<()> {
 
     // Step 6: Determine version
     let base_version = get_latest_tag(&repo)?.and_then(|t| t.version);
-    let next_version = cli.version.unwrap_or_else(|| {
+    let next_version = cli.set_version.unwrap_or_else(|| {
         calculate_next_version(base_version.as_ref(), &commits)
     });
 

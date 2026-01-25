@@ -1,0 +1,6 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "result": "```json\n{\"entries\": []}\n```\n\nNo user-facing changes found."
+}

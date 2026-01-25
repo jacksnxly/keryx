@@ -41,3 +41,21 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Regex for conventional commit parsing
 regex-lite = "0.1"
+
+# Cross-platform executable detection
+which = "7"
+
+# Logging/tracing for background tasks
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Self-update support (integrates with cargo-dist)
+axoupdater = { version = "0.9", default-features = false, features = ["github_releases", "blocking"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

@@ -1,0 +1,6 @@
+{
+  "type": "result",
+  "subtype": "error",
+  "is_error": true,
+  "result": "Rate limit exceeded. Please try again later."
+}
