@@ -24,6 +24,18 @@ powershell -ExecutionPolicy ByPass -c "irm https://github.com/jacksnxly/keryx/re
 cargo install --git https://github.com/jacksnxly/keryx
 ```
 
+### Uninstall
+
+**macOS / Linux:**
+```bash
+which keryx && rm $(which keryx)
+```
+
+**Windows (PowerShell):**
+```powershell
+Remove-Item (Get-Command keryx).Source
+```
+
 ### Prerequisites
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) must be installed and authenticated
