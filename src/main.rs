@@ -11,7 +11,7 @@ use semver::Version;
 use tracing::{debug, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use keryx::changelog::{write_changelog, writer::generate_summary};
+use keryx::changelog::{parser::read_changelog, write_changelog, writer::generate_summary};
 use keryx::claude::{build_prompt, check_claude_installed, generate_with_retry, prompt::ChangelogInput};
 use keryx::git::{commits::fetch_commits, range::resolve_range, tags::get_latest_tag};
 use keryx::github::{auth::get_github_token, prs::{fetch_merged_prs, parse_github_remote}};
@@ -137,6 +137,10 @@ struct Cli {
     /// Strict mode - fail on any errors instead of graceful degradation
     #[arg(long, global = true)]
     strict: bool,
+
+    /// Force overwrite if version already exists in changelog
+    #[arg(long, global = true)]
+    force: bool,
 
     /// Enable verbose/debug logging
     #[arg(short, long, global = true)]
@@ -316,6 +320,26 @@ async fn run_generate(cli: Cli) -> Result<()> {
         base_version.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
         next_version
     );
+
+    // Step 6b: Check if version already exists in changelog
+    if let Some(parsed) = read_changelog(&cli.output)
+        .context("Failed to read existing changelog")?
+    {
+        if parsed.has_version(&next_version) {
+            if cli.force {
+                eprintln!(
+                    "\x1b[33m⚠ Warning: Version {} already exists in changelog, overwriting due to --force\x1b[0m",
+                    next_version
+                );
+            } else {
+                bail!(
+                    "Version {} already exists in {}. Use --force to overwrite, or use --set-version to specify a different version.",
+                    next_version,
+                    cli.output.display()
+                );
+            }
+        }
+    }
 
     // Step 7: Build prompt and call Claude
     let repo_name = get_repo_name(&repo).unwrap_or_else(|| "repository".to_string());

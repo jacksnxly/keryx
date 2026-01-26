@@ -79,6 +79,9 @@ pub enum ChangelogError {
 
     #[error("Failed to create backup: {0}")]
     BackupFailed(#[source] std::io::Error),
+
+    #[error("Version {0} already exists in changelog. Use --force to overwrite.")]
+    VersionAlreadyExists(String),
 }
 
 /// Errors from version operations.

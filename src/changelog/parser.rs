@@ -11,7 +11,15 @@ use crate::error::ChangelogError;
 pub struct ParsedChangelog {
     pub has_unreleased: bool,
     pub latest_version: Option<Version>,
+    pub versions: Vec<Version>,
     pub raw_content: String,
+}
+
+impl ParsedChangelog {
+    /// Check if a specific version already exists in the changelog.
+    pub fn has_version(&self, version: &Version) -> bool {
+        self.versions.contains(version)
+    }
 }
 
 /// Read and parse an existing changelog file.
@@ -28,18 +36,23 @@ pub fn read_changelog(path: &Path) -> Result<Option<ParsedChangelog>, ChangelogE
     let has_unreleased = changelog.get("Unreleased").is_some()
         || changelog.get("unreleased").is_some();
 
-    // Find the latest versioned release
-    let latest_version = changelog
+    // Collect all versions from the changelog
+    let versions: Vec<Version> = changelog
         .iter()
-        .find(|(title, _)| {
+        .filter(|(title, _)| {
             let t = title.to_lowercase();
             t != "unreleased" && !t.is_empty()
         })
-        .and_then(|(title, _)| extract_version_from_title(title));
+        .filter_map(|(title, _)| extract_version_from_title(title))
+        .collect();
+
+    // The latest version is the first one (changelogs are ordered newest first)
+    let latest_version = versions.first().cloned();
 
     Ok(Some(ParsedChangelog {
         has_unreleased,
         latest_version,
+        versions,
         raw_content: content,
     }))
 }
@@ -140,5 +153,24 @@ mod tests {
         let pos = find_insertion_point(content);
         assert!(pos > 0);
         assert!(content[pos..].starts_with("## [1.0.0]"));
+    }
+
+    #[test]
+    fn test_has_version() {
+        let changelog = ParsedChangelog {
+            has_unreleased: false,
+            latest_version: Some(Version::new(1, 2, 0)),
+            versions: vec![
+                Version::new(1, 2, 0),
+                Version::new(1, 1, 0),
+                Version::new(1, 0, 0),
+            ],
+            raw_content: String::new(),
+        };
+
+        assert!(changelog.has_version(&Version::new(1, 2, 0)));
+        assert!(changelog.has_version(&Version::new(1, 0, 0)));
+        assert!(!changelog.has_version(&Version::new(2, 0, 0)));
+        assert!(!changelog.has_version(&Version::new(1, 1, 1)));
     }
 }
