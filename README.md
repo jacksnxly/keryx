@@ -51,6 +51,24 @@ keryx --from v0.1.0 --to HEAD
 keryx -o RELEASES.md
 ```
 
+### Initialize a New Changelog
+
+For existing projects without a changelog:
+
+```bash
+# Create empty changelog template
+keryx init
+
+# Generate changelog with all commits as [Unreleased]
+keryx init --unreleased
+
+# Build complete changelog from git tag history
+keryx init --from-history
+
+# Preview without writing
+keryx init --from-history --dry-run
+```
+
 ## How It Works
 
 1. **Analyzes commits** - Parses conventional commits (feat, fix, etc.) since the last tag
@@ -79,6 +97,14 @@ keryx uses sensible defaults with no configuration required. All options are ava
 | `-o, --output` | Changelog file path | `CHANGELOG.md` |
 | `--no-prs` | Skip GitHub PR fetching | `false` |
 | `--dry-run` | Preview without writing | `false` |
+
+### Init Command Flags
+
+| Flag | Description |
+|------|-------------|
+| `--unreleased` | Generate entries from all commits into [Unreleased] section |
+| `--from-history` | Generate entries for each existing git tag |
+| `--force` | Overwrite if version already exists in changelog |
 
 ## License
 
