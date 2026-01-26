@@ -5,6 +5,7 @@ use semver::Version;
 use crate::error::ClaudeError;
 use crate::git::ParsedCommit;
 use crate::github::PullRequest;
+use crate::verification::VerificationEvidence;
 
 /// Input to Claude for changelog generation.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -110,6 +111,68 @@ Respond with JSON:
     ...
   ]
 }}"#
+    ))
+}
+
+/// Build the verification prompt to validate and correct changelog entries.
+///
+/// This prompt asks Claude to review draft entries against codebase evidence
+/// and correct any inaccuracies or hallucinations.
+pub fn build_verification_prompt(
+    draft_entries_json: &str,
+    evidence: &VerificationEvidence,
+) -> Result<String, ClaudeError> {
+    let evidence_json = serde_json::to_string_pretty(evidence)
+        .map_err(|e| ClaudeError::SerializationFailed(format!("evidence: {}", e)))?;
+
+    Ok(format!(
+        r#"You are verifying changelog entries against codebase evidence to catch hallucinations and inaccuracies.
+
+## Draft Changelog Entries (to be verified)
+{draft_entries_json}
+
+## Codebase Evidence
+{evidence_json}
+
+## Verification Instructions
+
+For each entry, check:
+
+1. **Keyword Verification**: Do the `keyword_matches` confirm the feature exists in the codebase?
+   - If `files_found` is empty for key terms, the feature may not exist
+   - If `appears_complete` is false, the feature may be a stub/placeholder
+
+2. **Count Accuracy**: Do the `count_checks` match?
+   - If `matches` is false, correct the number (e.g., "8 templates" → "5 templates")
+
+3. **Stub Detection**: Check `stub_indicators`
+   - If TODO/unimplemented markers exist near the feature, it may be incomplete
+   - Consider downgrading "Added X" to "Added X scaffolding" or removing entirely
+
+4. **Confidence Assessment**: Use the `confidence` field as a guide
+   - "low" confidence entries need extra scrutiny
+   - Consider removing entries with low confidence and no supporting evidence
+
+## Output
+
+Return corrected entries in the same JSON format. For each entry:
+- Keep it if evidence supports it
+- Modify it if evidence shows inaccuracies (wrong counts, incomplete features)
+- Remove it if no evidence supports it (likely hallucination)
+- Add a `_verification_note` field explaining any changes
+
+{{
+  "entries": [
+    {{"category": "Added", "description": "...", "_verification_note": "Verified: found in 5 files"}},
+    {{"category": "Added", "description": "5 preset templates (corrected from 8)", "_verification_note": "Count corrected based on LAYOUT_TEMPLATES array"}},
+    ...
+  ],
+  "removed_entries": [
+    {{"original": "...", "reason": "No evidence found in codebase - likely hallucination"}}
+  ]
+}}
+
+Be conservative: if uncertain, keep the entry but add a note. Only remove entries with clear evidence of hallucination."#
     ))
 }
 

@@ -12,10 +12,11 @@ use tracing::{debug, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use keryx::changelog::{parser::read_changelog, write_changelog, writer::generate_summary};
-use keryx::claude::{build_prompt, check_claude_installed, generate_with_retry, prompt::ChangelogInput};
+use keryx::claude::{build_prompt, build_verification_prompt, check_claude_installed, generate_with_retry, prompt::ChangelogInput};
 use keryx::changelog::format::CHANGELOG_HEADER;
 use keryx::git::{commits::fetch_commits, range::{find_root_commit, resolve_range}, tags::{get_all_tags, get_latest_tag}};
 use keryx::github::{auth::get_github_token, prs::{fetch_merged_prs, parse_github_remote}};
+use keryx::verification::gather_verification_evidence;
 use keryx::version::calculate_next_version;
 
 /// Result from the background update check.
@@ -150,6 +151,10 @@ struct Cli {
     /// Enable verbose/debug logging
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Skip verification pass (faster but may include inaccuracies)
+    #[arg(long, global = true)]
+    no_verify: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -190,7 +195,7 @@ async fn main() -> Result<()> {
     let result = match cli.command {
         Some(Commands::Update) => run_update().await,
         Some(Commands::Init { unreleased, from_history }) => {
-            run_init(&cli.output, cli.dry_run, cli.no_prs, cli.strict, unreleased, from_history, cli.pr_limit).await
+            run_init(&cli.output, cli.dry_run, cli.no_prs, cli.strict, unreleased, from_history, cli.pr_limit, cli.no_verify, cli.verbose).await
         }
         None => run_generate(cli).await,
     };
@@ -269,6 +274,8 @@ async fn run_init(
     unreleased: bool,
     from_history: bool,
     pr_limit: Option<usize>,
+    no_verify: bool,
+    verbose: bool,
 ) -> Result<()> {
     // Check if changelog already exists
     if output.exists() && !dry_run {
@@ -283,9 +290,9 @@ async fn run_init(
         .context("Not a git repository. Run keryx from within a git repository.")?;
 
     if unreleased {
-        run_init_unreleased(&repo, output, dry_run, no_prs, strict, pr_limit).await
+        run_init_unreleased(&repo, output, dry_run, no_prs, strict, pr_limit, no_verify, verbose).await
     } else if from_history {
-        run_init_from_history(&repo, output, dry_run, no_prs, strict, pr_limit).await
+        run_init_from_history(&repo, output, dry_run, no_prs, strict, pr_limit, no_verify, verbose).await
     } else {
         run_init_basic(output, dry_run)
     }
@@ -318,6 +325,8 @@ async fn run_init_unreleased(
     no_prs: bool,
     strict: bool,
     pr_limit: Option<usize>,
+    no_verify: bool,
+    verbose: bool,
 ) -> Result<()> {
     check_claude_installed()
         .await
@@ -386,9 +395,17 @@ async fn run_init_unreleased(
     let prompt = build_prompt(&input).context("Failed to build prompt")?;
 
     println!("Generating release notes with Claude...");
-    let changelog_output = generate_with_retry(&prompt)
+    let draft_output = generate_with_retry(&prompt)
         .await
         .context("Failed to generate changelog entries")?;
+
+    // Verify entries against codebase (unless --no-verify)
+    let changelog_output = if no_verify {
+        debug!("Skipping verification (--no-verify flag)");
+        draft_output
+    } else {
+        verify_changelog_entries(&draft_output, verbose).await?
+    };
 
     // Build the changelog content
     let mut content = CHANGELOG_HEADER.to_string();
@@ -421,6 +438,9 @@ async fn run_init_unreleased(
 }
 
 /// Create changelog with entries for each existing git tag.
+///
+/// Note: Verification is not yet implemented for this path as it processes
+/// multiple versions. The regular `keryx` command includes verification.
 async fn run_init_from_history(
     repo: &Repository,
     output: &PathBuf,
@@ -428,6 +448,8 @@ async fn run_init_from_history(
     no_prs: bool,
     strict: bool,
     pr_limit: Option<usize>,
+    _no_verify: bool,
+    _verbose: bool,
 ) -> Result<()> {
     check_claude_installed()
         .await
@@ -776,16 +798,24 @@ async fn run_generate(cli: Cli) -> Result<()> {
 
     println!("Generating release notes with Claude...");
 
-    let changelog_output = generate_with_retry(&prompt)
+    let draft_output = generate_with_retry(&prompt)
         .await
         .context("Failed to generate changelog entries")?;
 
-    if changelog_output.entries.is_empty() {
+    if draft_output.entries.is_empty() {
         println!("No changelog entries generated. Nothing to add.");
         return Ok(());
     }
 
-    // Step 8: Write or display changelog
+    // Step 8: Verify entries against codebase (unless --no-verify)
+    let changelog_output = if cli.no_verify {
+        debug!("Skipping verification (--no-verify flag)");
+        draft_output
+    } else {
+        verify_changelog_entries(&draft_output, cli.verbose).await?
+    };
+
+    // Step 9: Write or display changelog
     if cli.dry_run {
         println!("\n--- Dry Run Output ---\n");
         print_changelog_preview(&changelog_output, &next_version);
@@ -798,6 +828,100 @@ async fn run_generate(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Verify changelog entries against the codebase using a second Claude pass.
+///
+/// This function:
+/// 1. Scans the codebase for evidence supporting/refuting each entry
+/// 2. Sends the evidence to Claude for verification
+/// 3. Returns corrected entries with hallucinations removed
+async fn verify_changelog_entries(
+    draft: &keryx::ChangelogOutput,
+    verbose: bool,
+) -> Result<keryx::ChangelogOutput> {
+    use std::path::Path;
+
+    println!("Verifying entries against codebase...");
+
+    // Gather evidence from the codebase
+    let repo_path = Path::new(".");
+    let evidence = gather_verification_evidence(&draft.entries, repo_path);
+
+    // Report verification findings
+    let low_confidence: Vec<_> = evidence.low_confidence_entries();
+    if !low_confidence.is_empty() {
+        eprintln!();
+        eprintln!("\x1b[33m⚠ Found {} entries with low confidence:\x1b[0m", low_confidence.len());
+        for entry in &low_confidence {
+            eprintln!("  • {}", truncate_description(&entry.original_description, 60));
+            if !entry.stub_indicators.is_empty() {
+                eprintln!("    └─ Found {} stub/TODO indicators", entry.stub_indicators.len());
+            }
+            for check in &entry.count_checks {
+                if !check.matches {
+                    eprintln!(
+                        "    └─ Count mismatch: claimed {}, found {}",
+                        check.claimed_text,
+                        check.actual_count.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string())
+                    );
+                }
+            }
+        }
+        eprintln!();
+    }
+
+    if verbose {
+        // Show all evidence in verbose mode
+        for entry_ev in &evidence.entries {
+            debug!(
+                "Entry: {} | Confidence: {} | Keywords: {} | Stubs: {}",
+                truncate_description(&entry_ev.original_description, 40),
+                entry_ev.confidence,
+                entry_ev.keyword_matches.len(),
+                entry_ev.stub_indicators.len()
+            );
+        }
+    }
+
+    // Serialize draft entries for verification prompt
+    let draft_json = serde_json::to_string_pretty(&draft)
+        .context("Failed to serialize draft entries")?;
+
+    // Build verification prompt
+    let verification_prompt = build_verification_prompt(&draft_json, &evidence)
+        .context("Failed to build verification prompt")?;
+
+    println!("Running verification agent...");
+
+    // Run verification pass
+    let verified_output = generate_with_retry(&verification_prompt)
+        .await
+        .context("Failed to verify changelog entries")?;
+
+    // Report what changed
+    let original_count = draft.entries.len();
+    let verified_count = verified_output.entries.len();
+
+    if verified_count < original_count {
+        println!(
+            "\x1b[33m⚠ Verification removed {} potentially inaccurate entries\x1b[0m",
+            original_count - verified_count
+        );
+    } else if verified_count == original_count {
+        println!("\x1b[32m✓ All {} entries verified\x1b[0m", verified_count);
+    }
+
+    Ok(verified_output)
+}
+
+/// Truncate a description for display.
+fn truncate_description(desc: &str, max_len: usize) -> String {
+    if desc.len() <= max_len {
+        desc.to_string()
+    } else {
+        format!("{}...", &desc[..max_len - 3])
+    }
 }
 
 /// Fetch PRs for the current repository.
