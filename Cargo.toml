@@ -55,8 +55,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Self-update support (integrates with cargo-dist)
 axoupdater = { version = "0.9", default-features = false, features = ["github_releases", "blocking"] }
 
-[dev-dependencies]
+# Atomic file writes
 tempfile = "3"
+
+[dev-dependencies]
 wiremock = "0.6"
 temp-env = "0.3"
 mockall = "0.13"

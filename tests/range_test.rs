@@ -18,7 +18,7 @@ fn test_resolve_range_with_explicit_from_to() {
     let commit3 = test_repo.commit("feat: third commit");
 
     // Resolve with explicit commit SHAs
-    let range = resolve_range(&test_repo.repo, Some(&commit1.to_string()), Some(&commit3.to_string()))
+    let range = resolve_range(&test_repo.repo, Some(&commit1.to_string()), Some(&commit3.to_string()), false)
         .expect("Failed to resolve range");
 
     assert_eq!(range.from, commit1);
@@ -39,7 +39,7 @@ fn test_resolve_range_head_as_default_to() {
     let commit2 = test_repo.commit("feat: second commit");
 
     // Resolve with explicit from, default to (HEAD)
-    let range = resolve_range(&test_repo.repo, Some(&commit1.to_string()), None)
+    let range = resolve_range(&test_repo.repo, Some(&commit1.to_string()), None, false)
         .expect("Failed to resolve range");
 
     assert_eq!(range.from, commit1);
@@ -57,7 +57,7 @@ fn test_resolve_range_fallback_to_root_commit() {
     let commit3 = test_repo.commit("feat: third commit");
 
     // Resolve with no from (should fall back to root commit)
-    let range = resolve_range(&test_repo.repo, None, None)
+    let range = resolve_range(&test_repo.repo, None, None, false)
         .expect("Failed to resolve range");
 
     assert_eq!(range.from, root_commit);
@@ -76,7 +76,7 @@ fn test_resolve_range_with_lightweight_tag() {
     let commit2 = test_repo.commit("feat: second commit");
 
     // Resolve with no from (should use latest tag)
-    let range = resolve_range(&test_repo.repo, None, None)
+    let range = resolve_range(&test_repo.repo, None, None, false)
         .expect("Failed to resolve range");
 
     assert_eq!(range.from, commit1);
@@ -94,7 +94,7 @@ fn test_resolve_range_with_annotated_tag() {
     let commit2 = test_repo.commit("feat: second commit");
 
     // Resolve with no from (should use latest annotated tag)
-    let range = resolve_range(&test_repo.repo, None, None)
+    let range = resolve_range(&test_repo.repo, None, None, false)
         .expect("Failed to resolve range");
 
     assert_eq!(range.from, commit1);
@@ -118,7 +118,7 @@ fn test_resolve_range_selects_latest_semver_tag() {
     let commit4 = test_repo.commit("feat: fourth commit");
 
     // Resolve with no from (should use v2.0.0 as latest)
-    let range = resolve_range(&test_repo.repo, None, None)
+    let range = resolve_range(&test_repo.repo, None, None, false)
         .expect("Failed to resolve range");
 
     assert_eq!(range.from, commit3);
@@ -139,7 +139,7 @@ fn test_resolve_range_with_tag_reference() {
     let _commit3 = test_repo.commit("feat: third commit");
 
     // Resolve using tag names as references
-    let range = resolve_range(&test_repo.repo, Some("v1.0.0"), Some("v2.0.0"))
+    let range = resolve_range(&test_repo.repo, Some("v1.0.0"), Some("v2.0.0"), false)
         .expect("Failed to resolve range");
 
     assert_eq!(range.from, commit1);
@@ -158,7 +158,7 @@ fn test_resolve_range_with_branch_reference() {
     let commit2 = test_repo.commit("feat: second commit");
 
     // Resolve using branch name as from reference
-    let range = resolve_range(&test_repo.repo, Some("feature-branch"), Some("HEAD"))
+    let range = resolve_range(&test_repo.repo, Some("feature-branch"), Some("HEAD"), false)
         .expect("Failed to resolve range");
 
     assert_eq!(range.from, commit1);
@@ -171,7 +171,7 @@ fn test_resolve_range_invalid_from_reference() {
     let test_repo = TestRepo::new();
     test_repo.commit("feat: first commit");
 
-    let result = resolve_range(&test_repo.repo, Some("nonexistent-ref"), None);
+    let result = resolve_range(&test_repo.repo, Some("nonexistent-ref"), None, false);
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -183,7 +183,7 @@ fn test_resolve_range_invalid_to_reference() {
     let test_repo = TestRepo::new();
     let commit1 = test_repo.commit("feat: first commit");
 
-    let result = resolve_range(&test_repo.repo, Some(&commit1.to_string()), Some("nonexistent-ref"));
+    let result = resolve_range(&test_repo.repo, Some(&commit1.to_string()), Some("nonexistent-ref"), false);
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -198,7 +198,7 @@ fn test_resolve_range_with_short_sha() {
     let commit2 = test_repo.commit("feat: second commit");
 
     // Use full SHA (short SHA resolution depends on uniqueness in repo)
-    let range = resolve_range(&test_repo.repo, Some(&commit1.to_string()), Some(&commit2.to_string()))
+    let range = resolve_range(&test_repo.repo, Some(&commit1.to_string()), Some(&commit2.to_string()), false)
         .expect("Failed to resolve range");
 
     assert_eq!(range.from, commit1);
@@ -218,7 +218,7 @@ fn test_resolve_range_ignores_non_semver_tags() {
     let commit3 = test_repo.commit("feat: third commit");
 
     // No semver tags, should fall back to root
-    let range = resolve_range(&test_repo.repo, None, None)
+    let range = resolve_range(&test_repo.repo, None, None, false)
         .expect("Failed to resolve range");
 
     assert_eq!(range.from, commit1); // Root commit
@@ -242,7 +242,7 @@ fn test_resolve_range_mixed_semver_and_non_semver_tags() {
     let commit4 = test_repo.commit("feat: fourth commit");
 
     // Should use v1.0.0 (only semver tag)
-    let range = resolve_range(&test_repo.repo, None, None)
+    let range = resolve_range(&test_repo.repo, None, None, false)
         .expect("Failed to resolve range");
 
     assert_eq!(range.from, commit2);

@@ -1,5 +1,6 @@
 //! PR fetching via octocrab.
 
+use std::env;
 use std::num::NonZeroU64;
 
 use chrono::{DateTime, Utc};
@@ -8,6 +9,42 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::error::GitHubError;
+
+/// Default maximum number of PRs to fetch.
+const DEFAULT_PR_LIMIT: usize = 100;
+
+/// Environment variable to override the default PR limit.
+const PR_LIMIT_ENV_VAR: &str = "KERYX_PR_LIMIT";
+
+/// Get the configured PR limit.
+///
+/// Reads from KERYX_PR_LIMIT environment variable if set,
+/// otherwise uses the default of 100 PRs.
+///
+/// Logs a warning if the environment variable is set but contains
+/// an invalid value (non-numeric, empty, or zero).
+fn get_pr_limit() -> usize {
+    match env::var(PR_LIMIT_ENV_VAR) {
+        Ok(v) if !v.is_empty() => match v.parse::<usize>() {
+            Ok(0) => {
+                warn!(
+                    "Invalid {} value '0' (must be > 0), using default {}",
+                    PR_LIMIT_ENV_VAR, DEFAULT_PR_LIMIT
+                );
+                DEFAULT_PR_LIMIT
+            }
+            Ok(limit) => limit,
+            Err(_) => {
+                warn!(
+                    "Invalid {} value '{}', using default {}",
+                    PR_LIMIT_ENV_VAR, v, DEFAULT_PR_LIMIT
+                );
+                DEFAULT_PR_LIMIT
+            }
+        },
+        _ => DEFAULT_PR_LIMIT,
+    }
+}
 
 /// Represents a GitHub PR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,33 +80,43 @@ fn truncate_body(body: &str, max_len: usize) -> String {
 ///
 /// This is the main entry point that constructs the octocrab client.
 /// Fetches PRs merged between the given dates.
+///
+/// # Arguments
+/// * `limit` - Maximum number of PRs to fetch. If None, uses KERYX_PR_LIMIT env var or default (100).
 pub async fn fetch_merged_prs(
     token: &str,
     owner: &str,
     repo: &str,
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
+    limit: Option<usize>,
 ) -> Result<Vec<PullRequest>, GitHubError> {
     let octocrab = Octocrab::builder()
         .personal_token(token.to_string())
         .build()
         .map_err(|e| GitHubError::FetchPRs(Box::new(e)))?;
 
-    fetch_merged_prs_with_client(&octocrab, owner, repo, since, until).await
+    fetch_merged_prs_with_client(&octocrab, owner, repo, since, until, limit).await
 }
 
 /// Fetch merged PRs using a pre-configured octocrab client.
 ///
 /// This allows dependency injection for testing with mock servers.
+///
+/// # Arguments
+/// * `limit` - Maximum number of PRs to fetch. If None, uses KERYX_PR_LIMIT env var or default (100).
 pub async fn fetch_merged_prs_with_client(
     octocrab: &Octocrab,
     owner: &str,
     repo: &str,
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
+    limit: Option<usize>,
 ) -> Result<Vec<PullRequest>, GitHubError> {
+    let effective_limit = limit.unwrap_or_else(get_pr_limit);
     let mut all_prs = Vec::new();
     let mut page = 1u32;
+    let mut hit_limit = false;
 
     loop {
         let result = octocrab
@@ -164,6 +211,22 @@ pub async fn fetch_merged_prs_with_client(
                 merged_at: Some(merged_at),
                 labels,
             });
+
+            // Check PR limit
+            if all_prs.len() >= effective_limit {
+                hit_limit = true;
+                break;
+            }
+        }
+
+        // Exit outer loop if we hit the PR limit
+        if hit_limit {
+            warn!(
+                "Reached PR limit ({}) while fetching PRs for {}/{}. \
+                Use KERYX_PR_LIMIT env var or --pr-limit to increase.",
+                effective_limit, owner, repo
+            );
+            break;
         }
 
         // Check if there are more pages
@@ -176,8 +239,9 @@ pub async fn fetch_merged_prs_with_client(
         // Safety limit to prevent infinite loops
         if page > 50 {
             warn!(
-                "Reached 50-page safety limit while fetching PRs for {}/{}",
-                owner, repo
+                "Reached 50-page safety limit while fetching PRs for {}/{}. \
+                {} PRs collected. Consider using date filters to narrow the range.",
+                owner, repo, all_prs.len()
             );
             break;
         }
@@ -343,5 +407,49 @@ mod tests {
         let json = r#"{"number":0,"title":"Test","body":null,"merged_at":null,"labels":[]}"#;
         let result: Result<PullRequest, _> = serde_json::from_str(json);
         assert!(result.is_err(), "Should reject PR with number 0");
+    }
+
+    // =============================================================================
+    // PR LIMIT CONFIGURATION TESTS
+    // =============================================================================
+
+    #[test]
+    fn test_get_pr_limit_default() {
+        temp_env::with_var_unset(PR_LIMIT_ENV_VAR, || {
+            let limit = get_pr_limit();
+            assert_eq!(limit, DEFAULT_PR_LIMIT);
+        });
+    }
+
+    #[test]
+    fn test_get_pr_limit_from_env() {
+        temp_env::with_var(PR_LIMIT_ENV_VAR, Some("50"), || {
+            let limit = get_pr_limit();
+            assert_eq!(limit, 50);
+        });
+    }
+
+    #[test]
+    fn test_get_pr_limit_invalid_env_uses_default() {
+        temp_env::with_var(PR_LIMIT_ENV_VAR, Some("not_a_number"), || {
+            let limit = get_pr_limit();
+            assert_eq!(limit, DEFAULT_PR_LIMIT);
+        });
+    }
+
+    #[test]
+    fn test_get_pr_limit_zero_uses_default() {
+        temp_env::with_var(PR_LIMIT_ENV_VAR, Some("0"), || {
+            let limit = get_pr_limit();
+            assert_eq!(limit, DEFAULT_PR_LIMIT);
+        });
+    }
+
+    #[test]
+    fn test_get_pr_limit_empty_env_uses_default() {
+        temp_env::with_var(PR_LIMIT_ENV_VAR, Some(""), || {
+            let limit = get_pr_limit();
+            assert_eq!(limit, DEFAULT_PR_LIMIT);
+        });
     }
 }

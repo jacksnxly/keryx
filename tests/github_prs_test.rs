@@ -239,7 +239,7 @@ async fn test_pagination_single_page() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     match &result {
         Ok(prs) => {
@@ -287,7 +287,7 @@ async fn test_pagination_multiple_pages() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -305,7 +305,7 @@ async fn test_empty_repository() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
@@ -334,7 +334,7 @@ async fn test_filter_since_date() {
     let client = mock_client(&server).await;
     let since = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
 
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), None, None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -361,7 +361,7 @@ async fn test_filter_until_date() {
     let client = mock_client(&server).await;
     let until = Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
 
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, Some(until)).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, Some(until), None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -392,7 +392,7 @@ async fn test_filter_date_range() {
     let until = Utc.with_ymd_and_hms(2024, 9, 1, 0, 0, 0).unwrap();
 
     let result =
-        fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), Some(until)).await;
+        fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), Some(until), None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -417,7 +417,7 @@ async fn test_filter_excludes_all() {
     // Date range that excludes all PRs
     let since = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
 
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), None, None).await;
 
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
@@ -442,7 +442,7 @@ async fn test_body_at_limit_not_truncated() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -466,7 +466,7 @@ async fn test_body_over_limit_truncated() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -489,7 +489,7 @@ async fn test_pr_with_no_body() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -514,7 +514,7 @@ async fn test_rate_limit_error() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -537,7 +537,7 @@ async fn test_repository_not_found() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "nonexistent", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "nonexistent", None, None, None).await;
 
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -587,7 +587,7 @@ async fn test_safety_limit_50_pages() {
     }
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -614,7 +614,7 @@ async fn test_filters_unmerged_prs() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -643,7 +643,7 @@ async fn test_pr_with_labels() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -667,7 +667,7 @@ async fn test_pr_with_no_labels() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -699,11 +699,107 @@ async fn test_skips_zero_pr_number() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
     // Only the valid PR should be returned (zero PR is skipped)
     assert_eq!(prs.len(), 1);
     assert_eq!(prs[0].title, "Valid PR");
+}
+
+// =============================================================================
+// PR LIMIT TESTS
+// =============================================================================
+
+#[tokio::test]
+async fn test_pr_limit_stops_fetching_early() {
+    let server = MockServer::start().await;
+
+    let merged_at = Utc.with_ymd_and_hms(2024, 6, 15, 12, 0, 0).unwrap();
+    let prs: Vec<_> = (1..=10)
+        .map(|i| mock_pr(i, &format!("PR {}", i), Some(merged_at), None, vec![]))
+        .collect();
+
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(prs))
+        .mount(&server)
+        .await;
+
+    let client = mock_client(&server).await;
+    // Set limit to 5
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, Some(5)).await;
+
+    assert!(result.is_ok());
+    let prs = result.unwrap();
+    assert_eq!(prs.len(), 5);
+}
+
+#[tokio::test]
+async fn test_pr_limit_none_uses_default() {
+    // This test verifies that None triggers the default limit behavior
+    // In unit tests, we can't easily test the env var behavior,
+    // but we can verify the function accepts None without panicking
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<Value>::new()))
+        .mount(&server)
+        .await;
+
+    let client = mock_client(&server).await;
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, None).await;
+
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_pr_limit_exact_at_boundary() {
+    let server = MockServer::start().await;
+
+    let merged_at = Utc.with_ymd_and_hms(2024, 6, 15, 12, 0, 0).unwrap();
+    let prs: Vec<_> = (1..=5)
+        .map(|i| mock_pr(i, &format!("PR {}", i), Some(merged_at), None, vec![]))
+        .collect();
+
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(prs))
+        .mount(&server)
+        .await;
+
+    let client = mock_client(&server).await;
+    // Limit equals exactly the number of available PRs
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, Some(5)).await;
+
+    assert!(result.is_ok());
+    let prs = result.unwrap();
+    assert_eq!(prs.len(), 5);
+}
+
+#[tokio::test]
+async fn test_pr_limit_greater_than_available() {
+    let server = MockServer::start().await;
+
+    let merged_at = Utc.with_ymd_and_hms(2024, 6, 15, 12, 0, 0).unwrap();
+    let prs: Vec<_> = (1..=3)
+        .map(|i| mock_pr(i, &format!("PR {}", i), Some(merged_at), None, vec![]))
+        .collect();
+
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(prs))
+        .mount(&server)
+        .await;
+
+    let client = mock_client(&server).await;
+    // Limit is greater than available PRs
+    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, Some(100)).await;
+
+    assert!(result.is_ok());
+    let prs = result.unwrap();
+    // Should return all available PRs (3), not 100
+    assert_eq!(prs.len(), 3);
 }

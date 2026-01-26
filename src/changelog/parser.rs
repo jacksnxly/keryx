@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use semver::Version;
+use tracing::debug;
 
 use crate::error::ChangelogError;
 
@@ -79,12 +80,27 @@ fn extract_version_from_title(title: &str) -> Option<Version> {
         title
     };
 
-    Version::parse(version_str).ok()
+    match Version::parse(version_str) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            debug!(
+                "Could not parse '{}' as semver: {}. Skipping this version.",
+                version_str, e
+            );
+            None
+        }
+    }
 }
 
 /// Find the position to insert a new version section.
 /// Returns the byte offset after the header and any [Unreleased] section.
+///
+/// Note: This function normalizes CRLF line endings to LF before processing.
+/// The returned byte offset is valid for the normalized content.
 pub fn find_insertion_point(content: &str) -> usize {
+    // Normalize line endings: CRLF -> LF
+    // This ensures byte offset calculation is correct on all platforms
+    let content = content.replace("\r\n", "\n");
     let lines: Vec<&str> = content.lines().collect();
 
     for (i, line) in lines.iter().enumerate() {
@@ -101,7 +117,7 @@ pub fn find_insertion_point(content: &str) -> usize {
                         return byte_pos;
                     }
                 }
-                // No more sections, insert at end
+                // No more sections, insert at end of normalized content
                 return content.len();
             } else {
                 // First section is not Unreleased, insert before it
@@ -111,7 +127,7 @@ pub fn find_insertion_point(content: &str) -> usize {
         }
     }
 
-    // No sections found, insert at end of content
+    // No sections found, insert at end of normalized content
     content.len()
 }
 
@@ -172,5 +188,66 @@ mod tests {
         assert!(changelog.has_version(&Version::new(1, 0, 0)));
         assert!(!changelog.has_version(&Version::new(2, 0, 0)));
         assert!(!changelog.has_version(&Version::new(1, 1, 1)));
+    }
+
+    #[test]
+    fn test_find_insertion_point_crlf_with_unreleased() {
+        // Same content as LF test but with CRLF line endings
+        let content =
+            "# Changelog\r\n\r\n## [Unreleased]\r\n\r\n- Some change\r\n\r\n## [1.0.0] - 2024-01-01\r\n";
+        let pos = find_insertion_point(content);
+
+        // The position should point to where "## [1.0.0]" starts in normalized content
+        let normalized = content.replace("\r\n", "\n");
+        assert!(pos > 0);
+        assert!(
+            normalized[pos..].starts_with("## [1.0.0]"),
+            "Position {} should point to [1.0.0], got: '{}'",
+            pos,
+            &normalized[pos..pos.min(normalized.len()).saturating_add(20)]
+        );
+    }
+
+    #[test]
+    fn test_find_insertion_point_crlf_no_unreleased() {
+        // CRLF content without Unreleased section
+        let content =
+            "# Changelog\r\n\r\n## [1.0.0] - 2024-01-01\r\n\r\n### Added\r\n\r\n- Initial\r\n";
+        let pos = find_insertion_point(content);
+
+        let normalized = content.replace("\r\n", "\n");
+        assert!(
+            normalized[pos..].starts_with("## [1.0.0]"),
+            "Position {} should point to [1.0.0], got: '{}'",
+            pos,
+            &normalized[pos..pos.min(normalized.len()).saturating_add(20)]
+        );
+    }
+
+    #[test]
+    fn test_find_insertion_point_mixed_line_endings() {
+        // Mixed line endings (can happen with poor editor config)
+        let content =
+            "# Changelog\n\r\n## [Unreleased]\r\n\n- Some change\r\n\n## [1.0.0] - 2024-01-01\n";
+        let pos = find_insertion_point(content);
+
+        let normalized = content.replace("\r\n", "\n");
+        assert!(
+            normalized[pos..].starts_with("## [1.0.0]"),
+            "Position {} should point to [1.0.0], got: '{}'",
+            pos,
+            &normalized[pos..pos.min(normalized.len()).saturating_add(20)]
+        );
+    }
+
+    #[test]
+    fn test_find_insertion_point_crlf_only_unreleased() {
+        // Only Unreleased section, no existing versions
+        let content = "# Changelog\r\n\r\n## [Unreleased]\r\n\r\n- Work in progress\r\n";
+        let pos = find_insertion_point(content);
+
+        // Should insert at end of normalized content
+        let normalized = content.replace("\r\n", "\n");
+        assert_eq!(pos, normalized.len());
     }
 }

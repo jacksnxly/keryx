@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use chrono::{DateTime, TimeZone, Utc};
 use git2::{Commit, Repository};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::error::GitError;
 
@@ -65,18 +65,48 @@ pub struct ParsedCommit {
 
 impl ParsedCommit {
     /// Create a ParsedCommit from a git2 Commit.
-    pub fn from_git2_commit(commit: &Commit) -> Result<Self, GitError> {
+    ///
+    /// If `strict` is true, returns an error for invalid timestamps.
+    /// Otherwise, falls back to current time with a warning to stderr.
+    pub fn from_git2_commit(commit: &Commit, strict: bool) -> Result<Self, GitError> {
         let hash = commit.id().to_string();
-        let message = commit.message().unwrap_or("").to_string();
+        let message = match commit.message() {
+            Some(m) => m.to_string(),
+            None => {
+                warn!(
+                    "Commit {} has no message (possibly corrupted or encoding issue)",
+                    hash
+                );
+                String::new()
+            }
+        };
         let time = commit.time();
         let timestamp = match Utc.timestamp_opt(time.seconds(), 0).single() {
             Some(ts) => ts,
             None => {
+                if strict {
+                    return Err(GitError::InvalidTimestamp {
+                        hash,
+                        seconds: time.seconds(),
+                    });
+                }
+
+                // Log for verbose mode
                 warn!(
                     "Commit {} has invalid timestamp (seconds={}), using current time as fallback",
                     hash,
                     time.seconds()
                 );
+
+                // Also print to stderr so it's visible without --verbose
+                eprintln!(
+                    "\x1b[33m⚠ Warning: Commit {} has invalid timestamp (seconds={})\x1b[0m",
+                    hash,
+                    time.seconds()
+                );
+                eprintln!("  Using current time as fallback. This may affect date ordering.");
+                eprintln!("  Hint: Use --strict to fail instead of continuing with fallback data");
+
                 Utc::now()
             }
         };
@@ -108,7 +138,16 @@ pub fn parse_commit_message(message: &str) -> (Option<CommitType>, Option<String
         let scope = caps.get(2).map(|m| m.as_str().to_string());
         let breaking_mark = caps.get(3).is_some();
 
-        let commit_type = type_str.parse::<CommitType>().ok();
+        let commit_type = match type_str.parse::<CommitType>() {
+            Ok(ct) => Some(ct),
+            Err(e) => {
+                debug!(
+                    "Could not parse '{}' as conventional commit type: {}. Treating as non-conventional.",
+                    type_str, e
+                );
+                None
+            }
+        };
         let breaking = breaking_mark || breaking_in_footer;
 
         return (commit_type, scope, breaking);
@@ -118,10 +157,14 @@ pub fn parse_commit_message(message: &str) -> (Option<CommitType>, Option<String
 }
 
 /// Fetch commits from a repository in a given range.
+///
+/// If `strict` is true, returns an error for commits with invalid timestamps.
+/// Otherwise, falls back to current time with a warning.
 pub fn fetch_commits(
     repo: &Repository,
     from_oid: git2::Oid,
     to_oid: git2::Oid,
+    strict: bool,
 ) -> Result<Vec<ParsedCommit>, GitError> {
     let mut revwalk = repo.revwalk().map_err(GitError::RevwalkError)?;
 
@@ -133,7 +176,7 @@ pub fn fetch_commits(
     for oid_result in revwalk {
         let oid = oid_result.map_err(GitError::RevwalkError)?;
         let commit = repo.find_commit(oid).map_err(GitError::ParseCommit)?;
-        let parsed = ParsedCommit::from_git2_commit(&commit)?;
+        let parsed = ParsedCommit::from_git2_commit(&commit, strict)?;
         commits.push(parsed);
     }
 

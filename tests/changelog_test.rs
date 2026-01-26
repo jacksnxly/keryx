@@ -318,3 +318,94 @@ mod write_failure_tests {
         );
     }
 }
+
+// ============================================================================
+// CRLF line ending tests (Windows compatibility)
+// ============================================================================
+
+#[test]
+fn test_find_insertion_point_crlf() {
+    // Create CRLF content inline
+    let content =
+        "# Changelog\r\n\r\n## [Unreleased]\r\n\r\n- Change\r\n\r\n## [1.0.0] - 2024-01-01\r\n";
+    let pos = find_insertion_point(content);
+
+    // The position should work with normalized content
+    let normalized = content.replace("\r\n", "\n");
+    assert!(
+        normalized[pos..].starts_with("## [1.0.0]"),
+        "Position {} should point to [1.0.0], got: '{}'",
+        pos,
+        &normalized[pos..pos.min(normalized.len()).saturating_add(20)]
+    );
+}
+
+#[test]
+fn test_write_changelog_with_crlf_line_endings() {
+    let temp_dir = common::temp_test_dir();
+    let output_path = temp_dir.path().join("CHANGELOG.md");
+
+    // Create a changelog with CRLF line endings
+    let initial_content =
+        "# Changelog\r\n\r\n## [1.0.0] - 2024-01-01\r\n\r\n### Added\r\n\r\n- Initial\r\n";
+    fs::write(&output_path, initial_content).unwrap();
+
+    let entries = ChangelogOutput {
+        entries: vec![ChangelogEntry {
+            category: ChangelogCategory::Added,
+            description: "New in 2.0".to_string(),
+        }],
+    };
+
+    write_changelog(&output_path, &entries, &Version::new(2, 0, 0)).unwrap();
+
+    let content = fs::read_to_string(&output_path).unwrap();
+
+    // New version should appear before existing version
+    let pos_2 = content.find("## [2.0.0]").expect("Should contain [2.0.0]");
+    let pos_1 = content.find("## [1.0.0]").expect("Should contain [1.0.0]");
+    assert!(pos_2 < pos_1, "2.0.0 should come before 1.0.0");
+
+    // Verify content is valid (not corrupted)
+    assert!(content.contains("### Added"));
+    assert!(content.contains("- New in 2.0"));
+    assert!(content.contains("- Initial"));
+}
+
+#[test]
+fn test_write_changelog_with_crlf_and_unreleased() {
+    let temp_dir = common::temp_test_dir();
+    let output_path = temp_dir.path().join("CHANGELOG.md");
+
+    // Create a changelog with CRLF line endings and Unreleased section
+    let initial_content = "# Changelog\r\n\r\n## [Unreleased]\r\n\r\n- WIP feature\r\n\r\n## [1.0.0] - 2024-01-01\r\n\r\n### Added\r\n\r\n- Initial\r\n";
+    fs::write(&output_path, initial_content).unwrap();
+
+    let entries = ChangelogOutput {
+        entries: vec![ChangelogEntry {
+            category: ChangelogCategory::Fixed,
+            description: "Bug fix in 2.0".to_string(),
+        }],
+    };
+
+    write_changelog(&output_path, &entries, &Version::new(2, 0, 0)).unwrap();
+
+    let content = fs::read_to_string(&output_path).unwrap();
+
+    // New version should appear after Unreleased but before 1.0.0
+    let pos_unreleased = content
+        .find("## [Unreleased]")
+        .expect("Should contain [Unreleased]");
+    let pos_2 = content.find("## [2.0.0]").expect("Should contain [2.0.0]");
+    let pos_1 = content.find("## [1.0.0]").expect("Should contain [1.0.0]");
+
+    assert!(
+        pos_unreleased < pos_2,
+        "Unreleased should come before 2.0.0"
+    );
+    assert!(pos_2 < pos_1, "2.0.0 should come before 1.0.0");
+
+    // Verify content is valid
+    assert!(content.contains("### Fixed"));
+    assert!(content.contains("- Bug fix in 2.0"));
+}

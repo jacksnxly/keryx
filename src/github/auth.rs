@@ -6,7 +6,8 @@
 //! 3. GH_TOKEN environment variable
 
 use std::env;
-use std::process::Command;
+
+use tokio::process::Command;
 
 use crate::error::GitHubError;
 
@@ -16,9 +17,9 @@ use crate::error::GitHubError;
 /// 1. gh CLI auth (verified via `gh auth status`, token retrieved via `gh auth token`)
 /// 2. GITHUB_TOKEN environment variable
 /// 3. GH_TOKEN environment variable
-pub fn get_github_token() -> Result<String, GitHubError> {
+pub async fn get_github_token() -> Result<String, GitHubError> {
     // Try gh CLI first
-    if let Some(token) = get_token_from_gh_cli() {
+    if let Some(token) = get_token_from_gh_cli().await {
         return Ok(token);
     }
 
@@ -50,9 +51,9 @@ pub fn get_token_from_env() -> Result<String, GitHubError> {
 }
 
 /// Try to get a token from the gh CLI.
-fn get_token_from_gh_cli() -> Option<String> {
+async fn get_token_from_gh_cli() -> Option<String> {
     // First check if gh is authenticated
-    let status = match Command::new("gh").args(["auth", "status"]).output() {
+    let status = match Command::new("gh").args(["auth", "status"]).output().await {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!("gh CLI not available or failed to execute: {}", e);
@@ -69,7 +70,7 @@ fn get_token_from_gh_cli() -> Option<String> {
     }
 
     // Get the actual token
-    let output = match Command::new("gh").args(["auth", "token"]).output() {
+    let output = match Command::new("gh").args(["auth", "token"]).output().await {
         Ok(o) => o,
         Err(e) => {
             tracing::debug!("gh auth token command failed to execute: {}", e);

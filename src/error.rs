@@ -16,6 +16,12 @@ pub enum GitError {
 
     #[error("Failed to walk commit history: {0}")]
     RevwalkError(#[source] git2::Error),
+
+    #[error("Commit {hash} has invalid timestamp (seconds={seconds})")]
+    InvalidTimestamp { hash: String, seconds: i64 },
+
+    #[error("Commit traversal incomplete: {error_count} error(s) occurred. Root commit {partial_root} may not be the actual repository root. This can happen with shallow clones, missing objects, or permission issues.")]
+    TraversalIncomplete { partial_root: String, error_count: usize },
 }
 
 /// Errors from GitHub API operations.

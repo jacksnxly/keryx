@@ -131,6 +131,10 @@ struct Cli {
     #[arg(long, global = true)]
     no_prs: bool,
 
+    /// Maximum number of PRs to fetch (default: 100, env: KERYX_PR_LIMIT)
+    #[arg(short = 'l', long, global = true)]
+    pr_limit: Option<usize>,
+
     /// Dry run - print changelog without writing
     #[arg(long, global = true)]
     dry_run: bool,
@@ -186,7 +190,7 @@ async fn main() -> Result<()> {
     let result = match cli.command {
         Some(Commands::Update) => run_update().await,
         Some(Commands::Init { unreleased, from_history }) => {
-            run_init(&cli.output, cli.dry_run, cli.no_prs, unreleased, from_history).await
+            run_init(&cli.output, cli.dry_run, cli.no_prs, cli.strict, unreleased, from_history, cli.pr_limit).await
         }
         None => run_generate(cli).await,
     };
@@ -261,8 +265,10 @@ async fn run_init(
     output: &PathBuf,
     dry_run: bool,
     no_prs: bool,
+    strict: bool,
     unreleased: bool,
     from_history: bool,
+    pr_limit: Option<usize>,
 ) -> Result<()> {
     // Check if changelog already exists
     if output.exists() && !dry_run {
@@ -277,9 +283,9 @@ async fn run_init(
         .context("Not a git repository. Run keryx from within a git repository.")?;
 
     if unreleased {
-        run_init_unreleased(&repo, output, dry_run, no_prs).await
+        run_init_unreleased(&repo, output, dry_run, no_prs, strict, pr_limit).await
     } else if from_history {
-        run_init_from_history(&repo, output, dry_run, no_prs).await
+        run_init_from_history(&repo, output, dry_run, no_prs, strict, pr_limit).await
     } else {
         run_init_basic(output, dry_run)
     }
@@ -310,6 +316,8 @@ async fn run_init_unreleased(
     output: &PathBuf,
     dry_run: bool,
     no_prs: bool,
+    strict: bool,
+    pr_limit: Option<usize>,
 ) -> Result<()> {
     check_claude_installed()
         .await
@@ -318,11 +326,11 @@ async fn run_init_unreleased(
     println!("Analyzing all commits for [Unreleased] section...");
 
     // Get all commits from root to HEAD (bypassing tag-based resolution)
-    let root_oid = find_root_commit(repo)
+    let root_oid = find_root_commit(repo, strict)
         .context("Failed to find root commit")?;
     let head_oid = repo.head()?.peel_to_commit()?.id();
 
-    let commits = fetch_commits(repo, root_oid, head_oid)
+    let commits = fetch_commits(repo, root_oid, head_oid, strict)
         .context("Failed to fetch commits")?;
 
     if commits.is_empty() {
@@ -336,13 +344,29 @@ async fn run_init_unreleased(
     let pull_requests = if no_prs {
         Vec::new()
     } else {
-        match fetch_prs_for_repo(repo).await {
+        match fetch_prs_for_repo(repo, pr_limit).await {
             Ok(prs) => {
                 println!("Found {} merged PRs", prs.len());
                 prs
             }
             Err(e) => {
-                eprintln!("\x1b[33m⚠ Warning: Could not fetch PRs: {}\x1b[0m", e);
+                if strict {
+                    bail!(
+                        "GitHub API error: {}. \n\
+                        Hint: Use --no-prs to skip PR fetching, or check your GitHub token.",
+                        e
+                    );
+                }
+
+                warn!("GitHub API error: {}", e);
+                eprintln!();
+                eprintln!("\x1b[33m⚠ Warning: Could not fetch pull requests\x1b[0m");
+                eprintln!("  Error: {}", e);
+                eprintln!("  Impact: Changelog will be generated from commits only (may be incomplete)");
+                eprintln!("  Fix: Set GITHUB_TOKEN or run `gh auth login`");
+                eprintln!("  Hint: Use --strict to fail instead of continuing with partial data");
+                eprintln!();
+
                 Vec::new()
             }
         }
@@ -402,6 +426,8 @@ async fn run_init_from_history(
     output: &PathBuf,
     dry_run: bool,
     no_prs: bool,
+    strict: bool,
+    pr_limit: Option<usize>,
 ) -> Result<()> {
     check_claude_installed()
         .await
@@ -431,13 +457,29 @@ async fn run_init_from_history(
     let all_prs = if no_prs {
         Vec::new()
     } else {
-        match fetch_prs_for_repo(repo).await {
+        match fetch_prs_for_repo(repo, pr_limit).await {
             Ok(prs) => {
                 println!("Found {} merged PRs", prs.len());
                 prs
             }
             Err(e) => {
-                eprintln!("\x1b[33m⚠ Warning: Could not fetch PRs: {}\x1b[0m", e);
+                if strict {
+                    bail!(
+                        "GitHub API error: {}. \n\
+                        Hint: Use --no-prs to skip PR fetching, or check your GitHub token.",
+                        e
+                    );
+                }
+
+                warn!("GitHub API error: {}", e);
+                eprintln!();
+                eprintln!("\x1b[33m⚠ Warning: Could not fetch pull requests\x1b[0m");
+                eprintln!("  Error: {}", e);
+                eprintln!("  Impact: Changelog will be generated from commits only (may be incomplete)");
+                eprintln!("  Fix: Set GITHUB_TOKEN or run `gh auth login`");
+                eprintln!("  Hint: Use --strict to fail instead of continuing with partial data");
+                eprintln!();
+
                 Vec::new()
             }
         }
@@ -454,14 +496,38 @@ async fn run_init_from_history(
 
         // Get commits between previous tag and this tag
         let commits = if let Some(from_oid) = prev_oid {
-            fetch_commits(repo, from_oid, tag.oid)
-                .unwrap_or_default()
+            match fetch_commits(repo, from_oid, tag.oid, strict) {
+                Ok(c) => c,
+                Err(e) => {
+                    if strict {
+                        bail!("Failed to fetch commits for tag {}: {}", tag.name, e);
+                    }
+                    warn!("Failed to fetch commits for tag {}: {}. Section may be incomplete.", tag.name, e);
+                    Vec::new()
+                }
+            }
         } else {
             // First tag - get all commits from root to this tag
-            let root_oid = find_root_commit(repo)
-                .unwrap_or(tag.oid);
-            fetch_commits(repo, root_oid, tag.oid)
-                .unwrap_or_default()
+            let root_oid = match find_root_commit(repo, strict) {
+                Ok(oid) => oid,
+                Err(e) => {
+                    if strict {
+                        bail!("Failed to find root commit for tag {}: {}", tag.name, e);
+                    }
+                    warn!("Failed to find root commit for tag {}: {}. Using tag commit as fallback.", tag.name, e);
+                    tag.oid
+                }
+            };
+            match fetch_commits(repo, root_oid, tag.oid, strict) {
+                Ok(c) => c,
+                Err(e) => {
+                    if strict {
+                        bail!("Failed to fetch commits for tag {}: {}", tag.name, e);
+                    }
+                    warn!("Failed to fetch commits for tag {}: {}. Section may be incomplete.", tag.name, e);
+                    Vec::new()
+                }
+            }
         };
 
         if commits.is_empty() {
@@ -521,8 +587,16 @@ async fn run_init_from_history(
     let latest_tag = tags.last().unwrap();
     let head = repo.head()?.peel_to_commit()?.id();
 
-    let unreleased_commits = fetch_commits(repo, latest_tag.oid, head)
-        .unwrap_or_default();
+    let unreleased_commits = match fetch_commits(repo, latest_tag.oid, head, strict) {
+        Ok(c) => c,
+        Err(e) => {
+            if strict {
+                bail!("Failed to fetch unreleased commits: {}", e);
+            }
+            warn!("Failed to fetch unreleased commits: {}. Unreleased section may be incomplete.", e);
+            Vec::new()
+        }
+    };
 
     let mut unreleased_section = String::new();
     if !unreleased_commits.is_empty() {
@@ -587,7 +661,7 @@ async fn run_generate(cli: Cli) -> Result<()> {
         .context("Not a git repository. Run keryx from within a git repository.")?;
 
     // Step 3: Resolve commit range
-    let range = resolve_range(&repo, cli.from.as_deref(), Some(&cli.to))
+    let range = resolve_range(&repo, cli.from.as_deref(), Some(&cli.to), cli.strict)
         .context("Failed to resolve commit range")?;
 
     println!(
@@ -596,7 +670,7 @@ async fn run_generate(cli: Cli) -> Result<()> {
     );
 
     // Step 4: Fetch commits
-    let commits = fetch_commits(&repo, range.from, range.to)
+    let commits = fetch_commits(&repo, range.from, range.to, cli.strict)
         .context("Failed to fetch commits")?;
 
     if commits.is_empty() {
@@ -613,7 +687,7 @@ async fn run_generate(cli: Cli) -> Result<()> {
     let pull_requests = if cli.no_prs {
         Vec::new()
     } else {
-        match fetch_prs_for_repo(&repo).await {
+        match fetch_prs_for_repo(&repo, cli.pr_limit).await {
             Ok(prs) => {
                 println!("Found {} merged PRs", prs.len());
                 prs
@@ -727,9 +801,9 @@ async fn run_generate(cli: Cli) -> Result<()> {
 }
 
 /// Fetch PRs for the current repository.
-async fn fetch_prs_for_repo(repo: &Repository) -> Result<Vec<keryx::PullRequest>> {
+async fn fetch_prs_for_repo(repo: &Repository, limit: Option<usize>) -> Result<Vec<keryx::PullRequest>> {
     // Get GitHub token
-    let token = get_github_token()
+    let token = get_github_token().await
         .context("GitHub authentication required for PR fetching")?;
 
     // Get remote URL
@@ -743,7 +817,7 @@ async fn fetch_prs_for_repo(repo: &Repository) -> Result<Vec<keryx::PullRequest>
         .context("Could not parse GitHub remote URL")?;
 
     // Fetch PRs (no date filter for now, we'll filter by commits later)
-    let prs = fetch_merged_prs(&token, &owner, &repo_name, None, None).await?;
+    let prs = fetch_merged_prs(&token, &owner, &repo_name, None, None, limit).await?;
 
     Ok(prs)
 }
@@ -800,6 +874,7 @@ fn get_cli_features() -> Vec<String> {
         "--to <REF>: End of commit range (default: HEAD)".to_string(),
         "-o, --output <PATH>: Changelog output path (default: CHANGELOG.md)".to_string(),
         "--no-prs: Skip GitHub PR fetching, use commits only".to_string(),
+        "-l, --pr-limit <N>: Max PRs to fetch (default: 100, env: KERYX_PR_LIMIT)".to_string(),
         "--dry-run: Preview without writing to file".to_string(),
         "GitHub auth: Supports gh CLI, GITHUB_TOKEN, and GH_TOKEN".to_string(),
         "Automatic backup: Creates .changelog.md.bak before modifying".to_string(),
