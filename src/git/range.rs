@@ -70,7 +70,7 @@ fn resolve_reference(repo: &Repository, reference: &str) -> Result<Oid, GitError
 }
 
 /// Find the root commit of the repository.
-fn find_root_commit(repo: &Repository) -> Result<Oid, GitError> {
+pub fn find_root_commit(repo: &Repository) -> Result<Oid, GitError> {
     let head = repo
         .head()
         .map_err(|e| GitError::ReferenceNotFound("HEAD".to_string(), e))?;

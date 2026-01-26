@@ -13,7 +13,8 @@ use tracing_subscriber::FmtSubscriber;
 
 use keryx::changelog::{parser::read_changelog, write_changelog, writer::generate_summary};
 use keryx::claude::{build_prompt, check_claude_installed, generate_with_retry, prompt::ChangelogInput};
-use keryx::git::{commits::fetch_commits, range::resolve_range, tags::get_latest_tag};
+use keryx::changelog::format::CHANGELOG_HEADER;
+use keryx::git::{commits::fetch_commits, range::{find_root_commit, resolve_range}, tags::{get_all_tags, get_latest_tag}};
 use keryx::github::{auth::get_github_token, prs::{fetch_merged_prs, parse_github_remote}};
 use keryx::version::calculate_next_version;
 
@@ -151,6 +152,17 @@ struct Cli {
 enum Commands {
     /// Update keryx to the latest version
     Update,
+
+    /// Initialize a new changelog file
+    Init {
+        /// Generate entries from all commits and put in [Unreleased] section
+        #[arg(long, conflicts_with = "from_history")]
+        unreleased: bool,
+
+        /// Generate entries for each existing git tag (full history)
+        #[arg(long, conflicts_with = "unreleased")]
+        from_history: bool,
+    },
 }
 
 #[tokio::main]
@@ -173,6 +185,9 @@ async fn main() -> Result<()> {
     // Run the requested command
     let result = match cli.command {
         Some(Commands::Update) => run_update().await,
+        Some(Commands::Init { unreleased, from_history }) => {
+            run_init(&cli.output, cli.dry_run, cli.no_prs, unreleased, from_history).await
+        }
         None => run_generate(cli).await,
     };
 
@@ -236,6 +251,325 @@ async fn run_update() -> Result<()> {
             eprintln!("  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jacksnxly/keryx/releases/latest/download/keryx-installer.sh | sh");
             return Err(e.into());
         }
+    }
+
+    Ok(())
+}
+
+/// Run the init command to create a new changelog.
+async fn run_init(
+    output: &PathBuf,
+    dry_run: bool,
+    no_prs: bool,
+    unreleased: bool,
+    from_history: bool,
+) -> Result<()> {
+    // Check if changelog already exists
+    if output.exists() && !dry_run {
+        bail!(
+            "{} already exists. Delete it first or use a different output path with -o.",
+            output.display()
+        );
+    }
+
+    // Open git repository
+    let repo = Repository::open(".")
+        .context("Not a git repository. Run keryx from within a git repository.")?;
+
+    if unreleased {
+        run_init_unreleased(&repo, output, dry_run, no_prs).await
+    } else if from_history {
+        run_init_from_history(&repo, output, dry_run, no_prs).await
+    } else {
+        run_init_basic(output, dry_run)
+    }
+}
+
+/// Create a basic empty changelog with headers.
+fn run_init_basic(output: &PathBuf, dry_run: bool) -> Result<()> {
+    let content = format!(
+        "{}## [Unreleased]\n",
+        CHANGELOG_HEADER
+    );
+
+    if dry_run {
+        println!("--- Dry Run Output ---\n");
+        println!("{}", content);
+    } else {
+        std::fs::write(output, &content)
+            .context("Failed to write changelog")?;
+        println!("✓ Created {} with [Unreleased] section", output.display());
+    }
+
+    Ok(())
+}
+
+/// Create changelog with all commits in [Unreleased] section.
+async fn run_init_unreleased(
+    repo: &Repository,
+    output: &PathBuf,
+    dry_run: bool,
+    no_prs: bool,
+) -> Result<()> {
+    check_claude_installed()
+        .await
+        .context("Claude Code CLI is required")?;
+
+    println!("Analyzing all commits for [Unreleased] section...");
+
+    // Get all commits from root to HEAD (bypassing tag-based resolution)
+    let root_oid = find_root_commit(repo)
+        .context("Failed to find root commit")?;
+    let head_oid = repo.head()?.peel_to_commit()?.id();
+
+    let commits = fetch_commits(repo, root_oid, head_oid)
+        .context("Failed to fetch commits")?;
+
+    if commits.is_empty() {
+        // Just create basic changelog if no commits
+        return run_init_basic(output, dry_run);
+    }
+
+    println!("Found {} commits", commits.len());
+
+    // Fetch PRs if not disabled
+    let pull_requests = if no_prs {
+        Vec::new()
+    } else {
+        match fetch_prs_for_repo(repo).await {
+            Ok(prs) => {
+                println!("Found {} merged PRs", prs.len());
+                prs
+            }
+            Err(e) => {
+                eprintln!("\x1b[33m⚠ Warning: Could not fetch PRs: {}\x1b[0m", e);
+                Vec::new()
+            }
+        }
+    };
+
+    // Build prompt and generate entries
+    let repo_name = get_repo_name(repo).unwrap_or_else(|| "repository".to_string());
+    let input = ChangelogInput {
+        commits,
+        pull_requests,
+        previous_version: None,
+        repository_name: repo_name,
+        project_description: read_cargo_description(),
+        cli_features: None,
+    };
+
+    let prompt = build_prompt(&input).context("Failed to build prompt")?;
+
+    println!("Generating release notes with Claude...");
+    let changelog_output = generate_with_retry(&prompt)
+        .await
+        .context("Failed to generate changelog entries")?;
+
+    // Build the changelog content
+    let mut content = CHANGELOG_HEADER.to_string();
+    content.push_str("## [Unreleased]\n\n");
+
+    if !changelog_output.entries.is_empty() {
+        for (category, entries) in changelog_output.entries_by_category() {
+            content.push_str(&format!("### {}\n\n", category.as_str()));
+            for entry in entries {
+                content.push_str(&format!("- {}\n", entry.description));
+            }
+            content.push('\n');
+        }
+    }
+
+    if dry_run {
+        println!("\n--- Dry Run Output ---\n");
+        println!("{}", content);
+    } else {
+        std::fs::write(output, &content)
+            .context("Failed to write changelog")?;
+        println!(
+            "✓ Created {} with {} entries in [Unreleased]",
+            output.display(),
+            changelog_output.entries.len()
+        );
+    }
+
+    Ok(())
+}
+
+/// Create changelog with entries for each existing git tag.
+async fn run_init_from_history(
+    repo: &Repository,
+    output: &PathBuf,
+    dry_run: bool,
+    no_prs: bool,
+) -> Result<()> {
+    check_claude_installed()
+        .await
+        .context("Claude Code CLI is required")?;
+
+    println!("Analyzing git history to build changelog from tags...");
+
+    // Get all semver tags, sorted by version (oldest first for processing)
+    let mut tags: Vec<_> = get_all_tags(repo)?
+        .into_iter()
+        .filter(|t| t.version.is_some())
+        .collect();
+
+    tags.sort_by(|a, b| a.version.cmp(&b.version));
+
+    if tags.is_empty() {
+        println!("No semver tags found. Creating basic changelog instead.");
+        return run_init_basic(output, dry_run);
+    }
+
+    println!("Found {} version tags: {}",
+        tags.len(),
+        tags.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", ")
+    );
+
+    // Fetch PRs once if not disabled
+    let all_prs = if no_prs {
+        Vec::new()
+    } else {
+        match fetch_prs_for_repo(repo).await {
+            Ok(prs) => {
+                println!("Found {} merged PRs", prs.len());
+                prs
+            }
+            Err(e) => {
+                eprintln!("\x1b[33m⚠ Warning: Could not fetch PRs: {}\x1b[0m", e);
+                Vec::new()
+            }
+        }
+    };
+
+    let repo_name = get_repo_name(repo).unwrap_or_else(|| "repository".to_string());
+
+    // Build sections for each version (newest first in output)
+    let mut version_sections: Vec<(Version, String)> = Vec::new();
+    let mut prev_oid: Option<git2::Oid> = None;
+
+    for tag in &tags {
+        let version = tag.version.as_ref().unwrap();
+
+        // Get commits between previous tag and this tag
+        let commits = if let Some(from_oid) = prev_oid {
+            fetch_commits(repo, from_oid, tag.oid)
+                .unwrap_or_default()
+        } else {
+            // First tag - get all commits from root to this tag
+            let root_oid = find_root_commit(repo)
+                .unwrap_or(tag.oid);
+            fetch_commits(repo, root_oid, tag.oid)
+                .unwrap_or_default()
+        };
+
+        if commits.is_empty() {
+            prev_oid = Some(tag.oid);
+            continue;
+        }
+
+        println!("Processing {} ({} commits)...", tag.name, commits.len());
+
+        // Generate entries for this version
+        let input = ChangelogInput {
+            commits,
+            pull_requests: all_prs.clone(), // TODO: filter by date range
+            previous_version: prev_oid.and_then(|_| {
+                tags.iter()
+                    .find(|t| t.oid == prev_oid.unwrap())
+                    .and_then(|t| t.version.clone())
+            }),
+            repository_name: repo_name.clone(),
+            project_description: if prev_oid.is_none() { read_cargo_description() } else { None },
+            cli_features: None,
+        };
+
+        let prompt = build_prompt(&input).context("Failed to build prompt")?;
+        let changelog_output = generate_with_retry(&prompt).await?;
+
+        // Get tag date from commit
+        let tag_date = repo.find_commit(tag.oid)
+            .map(|c| {
+                let time = c.time();
+                chrono::DateTime::from_timestamp(time.seconds(), 0)
+                    .map(|dt| dt.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            })
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        // Format section
+        let mut section = format!("## [{}] - {}\n\n", version, tag_date);
+
+        if changelog_output.entries.is_empty() {
+            section.push_str("- Initial release\n\n");
+        } else {
+            for (category, entries) in changelog_output.entries_by_category() {
+                section.push_str(&format!("### {}\n\n", category.as_str()));
+                for entry in entries {
+                    section.push_str(&format!("- {}\n", entry.description));
+                }
+                section.push('\n');
+            }
+        }
+
+        version_sections.push((version.clone(), section));
+        prev_oid = Some(tag.oid);
+    }
+
+    // Check for unreleased commits (after latest tag)
+    let latest_tag = tags.last().unwrap();
+    let head = repo.head()?.peel_to_commit()?.id();
+
+    let unreleased_commits = fetch_commits(repo, latest_tag.oid, head)
+        .unwrap_or_default();
+
+    let mut unreleased_section = String::new();
+    if !unreleased_commits.is_empty() {
+        println!("Processing {} unreleased commits...", unreleased_commits.len());
+
+        let input = ChangelogInput {
+            commits: unreleased_commits,
+            pull_requests: all_prs,
+            previous_version: latest_tag.version.clone(),
+            repository_name: repo_name,
+            project_description: None,
+            cli_features: None,
+        };
+
+        let prompt = build_prompt(&input)?;
+        let changelog_output = generate_with_retry(&prompt).await?;
+
+        unreleased_section.push_str("## [Unreleased]\n\n");
+        if !changelog_output.entries.is_empty() {
+            for (category, entries) in changelog_output.entries_by_category() {
+                unreleased_section.push_str(&format!("### {}\n\n", category.as_str()));
+                for entry in entries {
+                    unreleased_section.push_str(&format!("- {}\n", entry.description));
+                }
+                unreleased_section.push('\n');
+            }
+        }
+    } else {
+        unreleased_section.push_str("## [Unreleased]\n\n");
+    }
+
+    // Build final content (newest versions first)
+    let mut content = CHANGELOG_HEADER.to_string();
+    content.push_str(&unreleased_section);
+
+    // Add versions in reverse order (newest first)
+    for (_, section) in version_sections.into_iter().rev() {
+        content.push_str(&section);
+    }
+
+    if dry_run {
+        println!("\n--- Dry Run Output ---\n");
+        println!("{}", content);
+    } else {
+        std::fs::write(output, &content)
+            .context("Failed to write changelog")?;
+        println!("✓ Created {} with {} version(s)", output.display(), tags.len());
     }
 
     Ok(())
