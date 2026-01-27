@@ -11,6 +11,8 @@ pub struct VerificationEvidence {
     pub entries: Vec<EntryEvidence>,
     /// Project structure summary.
     pub project_structure: Option<String>,
+    /// How the project structure was obtained: `"tree"`, `"ls"`, or `None` if unavailable.
+    pub project_structure_source: Option<String>,
     /// Key files content (e.g., Cargo.toml, package.json).
     pub key_files: Vec<KeyFileContent>,
 }
@@ -126,7 +128,8 @@ pub struct KeywordMatch {
     /// Number of occurrences.
     pub occurrence_count: usize,
     /// Sample lines showing context (first few matches).
-    pub sample_lines: Vec<String>,
+    /// `Some(vec)` = samples fetched (possibly empty), `None` = sampling failed.
+    pub sample_lines: Option<Vec<String>>,
     /// Whether the implementation appears complete (no TODO/stub markers nearby).
     pub appears_complete: bool,
 }
@@ -237,6 +240,7 @@ impl VerificationEvidence {
         Self {
             entries: Vec::new(),
             project_structure: None,
+            project_structure_source: None,
             key_files: Vec::new(),
         }
     }
@@ -269,7 +273,7 @@ mod tests {
                     keyword: "test".to_string(),
                     files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
                     occurrence_count: 10,
-                    sample_lines: vec![],
+                    sample_lines: Some(vec![]),
                     appears_complete: true,
                 },
             ],
@@ -288,7 +292,7 @@ mod tests {
                     keyword: "test".to_string(),
                     files_found: vec!["a.rs".to_string()],
                     occurrence_count: 1,
-                    sample_lines: vec![],
+                    sample_lines: Some(vec![]),
                     appears_complete: false,
                 },
             ],
@@ -321,6 +325,7 @@ mod tests {
 
         assert!(evidence.entries.is_empty());
         assert!(evidence.project_structure.is_none());
+        assert!(evidence.project_structure_source.is_none());
         assert!(evidence.key_files.is_empty());
     }
 

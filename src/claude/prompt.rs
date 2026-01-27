@@ -141,6 +141,7 @@ For each entry, check:
 1. **Keyword Verification**: Do the `keyword_matches` confirm the feature exists in the codebase?
    - If `files_found` is empty for key terms, the feature may not exist
    - If `appears_complete` is false, the feature may be a stub/placeholder
+   - If `sample_lines` is null, sample gathering failed — do not treat missing samples as evidence against the feature
 
 2. **Count Accuracy**: Do the `count_checks` match?
    - If `matches` is false, correct the number (e.g., "8 templates" → "5 templates")
@@ -578,7 +579,7 @@ mod tests {
                 keyword: "websocket".to_string(),
                 files_found: vec!["src/ws.rs".to_string()],
                 occurrence_count: 5,
-                sample_lines: vec!["pub struct WebSocket".to_string()],
+                sample_lines: Some(vec!["pub struct WebSocket".to_string()]),
                 appears_complete: true,
             }],
             vec![],

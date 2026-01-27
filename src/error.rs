@@ -110,4 +110,32 @@ pub enum VerificationError {
              apt install ripgrep      (Debian/Ubuntu)\n\n\
              Or skip verification with: --no-verify")]
     RipgrepNotInstalled,
+
+    #[error("ripgrep (rg) was found but exited with {}: {stderr}\n\n\
+             This may indicate a corrupted installation or missing dependencies.\n\
+             Try reinstalling ripgrep or skip verification with: --no-verify",
+             exit_code.map_or("unknown status".to_string(), |c| format!("code {c}")))]
+    RipgrepFailed {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+
+    #[error("ripgrep (rg) could not be executed: {0}\n\n\
+             This may be a permission issue or a problem with the ripgrep binary.\n\
+             Check file permissions or reinstall ripgrep.\n\
+             Or skip verification with: --no-verify")]
+    RipgrepExecutionFailed(String),
+}
+
+/// Errors from scanner operations during evidence gathering.
+#[derive(Error, Debug)]
+pub enum ScannerError {
+    #[error("ripgrep failed with exit code {exit_code:?}: {stderr}")]
+    RipgrepFailed { exit_code: Option<i32>, stderr: String },
+
+    #[error("ripgrep (rg) not found - install with: cargo install ripgrep")]
+    RipgrepNotFound,
+
+    #[error("I/O error during scan: {0}")]
+    IoError(String),
 }

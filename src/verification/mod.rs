@@ -24,6 +24,13 @@ pub fn check_ripgrep_installed() -> Result<(), VerificationError> {
 
     match output {
         Ok(out) if out.status.success() => Ok(()),
-        _ => Err(VerificationError::RipgrepNotInstalled),
+        Ok(out) => Err(VerificationError::RipgrepFailed {
+            exit_code: out.status.code(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(VerificationError::RipgrepNotInstalled)
+        }
+        Err(e) => Err(VerificationError::RipgrepExecutionFailed(e.to_string())),
     }
 }

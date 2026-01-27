@@ -8,19 +8,7 @@ mod common;
 use std::fs;
 
 use keryx::changelog::{ChangelogCategory, ChangelogEntry};
-use keryx::verification::{
-    gather_verification_evidence, check_ripgrep_installed, Confidence,
-};
-
-/// Check if ripgrep is available. Returns true if tests should skip.
-fn skip_without_rg() -> bool {
-    if check_ripgrep_installed().is_err() {
-        eprintln!("Skipping test: ripgrep (rg) not found in PATH");
-        true
-    } else {
-        false
-    }
-}
+use keryx::verification::{gather_verification_evidence, Confidence};
 
 /// Create a test project with known code patterns.
 fn create_test_project() -> tempfile::TempDir {
@@ -161,10 +149,8 @@ tokio = "1.0"
 // === Keyword Search Tests ===
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_keyword_search_finds_websocket() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -205,10 +191,8 @@ fn test_keyword_search_finds_websocket() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_keyword_search_finds_database() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -244,10 +228,8 @@ fn test_keyword_search_finds_database() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_keyword_search_no_match_for_missing_feature() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -284,10 +266,8 @@ fn test_keyword_search_no_match_for_missing_feature() {
 // === Stub Indicator Tests ===
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_stub_indicators_detected_for_incomplete_code() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -328,10 +308,8 @@ fn test_stub_indicators_detected_for_incomplete_code() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_no_stub_indicators_for_complete_code() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -363,10 +341,8 @@ fn test_no_stub_indicators_for_complete_code() {
 // === Confidence Level Tests ===
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_confidence_high_for_complete_implementation() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -389,10 +365,8 @@ fn test_confidence_high_for_complete_implementation() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_confidence_low_for_incomplete_implementation() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -415,10 +389,8 @@ fn test_confidence_low_for_incomplete_implementation() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_confidence_low_for_nonexistent_feature() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -448,10 +420,8 @@ fn test_confidence_low_for_nonexistent_feature() {
 // === Key Files Tests ===
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_key_files_gathered() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -489,10 +459,8 @@ fn test_key_files_gathered() {
 // === Multiple Entries Test ===
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_multiple_entries_analyzed() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -534,10 +502,8 @@ fn test_multiple_entries_analyzed() {
 // === has_low_confidence_entries Tests ===
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_has_low_confidence_entries_detection() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -581,10 +547,8 @@ fn test_has_low_confidence_entries_detection() {
 // === Edge Cases ===
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_empty_entries() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
     let entries: Vec<ChangelogEntry> = vec![];
@@ -596,10 +560,8 @@ fn test_empty_entries() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_entry_with_no_extractable_keywords() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
@@ -617,10 +579,8 @@ fn test_entry_with_no_extractable_keywords() {
 // === Project Structure Test ===
 
 #[test]
+#[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_project_structure_gathered() {
-    if skip_without_rg() {
-        return;
-    }
 
     let project = create_test_project();
 
