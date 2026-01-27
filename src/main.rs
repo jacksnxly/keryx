@@ -888,7 +888,7 @@ async fn verify_changelog_entries(
             debug!(
                 "Entry: {} | Confidence: {} | Keywords: {} | Stubs: {}",
                 truncate_description(&entry_ev.original_description, 40),
-                entry_ev.confidence,
+                entry_ev.confidence(),
                 entry_ev.keyword_matches.len(),
                 entry_ev.stub_indicators.len()
             );

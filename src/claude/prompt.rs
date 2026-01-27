@@ -567,25 +567,23 @@ mod tests {
 
     #[test]
     fn test_build_verification_prompt_embeds_evidence_json() {
-        use crate::verification::{
-            Confidence, EntryEvidence, KeywordMatch, VerificationEvidence,
-        };
+        use crate::changelog::ChangelogCategory;
+        use crate::verification::{EntryEvidence, KeywordMatch, VerificationEvidence};
 
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(EntryEvidence {
-            original_description: "Added WebSocket streaming".to_string(),
-            category: "Added".to_string(),
-            keyword_matches: vec![KeywordMatch {
+        evidence.entries.push(EntryEvidence::new(
+            "Added WebSocket streaming".to_string(),
+            ChangelogCategory::Added,
+            vec![KeywordMatch {
                 keyword: "websocket".to_string(),
                 files_found: vec!["src/ws.rs".to_string()],
                 occurrence_count: 5,
                 sample_lines: vec!["pub struct WebSocket".to_string()],
                 appears_complete: true,
             }],
-            count_checks: vec![],
-            stub_indicators: vec![],
-            confidence: Confidence::High,
-        });
+            vec![],
+            vec![],
+        ));
 
         let draft = r#"{"entries": []}"#;
         let prompt = build_verification_prompt(draft, &evidence)
@@ -662,22 +660,22 @@ mod tests {
 
     #[test]
     fn test_build_verification_prompt_with_count_checks() {
-        use crate::verification::{Confidence, CountCheck, EntryEvidence, VerificationEvidence};
+        use crate::changelog::ChangelogCategory;
+        use crate::verification::{CountCheck, EntryEvidence, VerificationEvidence};
 
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(EntryEvidence {
-            original_description: "Added 8 templates".to_string(),
-            category: "Added".to_string(),
-            keyword_matches: vec![],
-            count_checks: vec![CountCheck {
+        evidence.entries.push(EntryEvidence::new(
+            "Added 8 templates".to_string(),
+            ChangelogCategory::Added,
+            vec![],
+            vec![CountCheck {
                 claimed_text: "8 templates".to_string(),
                 claimed_count: Some(8),
                 actual_count: Some(5),
                 source_location: Some("src/templates.rs".to_string()),
             }],
-            stub_indicators: vec![],
-            confidence: Confidence::Medium,
-        });
+            vec![],
+        ));
 
         let draft = r#"{"entries": [{"category": "Added", "description": "Added 8 templates"}]}"#;
         let prompt = build_verification_prompt(draft, &evidence)

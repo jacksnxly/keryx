@@ -1,6 +1,6 @@
 {
   "prefix": "KRX",
-  "nextId": 57,
+  "nextId": 62,
   "created": "2026-01-25",
   "statuses": ["backlog", "in-progress", "in-review", "done", "archived"],
   "types": ["bug", "feature", "task", "improvement"],

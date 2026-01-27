@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::changelog::ChangelogCategory;
+
 /// Complete verification evidence for all changelog entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationEvidence {
@@ -14,20 +16,104 @@ pub struct VerificationEvidence {
 }
 
 /// Evidence for a single changelog entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The confidence level is computed from the evidence data (keyword matches,
+/// stub indicators, count checks) rather than stored, ensuring it's always
+/// consistent with the evidence.
+#[derive(Debug, Clone, Deserialize)]
 pub struct EntryEvidence {
     /// The original entry description.
     pub original_description: String,
     /// The category (Added, Changed, etc.).
-    pub category: String,
+    pub category: ChangelogCategory,
     /// Keywords extracted and their matches in the codebase.
     pub keyword_matches: Vec<KeywordMatch>,
     /// Numeric claims found and their verification.
     pub count_checks: Vec<CountCheck>,
     /// Stub/TODO indicators found.
     pub stub_indicators: Vec<StubIndicator>,
-    /// Overall confidence assessment.
-    pub confidence: Confidence,
+}
+
+impl EntryEvidence {
+    /// Create new entry evidence.
+    pub fn new(
+        original_description: String,
+        category: ChangelogCategory,
+        keyword_matches: Vec<KeywordMatch>,
+        count_checks: Vec<CountCheck>,
+        stub_indicators: Vec<StubIndicator>,
+    ) -> Self {
+        Self {
+            original_description,
+            category,
+            keyword_matches,
+            count_checks,
+            stub_indicators,
+        }
+    }
+
+    /// Calculate confidence based on evidence.
+    ///
+    /// Confidence is computed from a score starting at 50, with boosts for
+    /// keyword matches and penalties for stub indicators and count mismatches.
+    pub fn confidence(&self) -> Confidence {
+        // Start with medium confidence
+        let mut score: i32 = 50;
+
+        // Boost for keyword matches
+        for km in &self.keyword_matches {
+            if km.occurrence_count > 0 {
+                score += 10;
+                if km.appears_complete {
+                    score += 10;
+                }
+            }
+            if km.files_found.len() > 2 {
+                score += 5;
+            }
+        }
+
+        // Penalty for stub indicators
+        score -= (self.stub_indicators.len() as i32) * 15;
+
+        // Penalty for count mismatches
+        for check in &self.count_checks {
+            if !check.matches() {
+                score -= 20;
+            }
+        }
+
+        // No keyword matches at all is suspicious
+        if self.keyword_matches.is_empty() {
+            score -= 30;
+        }
+
+        if score >= 70 {
+            Confidence::High
+        } else if score >= 40 {
+            Confidence::Medium
+        } else {
+            Confidence::Low
+        }
+    }
+}
+
+impl Serialize for EntryEvidence {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("EntryEvidence", 6)?;
+        state.serialize_field("original_description", &self.original_description)?;
+        state.serialize_field("category", &self.category)?;
+        state.serialize_field("keyword_matches", &self.keyword_matches)?;
+        state.serialize_field("count_checks", &self.count_checks)?;
+        state.serialize_field("stub_indicators", &self.stub_indicators)?;
+        state.serialize_field("confidence", &self.confidence())?;
+        state.end()
+    }
 }
 
 /// A keyword match found in the codebase.
@@ -157,14 +243,14 @@ impl VerificationEvidence {
 
     /// Check if any entries have low confidence.
     pub fn has_low_confidence_entries(&self) -> bool {
-        self.entries.iter().any(|e| e.confidence == Confidence::Low)
+        self.entries.iter().any(|e| e.confidence() == Confidence::Low)
     }
 
     /// Get entries with low confidence.
     pub fn low_confidence_entries(&self) -> Vec<&EntryEvidence> {
         self.entries
             .iter()
-            .filter(|e| e.confidence == Confidence::Low)
+            .filter(|e| e.confidence() == Confidence::Low)
             .collect()
     }
 }
@@ -173,15 +259,60 @@ impl VerificationEvidence {
 mod tests {
     use super::*;
 
-    fn create_entry(description: &str, confidence: Confidence) -> EntryEvidence {
-        EntryEvidence {
-            original_description: description.to_string(),
-            category: "Added".to_string(),
-            keyword_matches: vec![],
-            count_checks: vec![],
-            stub_indicators: vec![],
-            confidence,
-        }
+    /// Create test entry that computes to high confidence (many keyword matches).
+    fn create_high_confidence_entry(description: &str) -> EntryEvidence {
+        EntryEvidence::new(
+            description.to_string(),
+            ChangelogCategory::Added,
+            vec![
+                KeywordMatch {
+                    keyword: "test".to_string(),
+                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                    occurrence_count: 10,
+                    sample_lines: vec![],
+                    appears_complete: true,
+                },
+            ],
+            vec![],
+            vec![],
+        )
+    }
+
+    /// Create test entry that computes to medium confidence (some matches).
+    fn create_medium_confidence_entry(description: &str) -> EntryEvidence {
+        EntryEvidence::new(
+            description.to_string(),
+            ChangelogCategory::Added,
+            vec![
+                KeywordMatch {
+                    keyword: "test".to_string(),
+                    files_found: vec!["a.rs".to_string()],
+                    occurrence_count: 1,
+                    sample_lines: vec![],
+                    appears_complete: false,
+                },
+            ],
+            vec![],
+            vec![],
+        )
+    }
+
+    /// Create test entry that computes to low confidence (no matches, stubs).
+    fn create_low_confidence_entry(description: &str) -> EntryEvidence {
+        EntryEvidence::new(
+            description.to_string(),
+            ChangelogCategory::Added,
+            vec![],  // No keyword matches
+            vec![],
+            vec![
+                StubIndicator {
+                    file: "a.rs".to_string(),
+                    line: 10,
+                    indicator: "TODO".to_string(),
+                    context: "// TODO".to_string(),
+                },
+            ],
+        )
     }
 
     #[test]
@@ -202,8 +333,8 @@ mod tests {
     #[test]
     fn test_has_low_confidence_entries_false_when_all_high() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_entry("Feature A", Confidence::High));
-        evidence.entries.push(create_entry("Feature B", Confidence::High));
+        evidence.entries.push(create_high_confidence_entry("Feature A"));
+        evidence.entries.push(create_high_confidence_entry("Feature B"));
 
         assert!(!evidence.has_low_confidence_entries());
     }
@@ -211,8 +342,8 @@ mod tests {
     #[test]
     fn test_has_low_confidence_entries_false_when_all_medium() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_entry("Feature A", Confidence::Medium));
-        evidence.entries.push(create_entry("Feature B", Confidence::Medium));
+        evidence.entries.push(create_medium_confidence_entry("Feature A"));
+        evidence.entries.push(create_medium_confidence_entry("Feature B"));
 
         assert!(!evidence.has_low_confidence_entries());
     }
@@ -220,8 +351,8 @@ mod tests {
     #[test]
     fn test_has_low_confidence_entries_true_when_has_low() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_entry("Feature A", Confidence::High));
-        evidence.entries.push(create_entry("Feature B", Confidence::Low));
+        evidence.entries.push(create_high_confidence_entry("Feature A"));
+        evidence.entries.push(create_low_confidence_entry("Feature B"));
 
         assert!(evidence.has_low_confidence_entries());
     }
@@ -229,8 +360,8 @@ mod tests {
     #[test]
     fn test_has_low_confidence_entries_true_when_all_low() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_entry("Feature A", Confidence::Low));
-        evidence.entries.push(create_entry("Feature B", Confidence::Low));
+        evidence.entries.push(create_low_confidence_entry("Feature A"));
+        evidence.entries.push(create_low_confidence_entry("Feature B"));
 
         assert!(evidence.has_low_confidence_entries());
     }
@@ -238,8 +369,8 @@ mod tests {
     #[test]
     fn test_low_confidence_entries_empty_when_none() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_entry("Feature A", Confidence::High));
-        evidence.entries.push(create_entry("Feature B", Confidence::Medium));
+        evidence.entries.push(create_high_confidence_entry("Feature A"));
+        evidence.entries.push(create_medium_confidence_entry("Feature B"));
 
         let low_entries = evidence.low_confidence_entries();
         assert!(low_entries.is_empty());
@@ -248,10 +379,10 @@ mod tests {
     #[test]
     fn test_low_confidence_entries_returns_correct_entries() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_entry("High confidence", Confidence::High));
-        evidence.entries.push(create_entry("Low confidence A", Confidence::Low));
-        evidence.entries.push(create_entry("Medium confidence", Confidence::Medium));
-        evidence.entries.push(create_entry("Low confidence B", Confidence::Low));
+        evidence.entries.push(create_high_confidence_entry("High confidence"));
+        evidence.entries.push(create_low_confidence_entry("Low confidence A"));
+        evidence.entries.push(create_medium_confidence_entry("Medium confidence"));
+        evidence.entries.push(create_low_confidence_entry("Low confidence B"));
 
         let low_entries = evidence.low_confidence_entries();
         assert_eq!(low_entries.len(), 2);
@@ -361,5 +492,54 @@ mod tests {
             json.contains(r#""matches":true"#),
             "JSON should include computed matches field"
         );
+    }
+
+    #[test]
+    fn test_entry_evidence_serialization_includes_computed_confidence() {
+        // Create entry with high confidence (many keyword matches, appears complete)
+        let entry = create_high_confidence_entry("Test feature");
+
+        let json = serde_json::to_string(&entry).expect("serialization should succeed");
+
+        // Confidence should be included in serialized output
+        assert!(
+            json.contains(r#""confidence":"high""#),
+            "JSON should include computed confidence field: {}",
+            json
+        );
+        assert!(
+            json.contains(r#""original_description":"Test feature""#),
+            "JSON should include original_description"
+        );
+    }
+
+    #[test]
+    fn test_entry_evidence_serialization_includes_low_confidence() {
+        // Create entry with low confidence (no keyword matches, has stubs)
+        let entry = create_low_confidence_entry("Incomplete feature");
+
+        let json = serde_json::to_string(&entry).expect("serialization should succeed");
+
+        // Low confidence should be serialized
+        assert!(
+            json.contains(r#""confidence":"low""#),
+            "JSON should include computed low confidence field: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_entry_evidence_confidence_computed_consistently() {
+        // Create entry and verify confidence is computed each time (not cached incorrectly)
+        let entry = create_medium_confidence_entry("Medium feature");
+
+        // Call confidence() multiple times
+        let conf1 = entry.confidence();
+        let conf2 = entry.confidence();
+        let conf3 = entry.confidence();
+
+        assert_eq!(conf1, conf2);
+        assert_eq!(conf2, conf3);
+        assert_eq!(conf1, Confidence::Medium);
     }
 }

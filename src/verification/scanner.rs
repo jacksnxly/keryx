@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 
 use crate::changelog::ChangelogEntry;
 use super::evidence::{
-    Confidence, CountCheck, EntryEvidence, KeyFileContent, KeywordMatch,
+    CountCheck, EntryEvidence, KeyFileContent, KeywordMatch,
     StubIndicator, VerificationEvidence,
 };
 
@@ -71,7 +71,7 @@ pub fn gather_verification_evidence(
 /// Analyze a single changelog entry against the codebase.
 fn analyze_entry(entry: &ChangelogEntry, repo_path: &Path) -> EntryEvidence {
     let description = &entry.description;
-    let category = entry.category.as_str().to_string();
+    let category = entry.category.clone();
 
     // Extract keywords from the description
     let keywords = extract_keywords(description);
@@ -101,17 +101,14 @@ fn analyze_entry(entry: &ChangelogEntry, repo_path: &Path) -> EntryEvidence {
     // Check for numeric claims
     let count_checks = verify_numeric_claims(description, repo_path);
 
-    // Calculate confidence
-    let confidence = calculate_confidence(&keyword_matches, &all_stub_indicators, &count_checks);
-
-    EntryEvidence {
-        original_description: description.clone(),
+    // Confidence is computed automatically by EntryEvidence
+    EntryEvidence::new(
+        description.clone(),
         category,
         keyword_matches,
         count_checks,
-        stub_indicators: all_stub_indicators,
-        confidence,
-    }
+        all_stub_indicators,
+    )
 }
 
 /// Extract meaningful keywords from a description.
@@ -418,8 +415,8 @@ fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Vec<Stu
             .current_dir(repo_path)
             .output();
 
-        if let Ok(out) = output {
-            if out.status.success() {
+        match output {
+            Ok(out) if out.status.success() => {
                 let content = String::from_utf8_lossy(&out.stdout);
                 for line in content.lines() {
                     if let Some((line_num, context)) = parse_rg_line(line) {
@@ -438,6 +435,24 @@ fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Vec<Stu
                         });
                     }
                 }
+            }
+            Ok(out) if out.status.code() == Some(1) => {
+                // No matches found - this is normal for stub detection
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                debug!(
+                    "rg failed searching for stub patterns in '{}': exit code {:?}, stderr: {}",
+                    file,
+                    out.status.code(),
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                debug!(
+                    "Failed to execute rg for stub patterns in '{}': {}",
+                    file, e
+                );
             }
         }
     }
@@ -630,10 +645,18 @@ fn search_and_count_array(
     for file in files {
         // Read the file and try to count array elements
         let file_path = repo_path.join(&file);
-        if let Ok(content) = std::fs::read_to_string(&file_path) {
-            // Simple heuristic: count items between [ and ]
-            if let Some(count) = count_array_elements(&content, pattern) {
-                return Some((count, file));
+        match std::fs::read_to_string(&file_path) {
+            Ok(content) => {
+                // Simple heuristic: count items between [ and ]
+                if let Some(count) = count_array_elements(&content, pattern) {
+                    return Some((count, file));
+                }
+            }
+            Err(e) => {
+                debug!(
+                    "Cannot read file '{}' for array counting: {}",
+                    file, e
+                );
             }
         }
     }
@@ -718,52 +741,6 @@ fn count_array_elements(content: &str, pattern: &str) -> Option<usize> {
     Some(count)
 }
 
-/// Calculate confidence based on evidence.
-fn calculate_confidence(
-    keyword_matches: &[KeywordMatch],
-    stub_indicators: &[StubIndicator],
-    count_checks: &[CountCheck],
-) -> Confidence {
-    // Start with medium confidence
-    let mut score: i32 = 50;
-
-    // Boost for keyword matches
-    for km in keyword_matches {
-        if km.occurrence_count > 0 {
-            score += 10;
-            if km.appears_complete {
-                score += 10;
-            }
-        }
-        if km.files_found.len() > 2 {
-            score += 5;
-        }
-    }
-
-    // Penalty for stub indicators
-    score -= (stub_indicators.len() as i32) * 15;
-
-    // Penalty for count mismatches
-    for check in count_checks {
-        if !check.matches() {
-            score -= 20;
-        }
-    }
-
-    // No keyword matches at all is suspicious
-    if keyword_matches.is_empty() {
-        score -= 30;
-    }
-
-    if score >= 70 {
-        Confidence::High
-    } else if score >= 40 {
-        Confidence::Medium
-    } else {
-        Confidence::Low
-    }
-}
-
 /// Get project structure using tree command.
 fn get_project_structure(repo_path: &Path) -> Option<String> {
     let output = Command::new("tree")
@@ -782,7 +759,11 @@ fn get_project_structure(repo_path: &Path) -> Option<String> {
             let truncated: String = tree.lines().take(50).collect::<Vec<_>>().join("\n");
             Some(truncated)
         }
-        _ => {
+        Ok(out) => {
+            debug!(
+                "tree command failed (exit code {:?}), falling back to ls",
+                out.status.code()
+            );
             // Fallback to ls if tree not available
             let ls_output = Command::new("ls")
                 .args(["-la"])
@@ -790,10 +771,49 @@ fn get_project_structure(repo_path: &Path) -> Option<String> {
                 .output();
 
             match ls_output {
-                Ok(out) if out.status.success() => {
-                    Some(String::from_utf8_lossy(&out.stdout).to_string())
+                Ok(ls_out) if ls_out.status.success() => {
+                    Some(String::from_utf8_lossy(&ls_out.stdout).to_string())
                 }
-                _ => None,
+                Ok(ls_out) => {
+                    debug!(
+                        "ls command also failed (exit code {:?}), cannot get project structure",
+                        ls_out.status.code()
+                    );
+                    None
+                }
+                Err(e) => {
+                    debug!("ls command error: {}, cannot get project structure", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                debug!("tree command not found, falling back to ls");
+            } else {
+                debug!("tree command error: {}, falling back to ls", e);
+            }
+            // Fallback to ls if tree not available
+            let ls_output = Command::new("ls")
+                .args(["-la"])
+                .current_dir(repo_path)
+                .output();
+
+            match ls_output {
+                Ok(ls_out) if ls_out.status.success() => {
+                    Some(String::from_utf8_lossy(&ls_out.stdout).to_string())
+                }
+                Ok(ls_out) => {
+                    debug!(
+                        "ls command also failed (exit code {:?}), cannot get project structure",
+                        ls_out.status.code()
+                    );
+                    None
+                }
+                Err(e) => {
+                    debug!("ls command error: {}, cannot get project structure", e);
+                    None
+                }
             }
         }
     }
@@ -814,18 +834,30 @@ fn gather_key_files(repo_path: &Path) -> Vec<KeyFileContent> {
     for file in &key_files {
         let path = repo_path.join(file);
         if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                // Truncate large files
-                let truncated = if content.len() > 5000 {
-                    format!("{}...[truncated]", &content[..5000])
-                } else {
-                    content
-                };
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    // Truncate large files (respecting UTF-8 character boundaries)
+                    let truncated = if content.len() > 5000 {
+                        let mut end = 5000;
+                        while end > 0 && !content.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...[truncated]", &content[..end])
+                    } else {
+                        content
+                    };
 
-                contents.push(KeyFileContent {
-                    path: file.to_string(),
-                    content: truncated,
-                });
+                    contents.push(KeyFileContent {
+                        path: file.to_string(),
+                        content: truncated,
+                    });
+                }
+                Err(e) => {
+                    warn!(
+                        "Key file '{}' exists but cannot be read: {}",
+                        file, e
+                    );
+                }
             }
         }
     }
@@ -836,6 +868,8 @@ fn gather_key_files(repo_path: &Path) -> Vec<KeyFileContent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::changelog::ChangelogCategory;
+    use super::super::evidence::Confidence;
 
     #[test]
     fn test_extract_keywords() {
@@ -873,50 +907,58 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_confidence_high() {
-        let keyword_matches = vec![
-            KeywordMatch {
-                keyword: "test".to_string(),
-                files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
-                occurrence_count: 10,
-                sample_lines: vec![],
-                appears_complete: true,
-            },
-        ];
+    fn test_entry_confidence_high() {
+        let entry = EntryEvidence::new(
+            "Test entry".to_string(),
+            ChangelogCategory::Added,
+            vec![
+                KeywordMatch {
+                    keyword: "test".to_string(),
+                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                    occurrence_count: 10,
+                    sample_lines: vec![],
+                    appears_complete: true,
+                },
+            ],
+            vec![],
+            vec![],
+        );
 
-        let confidence = calculate_confidence(&keyword_matches, &[], &[]);
-        assert_eq!(confidence, Confidence::High);
+        assert_eq!(entry.confidence(), Confidence::High);
     }
 
     #[test]
-    fn test_calculate_confidence_low_with_stubs() {
-        let keyword_matches = vec![
-            KeywordMatch {
-                keyword: "test".to_string(),
-                files_found: vec!["a.rs".to_string()],
-                occurrence_count: 1,
-                sample_lines: vec![],
-                appears_complete: false,
-            },
-        ];
+    fn test_entry_confidence_low_with_stubs() {
+        let entry = EntryEvidence::new(
+            "Test entry".to_string(),
+            ChangelogCategory::Added,
+            vec![
+                KeywordMatch {
+                    keyword: "test".to_string(),
+                    files_found: vec!["a.rs".to_string()],
+                    occurrence_count: 1,
+                    sample_lines: vec![],
+                    appears_complete: false,
+                },
+            ],
+            vec![],
+            vec![
+                StubIndicator {
+                    file: "a.rs".to_string(),
+                    line: 10,
+                    indicator: "TODO".to_string(),
+                    context: "// TODO: implement".to_string(),
+                },
+                StubIndicator {
+                    file: "a.rs".to_string(),
+                    line: 20,
+                    indicator: "unimplemented!".to_string(),
+                    context: "unimplemented!()".to_string(),
+                },
+            ],
+        );
 
-        let stub_indicators = vec![
-            StubIndicator {
-                file: "a.rs".to_string(),
-                line: 10,
-                indicator: "TODO".to_string(),
-                context: "// TODO: implement".to_string(),
-            },
-            StubIndicator {
-                file: "a.rs".to_string(),
-                line: 20,
-                indicator: "unimplemented!".to_string(),
-                context: "unimplemented!()".to_string(),
-            },
-        ];
-
-        let confidence = calculate_confidence(&keyword_matches, &stub_indicators, &[]);
-        assert_eq!(confidence, Confidence::Low);
+        assert_eq!(entry.confidence(), Confidence::Low);
     }
 
     // Tests for verify_numeric_claims (KRX-054)
@@ -1053,5 +1095,72 @@ mod tests {
         let (line_num, content) = result.unwrap();
         assert_eq!(line_num, 10);
         assert_eq!(content, "let url = \"http://example.com\";");
+    }
+
+    // Tests for gather_key_files UTF-8 truncation (KRX-057)
+
+    #[test]
+    fn test_gather_key_files_truncates_large_files_with_utf8() {
+        use std::fs;
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+
+        // Create a README.md with multi-byte UTF-8 characters
+        // We need content > 5000 bytes where a multi-byte char would be at boundary
+        let mut content = String::new();
+        // Fill with CJK characters (3 bytes each) to ensure multi-byte chars
+        // are near the 5000 byte boundary
+        for _ in 0..2000 {
+            content.push('日'); // 3 bytes each = 6000 bytes total
+        }
+
+        let readme_path = temp_dir.path().join("README.md");
+        fs::write(&readme_path, &content).expect("Failed to write test file");
+
+        // This should not panic - it previously would if truncation hit mid-character
+        let result = gather_key_files(temp_dir.path());
+
+        // Verify we got the file
+        assert!(!result.is_empty(), "Should find README.md");
+
+        // Find the README entry
+        let readme_entry = result.iter().find(|k| k.path == "README.md");
+        assert!(readme_entry.is_some(), "Should have README.md entry");
+
+        let truncated = &readme_entry.unwrap().content;
+        // Should be truncated (indicated by the suffix)
+        assert!(
+            truncated.ends_with("...[truncated]"),
+            "Large file should be truncated"
+        );
+        // Should be valid UTF-8 (this would have panicked before the fix)
+        assert!(truncated.is_ascii() || truncated.chars().count() > 0);
+    }
+
+    #[test]
+    fn test_gather_key_files_does_not_truncate_small_files() {
+        use std::fs;
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+
+        // Create a small README.md (under 5000 bytes)
+        let content = "# My Project\n\nThis is a small readme with emojis 🚀✨\n";
+        let readme_path = temp_dir.path().join("README.md");
+        fs::write(&readme_path, content).expect("Failed to write test file");
+
+        let result = gather_key_files(temp_dir.path());
+
+        assert!(!result.is_empty(), "Should find README.md");
+
+        let readme_entry = result.iter().find(|k| k.path == "README.md");
+        assert!(readme_entry.is_some());
+
+        let file_content = &readme_entry.unwrap().content;
+        // Should NOT be truncated
+        assert!(
+            !file_content.ends_with("...[truncated]"),
+            "Small file should not be truncated"
+        );
+        assert_eq!(file_content, content);
     }
 }
