@@ -57,7 +57,6 @@ axoupdater = { version = "0.9", default-features = false, features = ["github_re
 
 # Atomic file writes
 tempfile = "3"
-regex = "1.12.2"
 
 [dev-dependencies]
 wiremock = "0.6"

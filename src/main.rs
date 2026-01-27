@@ -16,7 +16,7 @@ use keryx::claude::{build_prompt, build_verification_prompt, check_claude_instal
 use keryx::changelog::format::CHANGELOG_HEADER;
 use keryx::git::{commits::fetch_commits, range::{find_root_commit, resolve_range}, tags::{get_all_tags, get_latest_tag}};
 use keryx::github::{auth::get_github_token, prs::{fetch_merged_prs, parse_github_remote}};
-use keryx::verification::gather_verification_evidence;
+use keryx::verification::{check_ripgrep_installed, gather_verification_evidence};
 use keryx::version::calculate_next_version;
 
 /// Result from the background update check.
@@ -448,9 +448,16 @@ async fn run_init_from_history(
     no_prs: bool,
     strict: bool,
     pr_limit: Option<usize>,
-    _no_verify: bool,
+    no_verify: bool,
     _verbose: bool,
 ) -> Result<()> {
+    if !no_verify {
+        eprintln!(
+            "\x1b[33m⚠ Note: Verification is not yet supported for --from-history.\n  \
+             Entries will be unverified. Use --no-verify to suppress this warning.\x1b[0m"
+        );
+    }
+
     check_claude_installed()
         .await
         .context("Claude Code CLI is required")?;
@@ -842,6 +849,10 @@ async fn verify_changelog_entries(
 ) -> Result<keryx::ChangelogOutput> {
     use std::path::Path;
 
+    // Check prerequisites
+    check_ripgrep_installed()
+        .context("Verification requires ripgrep")?;
+
     println!("Verifying entries against codebase...");
 
     // Gather evidence from the codebase
@@ -859,7 +870,7 @@ async fn verify_changelog_entries(
                 eprintln!("    └─ Found {} stub/TODO indicators", entry.stub_indicators.len());
             }
             for check in &entry.count_checks {
-                if !check.matches {
+                if !check.matches() {
                     eprintln!(
                         "    └─ Count mismatch: claimed {}, found {}",
                         check.claimed_text,
@@ -920,7 +931,11 @@ fn truncate_description(desc: &str, max_len: usize) -> String {
     if desc.len() <= max_len {
         desc.to_string()
     } else {
-        format!("{}...", &desc[..max_len - 3])
+        let mut end = max_len.saturating_sub(3);
+        while end > 0 && !desc.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &desc[..end])
     }
 }
 
@@ -1004,4 +1019,60 @@ fn get_cli_features() -> Vec<String> {
         "Automatic backup: Creates .changelog.md.bak before modifying".to_string(),
         "Handles [Unreleased] sections per Keep a Changelog spec".to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_description_short_string() {
+        // Short strings should not be truncated
+        assert_eq!(truncate_description("hello", 10), "hello");
+        assert_eq!(truncate_description("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_description_exact_length() {
+        // String exactly at max_len should not be truncated
+        assert_eq!(truncate_description("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_description_ascii() {
+        // ASCII strings should be truncated normally
+        assert_eq!(truncate_description("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_description_multibyte_characters() {
+        // Multi-byte UTF-8 characters should not cause a panic
+        // and truncation should respect character boundaries
+
+        // Emoji (4 bytes each)
+        let emoji_str = "🚀🔥💡✨";
+        let result = truncate_description(emoji_str, 10);
+        assert!(result.ends_with("..."));
+        // Should not panic and should be valid UTF-8
+
+        // CJK characters (3 bytes each)
+        let cjk_str = "日本語テスト";
+        let result = truncate_description(cjk_str, 10);
+        assert!(result.ends_with("..."));
+
+        // Mixed ASCII and multi-byte
+        let mixed = "hello 世界 🌍";
+        let result = truncate_description(mixed, 12);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_description_very_short_max_len() {
+        // Edge case: max_len smaller than "..."
+        let result = truncate_description("hello", 2);
+        assert_eq!(result, "...");
+
+        let result = truncate_description("hello", 3);
+        assert_eq!(result, "...");
+    }
 }

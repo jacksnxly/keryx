@@ -512,4 +512,185 @@ mod tests {
         let filtered_count = sanitized.matches("[filtered]").count();
         assert_eq!(filtered_count, 2);
     }
+
+    // Tests for build_verification_prompt (KRX-054)
+
+    #[test]
+    fn test_build_verification_prompt_contains_required_sections() {
+        use crate::verification::VerificationEvidence;
+
+        let evidence = VerificationEvidence::empty();
+        let draft = r#"{"entries": [{"category": "Added", "description": "New feature"}]}"#;
+
+        let prompt = build_verification_prompt(draft, &evidence)
+            .expect("build_verification_prompt should succeed");
+
+        // Check all required sections are present
+        assert!(
+            prompt.contains("## Draft Changelog Entries"),
+            "Should contain draft entries section"
+        );
+        assert!(
+            prompt.contains("## Codebase Evidence"),
+            "Should contain evidence section"
+        );
+        assert!(
+            prompt.contains("## Verification Instructions"),
+            "Should contain instructions section"
+        );
+        assert!(
+            prompt.contains("## Output"),
+            "Should contain output format section"
+        );
+    }
+
+    #[test]
+    fn test_build_verification_prompt_embeds_draft_json() {
+        use crate::verification::VerificationEvidence;
+
+        let evidence = VerificationEvidence::empty();
+        let draft = r#"{"entries": [{"category": "Added", "description": "WebSocket support"}]}"#;
+
+        let prompt = build_verification_prompt(draft, &evidence)
+            .expect("build_verification_prompt should succeed");
+
+        // The draft JSON should be embedded verbatim in the prompt
+        assert!(
+            prompt.contains("WebSocket support"),
+            "Draft content should be embedded in prompt"
+        );
+        assert!(
+            prompt.contains(draft),
+            "Full draft JSON should be present"
+        );
+    }
+
+    #[test]
+    fn test_build_verification_prompt_embeds_evidence_json() {
+        use crate::verification::{
+            Confidence, EntryEvidence, KeywordMatch, VerificationEvidence,
+        };
+
+        let mut evidence = VerificationEvidence::empty();
+        evidence.entries.push(EntryEvidence {
+            original_description: "Added WebSocket streaming".to_string(),
+            category: "Added".to_string(),
+            keyword_matches: vec![KeywordMatch {
+                keyword: "websocket".to_string(),
+                files_found: vec!["src/ws.rs".to_string()],
+                occurrence_count: 5,
+                sample_lines: vec!["pub struct WebSocket".to_string()],
+                appears_complete: true,
+            }],
+            count_checks: vec![],
+            stub_indicators: vec![],
+            confidence: Confidence::High,
+        });
+
+        let draft = r#"{"entries": []}"#;
+        let prompt = build_verification_prompt(draft, &evidence)
+            .expect("build_verification_prompt should succeed");
+
+        // Evidence should be serialized and embedded
+        assert!(
+            prompt.contains("websocket"),
+            "Evidence keyword should be in prompt"
+        );
+        assert!(
+            prompt.contains("src/ws.rs"),
+            "Evidence file path should be in prompt"
+        );
+        assert!(
+            prompt.contains("WebSocket streaming"),
+            "Original description should be in evidence"
+        );
+    }
+
+    #[test]
+    fn test_build_verification_prompt_includes_verification_criteria() {
+        use crate::verification::VerificationEvidence;
+
+        let evidence = VerificationEvidence::empty();
+        let draft = r#"{"entries": []}"#;
+
+        let prompt = build_verification_prompt(draft, &evidence)
+            .expect("build_verification_prompt should succeed");
+
+        // Check for key verification instructions
+        assert!(
+            prompt.contains("Keyword Verification"),
+            "Should mention keyword verification"
+        );
+        assert!(
+            prompt.contains("Count Accuracy"),
+            "Should mention count accuracy"
+        );
+        assert!(
+            prompt.contains("Stub Detection"),
+            "Should mention stub detection"
+        );
+        assert!(
+            prompt.contains("Confidence Assessment"),
+            "Should mention confidence assessment"
+        );
+    }
+
+    #[test]
+    fn test_build_verification_prompt_includes_output_format() {
+        use crate::verification::VerificationEvidence;
+
+        let evidence = VerificationEvidence::empty();
+        let draft = r#"{"entries": []}"#;
+
+        let prompt = build_verification_prompt(draft, &evidence)
+            .expect("build_verification_prompt should succeed");
+
+        // Check output format instructions
+        assert!(
+            prompt.contains("_verification_note"),
+            "Should mention verification note field"
+        );
+        assert!(
+            prompt.contains("removed_entries"),
+            "Should mention removed entries"
+        );
+        assert!(
+            prompt.contains("hallucination"),
+            "Should mention hallucination detection"
+        );
+    }
+
+    #[test]
+    fn test_build_verification_prompt_with_count_checks() {
+        use crate::verification::{Confidence, CountCheck, EntryEvidence, VerificationEvidence};
+
+        let mut evidence = VerificationEvidence::empty();
+        evidence.entries.push(EntryEvidence {
+            original_description: "Added 8 templates".to_string(),
+            category: "Added".to_string(),
+            keyword_matches: vec![],
+            count_checks: vec![CountCheck {
+                claimed_text: "8 templates".to_string(),
+                claimed_count: Some(8),
+                actual_count: Some(5),
+                source_location: Some("src/templates.rs".to_string()),
+            }],
+            stub_indicators: vec![],
+            confidence: Confidence::Medium,
+        });
+
+        let draft = r#"{"entries": [{"category": "Added", "description": "Added 8 templates"}]}"#;
+        let prompt = build_verification_prompt(draft, &evidence)
+            .expect("build_verification_prompt should succeed");
+
+        // Count check data should be embedded
+        assert!(
+            prompt.contains("8 templates"),
+            "Claimed text should be in evidence"
+        );
+        assert!(
+            prompt.contains("src/templates.rs"),
+            "Source location should be in evidence"
+        );
+    }
 }

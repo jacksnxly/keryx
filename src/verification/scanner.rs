@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
-use regex::Regex;
-use tracing::debug;
+use regex_lite::Regex;
+use tracing::{debug, warn};
 
 use crate::changelog::ChangelogEntry;
 use super::evidence::{
@@ -177,9 +177,11 @@ struct SearchResult {
 /// Search for a keyword in the codebase using ripgrep.
 fn search_keyword(keyword: &str, repo_path: &Path) -> Option<SearchResult> {
     // Use ripgrep for fast searching
+    // Use --fixed-strings to treat keyword as literal text, not regex
     let output = Command::new("rg")
         .args([
             "--ignore-case",
+            "--fixed-strings",
             "--files-with-matches",
             "--type-add", "code:*.{rs,ts,tsx,js,jsx,py,go,java,c,cpp,h,hpp}",
             "--type", "code",
@@ -201,7 +203,28 @@ fn search_keyword(keyword: &str, repo_path: &Path) -> Option<SearchResult> {
                 .map(String::from)
                 .collect()
         }
-        _ => return None,
+        Ok(out) if out.status.code() == Some(1) => {
+            // Exit code 1 means no matches found - this is normal
+            return None;
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            warn!(
+                "rg failed searching for keyword '{}': exit code {:?}, stderr: {}",
+                keyword,
+                out.status.code(),
+                stderr.trim()
+            );
+            return None;
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                warn!("ripgrep (rg) not found - install with: cargo install ripgrep");
+            } else {
+                warn!("Failed to execute rg for keyword '{}': {}", keyword, e);
+            }
+            return None;
+        }
     };
 
     if files.is_empty() {
@@ -209,9 +232,11 @@ fn search_keyword(keyword: &str, repo_path: &Path) -> Option<SearchResult> {
     }
 
     // Get sample lines with context
+    // Use --fixed-strings to treat keyword as literal text, not regex
     let samples_output = Command::new("rg")
         .args([
             "--ignore-case",
+            "--fixed-strings",
             "--max-count", "3",
             "-C", "1",
             "--type-add", "code:*.{rs,ts,tsx,js,jsx,py,go,java,c,cpp,h,hpp}",
@@ -234,13 +259,32 @@ fn search_keyword(keyword: &str, repo_path: &Path) -> Option<SearchResult> {
                 .map(String::from)
                 .collect()
         }
-        _ => Vec::new(),
+        Ok(out) if out.status.code() == Some(1) => {
+            // No matches found - this is normal
+            Vec::new()
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            warn!(
+                "rg failed getting samples for keyword '{}': exit code {:?}, stderr: {}",
+                keyword,
+                out.status.code(),
+                stderr.trim()
+            );
+            Vec::new()
+        }
+        Err(e) => {
+            warn!("Failed to execute rg for samples of '{}': {}", keyword, e);
+            Vec::new()
+        }
     };
 
     // Count total occurrences
+    // Use --fixed-strings to treat keyword as literal text, not regex
     let count_output = Command::new("rg")
         .args([
             "--ignore-case",
+            "--fixed-strings",
             "--count-matches",
             "--type-add", "code:*.{rs,ts,tsx,js,jsx,py,go,java,c,cpp,h,hpp}",
             "--type", "code",
@@ -263,7 +307,27 @@ fn search_keyword(keyword: &str, repo_path: &Path) -> Option<SearchResult> {
                 })
                 .sum()
         }
-        _ => files.len(),
+        Ok(out) if out.status.code() == Some(1) => {
+            // No matches found - this is normal
+            files.len()
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            warn!(
+                "rg --count-matches failed for keyword '{}': exit code {:?}, stderr: {}. Using file count as fallback.",
+                keyword,
+                out.status.code(),
+                stderr.trim()
+            );
+            files.len()
+        }
+        Err(e) => {
+            warn!(
+                "Failed to execute rg --count-matches for '{}': {}. Using file count as fallback.",
+                keyword, e
+            );
+            files.len()
+        }
     };
 
     Some(SearchResult {
@@ -278,9 +342,11 @@ fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Vec<Stu
     let mut indicators = Vec::new();
 
     // First, find files containing the keyword
+    // Use --fixed-strings to treat keyword as literal text, not regex
     let files_output = Command::new("rg")
         .args([
             "--ignore-case",
+            "--fixed-strings",
             "--files-with-matches",
             "-g", "!target",
             "-g", "!node_modules",
@@ -300,35 +366,76 @@ fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Vec<Stu
                 .map(String::from)
                 .collect()
         }
-        _ => return indicators,
+        Ok(out) if out.status.code() == Some(1) => {
+            // No matches found - this is normal
+            return indicators;
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            warn!(
+                "rg failed finding files for stub indicators (keyword '{}'): exit code {:?}, stderr: {}",
+                keyword,
+                out.status.code(),
+                stderr.trim()
+            );
+            return indicators;
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                warn!("ripgrep (rg) not found - install with: cargo install ripgrep");
+            } else {
+                warn!(
+                    "Failed to execute rg for stub indicators (keyword '{}'): {}",
+                    keyword, e
+                );
+            }
+            return indicators;
+        }
     };
 
-    // Check each file for stub patterns
+    // Check each file for all stub patterns in a single rg call
+    // Using -e flag for multiple patterns reduces subprocess count by 12x
     for file in files {
-        for pattern in STUB_PATTERNS {
-            let output = Command::new("rg")
-                .args([
-                    "--line-number",
-                    "--max-count", "3",
-                    "-C", "1",
-                    pattern,
-                    &file,
-                ])
-                .current_dir(repo_path)
-                .output();
+        let mut args = vec![
+            "--fixed-strings".to_string(),
+            "--line-number".to_string(),
+            "--max-count".to_string(),
+            "36".to_string(), // 3 per pattern * 12 patterns
+            "-C".to_string(),
+            "1".to_string(),
+        ];
 
-            if let Ok(out) = output {
-                if out.status.success() {
-                    let content = String::from_utf8_lossy(&out.stdout);
-                    for line in content.lines() {
-                        if let Some((line_num, context)) = parse_rg_line(line) {
-                            indicators.push(StubIndicator {
-                                file: file.clone(),
-                                line: line_num,
-                                indicator: pattern.to_string(),
-                                context,
-                            });
-                        }
+        // Add each pattern with -e flag
+        for pattern in STUB_PATTERNS {
+            args.push("-e".to_string());
+            args.push(pattern.to_string());
+        }
+
+        args.push(file.clone());
+
+        let output = Command::new("rg")
+            .args(&args)
+            .current_dir(repo_path)
+            .output();
+
+        if let Ok(out) = output {
+            if out.status.success() {
+                let content = String::from_utf8_lossy(&out.stdout);
+                for line in content.lines() {
+                    if let Some((line_num, context)) = parse_rg_line(line) {
+                        // Determine which pattern matched by checking the context
+                        let indicator = STUB_PATTERNS
+                            .iter()
+                            .find(|p| context.contains(*p))
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "stub".to_string());
+
+                        indicators.push(StubIndicator {
+                            file: file.clone(),
+                            line: line_num,
+                            indicator,
+                            context,
+                        });
                     }
                 }
             }
@@ -370,14 +477,11 @@ fn verify_numeric_claims(description: &str, repo_path: &Path) -> Vec<CountCheck>
         // Try to verify this count
         let (actual_count, source) = try_verify_count(subject, repo_path);
 
-        let matches = actual_count.map(|a| a == claimed_count).unwrap_or(true);
-
         checks.push(CountCheck {
             claimed_text: format!("{} {}", count_str, subject),
             claimed_count: Some(claimed_count),
             actual_count,
             source_location: source,
-            matches,
         });
     }
 
@@ -444,7 +548,28 @@ fn count_files_matching(repo_path: &Path, glob: &str, keyword: &str) -> Option<u
                 None
             }
         }
-        _ => None,
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            warn!(
+                "find command failed for glob '{}', keyword '{}': exit code {:?}, stderr: {}",
+                glob,
+                keyword,
+                out.status.code(),
+                stderr.trim()
+            );
+            None
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                warn!("find command not found - this should be available on Unix systems");
+            } else {
+                warn!(
+                    "Failed to execute find for glob '{}', keyword '{}': {}",
+                    glob, keyword, e
+                );
+            }
+            None
+        }
     }
 }
 
@@ -474,7 +599,32 @@ fn search_and_count_array(
                 .map(String::from)
                 .collect()
         }
-        _ => return None,
+        Ok(out) if out.status.code() == Some(1) => {
+            // No matches found - this is normal
+            return None;
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            warn!(
+                "rg failed searching for array pattern '{}' in '{}': exit code {:?}, stderr: {}",
+                pattern,
+                file_glob,
+                out.status.code(),
+                stderr.trim()
+            );
+            return None;
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                warn!("ripgrep (rg) not found - install with: cargo install ripgrep");
+            } else {
+                warn!(
+                    "Failed to execute rg for array pattern '{}' in '{}': {}",
+                    pattern, file_glob, e
+                );
+            }
+            return None;
+        }
     };
 
     for file in files {
@@ -595,7 +745,7 @@ fn calculate_confidence(
 
     // Penalty for count mismatches
     for check in count_checks {
-        if !check.matches {
+        if !check.matches() {
             score -= 20;
         }
     }
@@ -767,5 +917,141 @@ mod tests {
 
         let confidence = calculate_confidence(&keyword_matches, &stub_indicators, &[]);
         assert_eq!(confidence, Confidence::Low);
+    }
+
+    // Tests for verify_numeric_claims (KRX-054)
+
+    #[test]
+    fn test_verify_numeric_claims_extracts_count() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let checks = verify_numeric_claims("Added 8 templates for reports", temp_dir.path());
+
+        // Should find the "8 templates" claim
+        assert!(!checks.is_empty(), "Should extract numeric claims");
+        let claim = checks.iter().find(|c| c.claimed_text.contains("8"));
+        assert!(claim.is_some(), "Should find '8 templates' claim");
+        assert_eq!(claim.unwrap().claimed_count, Some(8));
+    }
+
+    #[test]
+    fn test_verify_numeric_claims_skips_zero() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let checks = verify_numeric_claims("Added 0 bugs to the codebase", temp_dir.path());
+
+        // Should skip zero counts as unreasonable
+        let zero_claim = checks.iter().find(|c| c.claimed_count == Some(0));
+        assert!(zero_claim.is_none(), "Should skip zero counts");
+    }
+
+    #[test]
+    fn test_verify_numeric_claims_skips_large_numbers() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let checks = verify_numeric_claims("Added 9999 features", temp_dir.path());
+
+        // Should skip unreasonably large counts (>1000)
+        let large_claim = checks.iter().find(|c| c.claimed_count == Some(9999));
+        assert!(large_claim.is_none(), "Should skip counts > 1000");
+    }
+
+    #[test]
+    fn test_verify_numeric_claims_no_numbers() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let checks = verify_numeric_claims("Added WebSocket support", temp_dir.path());
+
+        // No numeric claims, should return empty
+        assert!(checks.is_empty(), "Should return empty for no numeric claims");
+    }
+
+    #[test]
+    fn test_verify_numeric_claims_multiple_claims() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let checks = verify_numeric_claims("Added 5 templates and 3 presets", temp_dir.path());
+
+        // Should find both claims
+        assert!(checks.len() >= 2, "Should find multiple numeric claims");
+
+        let five_claim = checks.iter().find(|c| c.claimed_count == Some(5));
+        assert!(five_claim.is_some(), "Should find '5 templates' claim");
+
+        let three_claim = checks.iter().find(|c| c.claimed_count == Some(3));
+        assert!(three_claim.is_some(), "Should find '3 presets' claim");
+    }
+
+    #[test]
+    fn test_verify_numeric_claims_formats_claimed_text() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let checks = verify_numeric_claims("Added 10 new widgets", temp_dir.path());
+
+        assert!(!checks.is_empty());
+        let claim = &checks[0];
+        // claimed_text should include both the number and subject
+        assert!(claim.claimed_text.contains("10"), "claimed_text should contain the number");
+    }
+
+    #[test]
+    fn test_verify_numeric_claims_boundary_1000() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+
+        // 1000 should be accepted (boundary)
+        let checks_1000 = verify_numeric_claims("Added 1000 items", temp_dir.path());
+        let claim_1000 = checks_1000.iter().find(|c| c.claimed_count == Some(1000));
+        assert!(claim_1000.is_some(), "1000 should be accepted");
+
+        // 1001 should be rejected
+        let checks_1001 = verify_numeric_claims("Added 1001 items", temp_dir.path());
+        let claim_1001 = checks_1001.iter().find(|c| c.claimed_count == Some(1001));
+        assert!(claim_1001.is_none(), "1001 should be rejected");
+    }
+
+    // Tests for parse_rg_line (KRX-054)
+
+    #[test]
+    fn test_parse_rg_line_with_colon() {
+        let result = parse_rg_line("123:fn main() {");
+        assert!(result.is_some());
+        let (line_num, content) = result.unwrap();
+        assert_eq!(line_num, 123);
+        assert_eq!(content, "fn main() {");
+    }
+
+    #[test]
+    fn test_parse_rg_line_with_dash() {
+        // Dash is used for context lines in ripgrep
+        let result = parse_rg_line("45-    let x = 1;");
+        assert!(result.is_some());
+        let (line_num, content) = result.unwrap();
+        assert_eq!(line_num, 45);
+        assert_eq!(content, "    let x = 1;");
+    }
+
+    #[test]
+    fn test_parse_rg_line_invalid_no_separator() {
+        let result = parse_rg_line("no separator here");
+        assert!(result.is_none(), "Should return None for missing separator");
+    }
+
+    #[test]
+    fn test_parse_rg_line_invalid_non_numeric() {
+        let result = parse_rg_line("abc:some content");
+        assert!(result.is_none(), "Should return None for non-numeric line number");
+    }
+
+    #[test]
+    fn test_parse_rg_line_empty_content() {
+        let result = parse_rg_line("1:");
+        assert!(result.is_some());
+        let (line_num, content) = result.unwrap();
+        assert_eq!(line_num, 1);
+        assert_eq!(content, "");
+    }
+
+    #[test]
+    fn test_parse_rg_line_content_with_colon() {
+        // Content itself may contain colons
+        let result = parse_rg_line("10:let url = \"http://example.com\";");
+        assert!(result.is_some());
+        let (line_num, content) = result.unwrap();
+        assert_eq!(line_num, 10);
+        assert_eq!(content, "let url = \"http://example.com\";");
     }
 }

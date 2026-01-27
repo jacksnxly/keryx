@@ -983,7 +983,6 @@ dependencies = [
  "mockall",
  "octocrab",
  "parse-changelog",
- "regex",
  "regex-lite",
  "semver",
  "serde",

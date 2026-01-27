@@ -99,3 +99,15 @@ pub enum VersionError {
     #[error("No version found to bump from")]
     NoBaseVersion,
 }
+
+/// Errors from verification operations.
+#[derive(Error, Debug)]
+pub enum VerificationError {
+    #[error("ripgrep (rg) is required for verification but was not found.\n\n\
+             Install with one of:\n  \
+             cargo install ripgrep\n  \
+             brew install ripgrep     (macOS)\n  \
+             apt install ripgrep      (Debian/Ubuntu)\n\n\
+             Or skip verification with: --no-verify")]
+    RipgrepNotInstalled,
+}
