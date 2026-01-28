@@ -192,13 +192,21 @@ fn analyze_entry(entry: &ChangelogEntry, repo_path: &Path) -> EntryEvidence {
     // Check for numeric claims
     let count_checks = verify_numeric_claims(description, repo_path);
 
+    // Deduplicate stub indicators by (file, line) - same TODO shouldn't count multiple times
+    // even if found via different keywords
+    let mut seen_stubs = HashSet::new();
+    let unique_stub_indicators: Vec<_> = all_stub_indicators
+        .into_iter()
+        .filter(|s| seen_stubs.insert((s.file.clone(), s.line)))
+        .collect();
+
     // Confidence is computed automatically by EntryEvidence
     EntryEvidence::new(
         description.clone(),
         category,
         keyword_matches,
         count_checks,
-        all_stub_indicators,
+        unique_stub_indicators,
     )
 }
 
@@ -226,11 +234,16 @@ fn extract_keywords(description: &str) -> Vec<String> {
         keywords.insert(word);
     }
 
-    // Also extract quoted terms
+    // Also extract quoted terms (but skip CLI flags like --no-verify)
     let quote_re = Regex::new(r#"["'`]([^"'`]+)["'`]"#).expect("Invalid regex");
     for cap in quote_re.captures_iter(description) {
         if let Some(quoted) = cap.get(1) {
-            let term = quoted.as_str().to_lowercase();
+            let term = quoted.as_str();
+            // Skip CLI flags (start with - or --)
+            if term.starts_with('-') {
+                continue;
+            }
+            let term = term.to_lowercase();
             if term.len() >= 3 && term.len() <= 50 {
                 keywords.insert(term);
             }
@@ -401,12 +414,26 @@ fn verify_numeric_claims(description: &str, repo_path: &Path) -> Vec<CountCheck>
     let mut checks = Vec::new();
 
     // Regex to find numeric claims like "8 templates", "6 languages", etc.
-    let num_re = Regex::new(r"(\d+)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)?)")
+    // Uses word boundary \b to avoid matching "UTF-8" as "8 handling"
+    let num_re = Regex::new(r"\b(\d+)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)?)")
         .expect("Invalid regex");
+
+    // Subjects that are not countable things (false positives)
+    let non_countable = [
+        "handling", "panic", "error", "errors", "issue", "issues",
+        "byte", "bytes", "bit", "bits", "character", "characters",
+        "pass", "mode", "way", "ways", "time", "times",
+    ];
 
     for cap in num_re.captures_iter(description) {
         let count_str = cap.get(1).map(|m| m.as_str()).unwrap_or("0");
         let subject = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+
+        // Skip non-countable subjects
+        let subject_lower = subject.to_lowercase();
+        if non_countable.iter().any(|nc| subject_lower.starts_with(nc)) {
+            continue;
+        }
 
         let claimed_count: usize = count_str.parse().unwrap_or(0);
         if claimed_count == 0 || claimed_count > 1000 {

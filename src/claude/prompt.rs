@@ -79,7 +79,8 @@ Do NOT skip entries just because commits look like "chore" or "initial commit" -
         format!(
             r#"This is an incremental release for "{repo_name}" (previous version: {}).
 Focus only on changes since the last release.
-Ignore docs-only, test-only, and chore commits unless they affect users."#,
+Include user-facing documentation (README updates, new guides, installation instructions).
+Skip internal docs (code comments), test-only commits, and chore commits (deps, CI)."#,
             input.previous_version.as_ref().unwrap()
         )
     };
@@ -103,6 +104,8 @@ following the Keep a Changelog format.
 2. Write user-facing descriptions (not technical commit messages)
 3. Focus on benefits and impact
 4. Combine related commits/PRs into single entries where appropriate
+5. Look for bug fixes even in refactor/test commits (check for "fix", "panic", "crash", "bug" in messages)
+6. Each distinct fix should be its own entry under Fixed, not bundled into Added features
 
 Respond with JSON:
 {{
