@@ -430,6 +430,11 @@ async fn run_init_unreleased(repo: &Repository, config: &InitConfig) -> Result<(
         verify_changelog_entries(&draft_output, repo_path, config.verbose).await?
     };
 
+    if changelog_output.entries.is_empty() {
+        println!("No verified changelog entries found. Creating basic changelog template.");
+        return run_init_basic(&config.output, config.dry_run);
+    }
+
     // Build the changelog content
     let mut content = CHANGELOG_HEADER.to_string();
     content.push_str("## [Unreleased]\n\n");
@@ -796,6 +801,11 @@ async fn run_generate(cli: Cli) -> Result<()> {
         )?;
         verify_changelog_entries(&draft_output, repo_path, cli.verbose).await?
     };
+
+    if changelog_output.entries.is_empty() {
+        println!("No verified changelog entries found. Nothing to add.");
+        return Ok(());
+    }
 
     // Step 9: Write or display changelog
     if cli.dry_run {
