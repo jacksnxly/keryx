@@ -64,16 +64,16 @@ impl EntryEvidence {
 
         // Boost for keyword matches
         for km in &self.keyword_matches {
-            if let Some(count) = km.occurrence_count {
-                if count > 0 {
-                    // Verified occurrences found - boost confidence
+            if let Some(count) = km.occurrence_count
+                && count > 0
+            {
+                // Verified occurrences found - boost confidence
+                score += 10;
+                if km.appears_complete {
                     score += 10;
-                    if km.appears_complete {
-                        score += 10;
-                    }
                 }
-                // Some(0) = explicitly counted zero occurrences - no boost
             }
+            // Some(0) = explicitly counted zero occurrences - no boost
             // None = counting failed - no boost (cannot verify)
 
             if km.files_found.len() > 2 {

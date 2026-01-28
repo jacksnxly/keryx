@@ -176,7 +176,7 @@ fn test_keyword_search_finds_websocket() {
 
     let ws = ws_match.unwrap();
     assert!(
-        ws.occurrence_count.map_or(false, |c| c > 0),
+        ws.occurrence_count.is_some_and(|c| c > 0),
         "Should have occurrence count > 0"
     );
     assert!(

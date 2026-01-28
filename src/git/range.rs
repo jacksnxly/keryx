@@ -54,10 +54,10 @@ pub fn resolve_range(
 /// Resolve a reference (tag, branch, commit hash) to an OID.
 fn resolve_reference(repo: &Repository, reference: &str) -> Result<Oid, GitError> {
     // Try as a direct OID first
-    if let Ok(oid) = Oid::from_str(reference) {
-        if repo.find_commit(oid).is_ok() {
-            return Ok(oid);
-        }
+    if let Ok(oid) = Oid::from_str(reference)
+        && repo.find_commit(oid).is_ok()
+    {
+        return Ok(oid);
     }
 
     // Try as a reference (branch or tag)

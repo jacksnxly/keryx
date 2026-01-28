@@ -170,16 +170,16 @@ pub async fn fetch_merged_prs_with_client(
             };
 
             // Filter by date range if specified
-            if let Some(since_date) = since {
-                if merged_at < since_date {
-                    continue;
-                }
+            if let Some(since_date) = since
+                && merged_at < since_date
+            {
+                continue;
             }
 
-            if let Some(until_date) = until {
-                if merged_at > until_date {
-                    continue;
-                }
+            if let Some(until_date) = until
+                && merged_at > until_date
+            {
+                continue;
             }
 
             // Validate PR number (0 is invalid, should never happen from GitHub API)

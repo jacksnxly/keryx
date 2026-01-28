@@ -147,10 +147,10 @@ mod retry_helper {
                 Err(e) => {
                     last_error = Some(e);
 
-                    if attempts < MAX_ATTEMPTS {
-                        if let Some(wait_duration) = backoff.next_backoff() {
-                            tokio::time::sleep(wait_duration).await;
-                        }
+                    if attempts < MAX_ATTEMPTS
+                        && let Some(wait_duration) = backoff.next_backoff()
+                    {
+                        tokio::time::sleep(wait_duration).await;
                     }
                 }
             }
@@ -196,17 +196,17 @@ mod retry_helper {
 
     fn extract_json(response: &str) -> String {
         // Try markdown block first
-        if let Some(start) = response.find("```json") {
-            if let Some(end) = response[start + 7..].find("```") {
-                return response[start + 7..start + 7 + end].trim().to_string();
-            }
+        if let Some(start) = response.find("```json")
+            && let Some(end) = response[start + 7..].find("```")
+        {
+            return response[start + 7..start + 7 + end].trim().to_string();
         }
 
         // Try to find JSON object
-        if let Some(start) = response.find('{') {
-            if let Some(end) = response.rfind('}') {
-                return response[start..=end].to_string();
-            }
+        if let Some(start) = response.find('{')
+            && let Some(end) = response.rfind('}')
+        {
+            return response[start..=end].to_string();
         }
 
         response.to_string()

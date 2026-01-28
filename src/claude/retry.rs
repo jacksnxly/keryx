@@ -66,10 +66,10 @@ pub(crate) async fn generate_with_retry_impl<E: ClaudeExecutor>(
             Err(e) => {
                 last_error = Some(e);
 
-                if attempts < MAX_ATTEMPTS {
-                    if let Some(wait_duration) = backoff.next_backoff() {
-                        tokio::time::sleep(wait_duration).await;
-                    }
+                if attempts < MAX_ATTEMPTS
+                    && let Some(wait_duration) = backoff.next_backoff()
+                {
+                    tokio::time::sleep(wait_duration).await;
                 }
             }
         }
@@ -130,10 +130,10 @@ fn parse_claude_response(response: &str) -> Result<ChangelogOutput, ClaudeError>
 /// Uses proper JSON parsing to handle nested objects correctly.
 fn extract_json(response: &str) -> String {
     // Try to find JSON block in markdown first
-    if let Some(start) = response.find("```json") {
-        if let Some(end) = response[start + 7..].find("```") {
-            return response[start + 7..start + 7 + end].trim().to_string();
-        }
+    if let Some(start) = response.find("```json")
+        && let Some(end) = response[start + 7..].find("```")
+    {
+        return response[start + 7..start + 7 + end].trim().to_string();
     }
 
     // Use proper JSON parsing to find valid JSON objects

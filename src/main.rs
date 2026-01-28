@@ -734,20 +734,19 @@ async fn run_generate(cli: Cli) -> Result<()> {
     // Step 6b: Check if version already exists in changelog
     if let Some(parsed) = read_changelog(&cli.output)
         .context("Failed to read existing changelog")?
+        && parsed.has_version(&next_version)
     {
-        if parsed.has_version(&next_version) {
-            if cli.force {
-                eprintln!(
-                    "\x1b[33m⚠ Warning: Version {} already exists in changelog, overwriting due to --force\x1b[0m",
-                    next_version
-                );
-            } else {
-                bail!(
-                    "Version {} already exists in {}. Use --force to overwrite, or use --set-version to specify a different version.",
-                    next_version,
-                    cli.output.display()
-                );
-            }
+        if cli.force {
+            eprintln!(
+                "\x1b[33m⚠ Warning: Version {} already exists in changelog, overwriting due to --force\x1b[0m",
+                next_version
+            );
+        } else {
+            bail!(
+                "Version {} already exists in {}. Use --force to overwrite, or use --set-version to specify a different version.",
+                next_version,
+                cli.output.display()
+            );
         }
     }
 
@@ -975,14 +974,12 @@ fn read_cargo_description() -> Option<String> {
     // Simple parsing - look for description = "..."
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with("description") {
-            if let Some(start) = line.find('"') {
-                if let Some(end) = line.rfind('"') {
-                    if end > start {
-                        return Some(line[start + 1..end].to_string());
-                    }
-                }
-            }
+        if line.starts_with("description")
+            && let Some(start) = line.find('"')
+            && let Some(end) = line.rfind('"')
+            && end > start
+        {
+            return Some(line[start + 1..end].to_string());
         }
     }
     None

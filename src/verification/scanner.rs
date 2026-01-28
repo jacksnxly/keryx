@@ -363,7 +363,7 @@ fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Result<
     // Using -e flag for multiple patterns reduces subprocess count by 12x
     for file in &files {
         let mut cmd = Command::new("rg");
-        cmd.args(["--fixed-strings", "--line-number", "--max-count", "36", "-C", "1"]);
+        cmd.args(["--fixed-strings", "--line-number", "--max-count", "36", "--json", "-C", "1"]);
 
         // Add each pattern with -e flag
         for pattern in STUB_PATTERNS {
@@ -375,7 +375,7 @@ fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Result<
 
         if let Some(stdout) = run_rg_or_warn(&mut cmd, &format!("stub patterns in '{}'", file)) {
             for line in stdout.lines() {
-                if let Some((line_num, context)) = parse_rg_line(line) {
+                if let Some((line_num, context)) = parse_rg_json_match(line) {
                     // Determine which pattern matched by checking the context
                     let indicator = STUB_PATTERNS
                         .iter()
@@ -397,16 +397,20 @@ fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Result<
     Ok(indicators)
 }
 
-/// Parse a ripgrep output line into line number and content.
-fn parse_rg_line(line: &str) -> Option<(usize, String)> {
-    // Format: "123:content" or "123-context"
-    let parts: Vec<&str> = line.splitn(2, |c| c == ':' || c == '-').collect();
-    if parts.len() == 2 {
-        if let Ok(num) = parts[0].parse::<usize>() {
-            return Some((num, parts[1].to_string()));
-        }
+/// Parse a ripgrep JSON output line into line number and content.
+fn parse_rg_json_match(line: &str) -> Option<(usize, String)> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let kind = value.get("type")?.as_str()?;
+    if kind != "match" {
+        return None;
     }
-    None
+
+    let data = value.get("data")?;
+    let line_num = data.get("line_number")?.as_u64()? as usize;
+    let text = data.get("lines")?.get("text")?.as_str()?;
+    let context = text.trim_end_matches(['\n', '\r']).to_string();
+
+    Some((line_num, context))
 }
 
 /// Verify numeric claims in a description.
@@ -414,8 +418,8 @@ fn verify_numeric_claims(description: &str, repo_path: &Path) -> Vec<CountCheck>
     let mut checks = Vec::new();
 
     // Regex to find numeric claims like "8 templates", "6 languages", etc.
-    // Uses word boundary \b to avoid matching "UTF-8" as "8 handling"
-    let num_re = Regex::new(r"\b(\d+)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)?)")
+    // Anchors on start/whitespace to avoid matching hyphenated tokens like "UTF-8 handling".
+    let num_re = Regex::new(r"(?:^|\s)(\d+)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)?)")
         .expect("Invalid regex");
 
     // Subjects that are not countable things (false positives)
@@ -1015,6 +1019,14 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_numeric_claims_skips_hyphenated_tokens() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let checks = verify_numeric_claims("Improved UTF-8 handling", temp_dir.path());
+
+        assert!(checks.is_empty(), "Should skip hyphenated tokens like UTF-8");
+    }
+
+    #[test]
     fn test_verify_numeric_claims_multiple_claims() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let checks = verify_numeric_claims("Added 5 templates and 3 presets", temp_dir.path());
@@ -1055,11 +1067,12 @@ mod tests {
         assert!(claim_1001.is_none(), "1001 should be rejected");
     }
 
-    // Tests for parse_rg_line (KRX-054)
+    // Tests for parse_rg_json_match (KRX-054)
 
     #[test]
-    fn test_parse_rg_line_with_colon() {
-        let result = parse_rg_line("123:fn main() {");
+    fn test_parse_rg_json_match_basic() {
+        let line = r#"{"type":"match","data":{"line_number":123,"lines":{"text":"fn main() {\n"}}}"#;
+        let result = parse_rg_json_match(line);
         assert!(result.is_some());
         let (line_num, content) = result.unwrap();
         assert_eq!(line_num, 123);
@@ -1067,30 +1080,29 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_rg_line_with_dash() {
-        // Dash is used for context lines in ripgrep
-        let result = parse_rg_line("45-    let x = 1;");
-        assert!(result.is_some());
-        let (line_num, content) = result.unwrap();
-        assert_eq!(line_num, 45);
-        assert_eq!(content, "    let x = 1;");
+    fn test_parse_rg_json_match_skips_context() {
+        let line = r#"{"type":"context","data":{"line_number":45,"lines":{"text":"    let x = 1;\n"}}}"#;
+        let result = parse_rg_json_match(line);
+        assert!(result.is_none(), "Should skip context lines");
     }
 
     #[test]
-    fn test_parse_rg_line_invalid_no_separator() {
-        let result = parse_rg_line("no separator here");
-        assert!(result.is_none(), "Should return None for missing separator");
+    fn test_parse_rg_json_match_invalid_json() {
+        let result = parse_rg_json_match("not json");
+        assert!(result.is_none(), "Should return None for invalid JSON");
     }
 
     #[test]
-    fn test_parse_rg_line_invalid_non_numeric() {
-        let result = parse_rg_line("abc:some content");
-        assert!(result.is_none(), "Should return None for non-numeric line number");
+    fn test_parse_rg_json_match_missing_fields() {
+        let line = r#"{"type":"match","data":{"lines":{"text":"hello\n"}}}"#;
+        let result = parse_rg_json_match(line);
+        assert!(result.is_none(), "Should return None when line_number is missing");
     }
 
     #[test]
-    fn test_parse_rg_line_empty_content() {
-        let result = parse_rg_line("1:");
+    fn test_parse_rg_json_match_empty_content() {
+        let line = r#"{"type":"match","data":{"line_number":1,"lines":{"text":"\n"}}}"#;
+        let result = parse_rg_json_match(line);
         assert!(result.is_some());
         let (line_num, content) = result.unwrap();
         assert_eq!(line_num, 1);
@@ -1098,9 +1110,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_rg_line_content_with_colon() {
+    fn test_parse_rg_json_match_content_with_colon() {
         // Content itself may contain colons
-        let result = parse_rg_line("10:let url = \"http://example.com\";");
+        let line = r#"{"type":"match","data":{"line_number":10,"lines":{"text":"let url = \"http://example.com\";\n"}}}"#;
+        let result = parse_rg_json_match(line);
         assert!(result.is_some());
         let (line_num, content) = result.unwrap();
         assert_eq!(line_num, 10);

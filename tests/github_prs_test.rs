@@ -209,7 +209,7 @@ fn mock_pr(
 
 /// Create a simple merged PR for a given page number.
 fn pr_for_page(page: u32) -> serde_json::Value {
-    let merged_at = Utc.with_ymd_and_hms(2024, 1, (page % 28) as u32 + 1, 12, 0, 0).unwrap();
+    let merged_at = Utc.with_ymd_and_hms(2024, 1, (page % 28) + 1, 12, 0, 0).unwrap();
     mock_pr(
         page as u64,
         &format!("PR from page {}", page),

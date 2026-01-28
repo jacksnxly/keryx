@@ -26,22 +26,22 @@ struct ChangelogEntry {
 }
 
 fn extract_json(response: &str) -> String {
-    if let Some(start) = response.find("```json") {
-        if let Some(end) = response[start + 7..].find("```") {
-            return response[start + 7..start + 7 + end].trim().to_string();
-        }
+    if let Some(start) = response.find("```json")
+        && let Some(end) = response[start + 7..].find("```")
+    {
+        return response[start + 7..start + 7 + end].trim().to_string();
     }
 
-    if let Some(start) = response.find("{\"entries\"") {
-        if let Some(end) = response[start..].find('}') {
-            return response[start..=start + end].to_string();
-        }
+    if let Some(start) = response.find("{\"entries\"")
+        && let Some(end) = response[start..].find('}')
+    {
+        return response[start..=start + end].to_string();
     }
 
-    if let Some(start) = response.find('{') {
-        if let Some(end) = response.rfind('}') {
-            return response[start..=end].to_string();
-        }
+    if let Some(start) = response.find('{')
+        && let Some(end) = response.rfind('}')
+    {
+        return response[start..=end].to_string();
     }
 
     response.to_string()

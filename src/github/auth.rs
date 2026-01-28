@@ -34,17 +34,17 @@ pub async fn get_github_token() -> Result<String, GitHubError> {
 /// 2. GH_TOKEN environment variable
 pub fn get_token_from_env() -> Result<String, GitHubError> {
     // Try GITHUB_TOKEN first
-    if let Ok(token) = env::var("GITHUB_TOKEN") {
-        if !token.is_empty() {
-            return Ok(token);
-        }
+    if let Ok(token) = env::var("GITHUB_TOKEN")
+        && !token.is_empty()
+    {
+        return Ok(token);
     }
 
     // Fall back to GH_TOKEN
-    if let Ok(token) = env::var("GH_TOKEN") {
-        if !token.is_empty() {
-            return Ok(token);
-        }
+    if let Ok(token) = env::var("GH_TOKEN")
+        && !token.is_empty()
+    {
+        return Ok(token);
     }
 
     Err(GitHubError::AuthenticationFailed)
