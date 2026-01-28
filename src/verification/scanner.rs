@@ -8,11 +8,66 @@ use regex_lite::Regex;
 use tracing::{debug, warn};
 
 use crate::changelog::ChangelogEntry;
-use crate::error::ScannerError;
+use crate::error::VerificationError;
 use super::evidence::{
     CountCheck, EntryEvidence, KeyFileContent, KeywordMatch,
     StubIndicator, VerificationEvidence,
 };
+
+/// Outcome of a ripgrep command execution.
+enum RgOutcome {
+    /// Command succeeded with output.
+    Success(String),
+    /// No matches found (exit code 1) - this is normal, not an error.
+    NoMatch,
+}
+
+/// Execute a ripgrep command and categorize the outcome.
+///
+/// Handles the common three-way result pattern:
+/// - Success with output → `Ok(RgOutcome::Success(stdout))`
+/// - Exit code 1 (no matches) → `Ok(RgOutcome::NoMatch)`
+/// - Other exit codes or errors → `Err(VerificationError)`
+fn run_rg(cmd: &mut Command) -> Result<RgOutcome, VerificationError> {
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            Ok(RgOutcome::Success(String::from_utf8_lossy(&out.stdout).to_string()))
+        }
+        Ok(out) if out.status.code() == Some(1) => {
+            // Exit code 1 means no matches found - this is normal
+            Ok(RgOutcome::NoMatch)
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Err(VerificationError::RipgrepFailed {
+                exit_code: out.status.code(),
+                stderr,
+            })
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Err(VerificationError::RipgrepNotInstalled)
+            } else {
+                Err(VerificationError::ScannerIoError(e))
+            }
+        }
+    }
+}
+
+/// Execute a ripgrep command, logging warnings on failure and returning a default.
+///
+/// Use this for "best-effort" calls where failure shouldn't abort the operation.
+/// Returns `Some(stdout)` on success, `None` on no-match or error (with warning logged).
+fn run_rg_or_warn(cmd: &mut Command, context: &str) -> Option<String> {
+    match run_rg(cmd) {
+        Ok(RgOutcome::Success(stdout)) => Some(stdout),
+        Ok(RgOutcome::NoMatch) => None,
+        Err(e) => {
+            warn!("rg failed for {}: {}", context, e);
+            None
+        }
+    }
+}
 
 /// Common ripgrep arguments to exclude build/dependency directories.
 const RG_EXCLUDE_PATTERNS: &[&str] = &[
@@ -103,15 +158,24 @@ fn analyze_entry(entry: &ChangelogEntry, repo_path: &Path) -> EntryEvidence {
         match search_keyword(keyword, repo_path) {
             Ok(Some(match_result)) => {
                 // Check for stub indicators near the matches
-                let stubs = find_stub_indicators_near_keyword(keyword, repo_path);
-                // Mark incomplete if stubs found OR if occurrence counting failed
-                let appears_complete = stubs.is_empty() && match_result.count.is_some();
+                let (stubs, stub_detection_ok) = match find_stub_indicators_near_keyword(keyword, repo_path) {
+                    Ok(s) => (s, true),
+                    Err(e) => {
+                        warn!(
+                            "Stub detection failed for keyword '{}': {}. Conservatively marking as incomplete.",
+                            keyword, e
+                        );
+                        (Vec::new(), false)
+                    }
+                };
+                // Mark incomplete if stubs found, occurrence counting failed, OR stub detection failed
+                let appears_complete = stub_detection_ok && stubs.is_empty() && match_result.count.is_some();
 
                 all_stub_indicators.extend(stubs);
                 keyword_matches.push(KeywordMatch {
                     keyword: keyword.clone(),
                     files_found: match_result.files,
-                    occurrence_count: match_result.count.unwrap_or(0),
+                    occurrence_count: match_result.count,
                     sample_lines: match_result.samples,
                     appears_complete,
                 });
@@ -221,118 +285,38 @@ fn build_rg_keyword_command(keyword: &str, repo_path: &Path) -> Command {
 /// - `Ok(Some(result))` - Matches found
 /// - `Ok(None)` - No matches found (normal, expected)
 /// - `Err(error)` - Error occurred during search
-fn search_keyword(keyword: &str, repo_path: &Path) -> Result<Option<SearchResult>, ScannerError> {
+fn search_keyword(keyword: &str, repo_path: &Path) -> Result<Option<SearchResult>, VerificationError> {
     // Use ripgrep for fast searching
     // Use --fixed-strings to treat keyword as literal text, not regex
-    let output = build_rg_keyword_command(keyword, repo_path)
-        .arg("--files-with-matches")
-        .output();
-
-    let files: Vec<String> = match output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .take(10) // Limit to 10 files
-                .map(String::from)
-                .collect()
-        }
-        Ok(out) if out.status.code() == Some(1) => {
-            // Exit code 1 means no matches found - this is normal
-            return Ok(None);
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(ScannerError::RipgrepFailed {
-                exit_code: out.status.code(),
-                stderr,
-            });
-        }
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                return Err(ScannerError::RipgrepNotFound);
-            }
-            return Err(ScannerError::IoError(format!(
-                "Failed to execute rg for keyword '{}': {}",
-                keyword, e
-            )));
-        }
+    let files: Vec<String> = match run_rg(
+        build_rg_keyword_command(keyword, repo_path).arg("--files-with-matches"),
+    )? {
+        RgOutcome::Success(stdout) => stdout.lines().take(10).map(String::from).collect(),
+        RgOutcome::NoMatch => return Ok(None),
     };
 
     if files.is_empty() {
         return Ok(None);
     }
 
-    // Get sample lines with context
-    let samples_output = build_rg_keyword_command(keyword, repo_path)
-        .args(["--max-count", "3", "-C", "1"])
-        .output();
+    // Get sample lines with context (best-effort)
+    let samples: Option<Vec<String>> = run_rg_or_warn(
+        build_rg_keyword_command(keyword, repo_path).args(["--max-count", "3", "-C", "1"]),
+        &format!("samples for keyword '{}'", keyword),
+    )
+    .map(|stdout| stdout.lines().take(15).map(String::from).collect());
 
-    let samples: Option<Vec<String>> = match samples_output {
-        Ok(out) if out.status.success() => {
-            Some(String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .take(15) // Limit sample lines
-                .map(String::from)
-                .collect())
-        }
-        Ok(out) if out.status.code() == Some(1) => {
-            // No matches found - this is normal
-            Some(Vec::new())
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            warn!(
-                "rg failed getting samples for keyword '{}': exit code {:?}, stderr: {}",
-                keyword,
-                out.status.code(),
-                stderr.trim()
-            );
-            None
-        }
-        Err(e) => {
-            warn!("Failed to execute rg for samples of '{}': {}", keyword, e);
-            None
-        }
-    };
-
-    // Count total occurrences
-    let count_output = build_rg_keyword_command(keyword, repo_path)
-        .arg("--count-matches")
-        .output();
-
-    let count: Option<usize> = match count_output {
-        Ok(out) if out.status.success() => {
-            Some(
-                String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .filter_map(|line| {
-                        line.rsplit(':').next()?.parse::<usize>().ok()
-                    })
-                    .sum(),
-            )
-        }
-        Ok(out) if out.status.code() == Some(1) => {
-            // No matches found - count is zero
-            Some(0)
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            warn!(
-                "rg --count-matches failed for keyword '{}': exit code {:?}, stderr: {}. Count unavailable.",
-                keyword,
-                out.status.code(),
-                stderr.trim()
-            );
-            None
-        }
-        Err(e) => {
-            warn!(
-                "Failed to execute rg --count-matches for '{}': {}. Count unavailable.",
-                keyword, e
-            );
-            None
-        }
-    };
+    // Count total occurrences (best-effort)
+    let count: Option<usize> = run_rg_or_warn(
+        build_rg_keyword_command(keyword, repo_path).arg("--count-matches"),
+        &format!("count for keyword '{}'", keyword),
+    )
+    .map(|stdout| {
+        stdout
+            .lines()
+            .filter_map(|line| line.rsplit(':').next()?.parse::<usize>().ok())
+            .sum()
+    });
 
     Ok(Some(SearchResult {
         files,
@@ -342,122 +326,62 @@ fn search_keyword(keyword: &str, repo_path: &Path) -> Result<Option<SearchResult
 }
 
 /// Find stub indicators near a keyword in the codebase.
-fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Vec<StubIndicator> {
+///
+/// Returns `Err` if ripgrep fails or is not found, so the caller can
+/// conservatively treat the feature as incomplete rather than silently
+/// marking it complete.
+fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Result<Vec<StubIndicator>, VerificationError> {
     let mut indicators = Vec::new();
 
-    // First, find files containing the keyword
-    let files_output = {
-        let mut cmd = Command::new("rg");
-        cmd.args(["--ignore-case", "--fixed-strings", "--files-with-matches"]);
-        cmd.args(RG_EXCLUDE_PATTERNS);
-        cmd.arg(keyword);
-        cmd.current_dir(repo_path);
-        cmd.output()
-    };
+    // First, find files containing the keyword (only in source code files)
+    let mut cmd = Command::new("rg");
+    cmd.args(["--ignore-case", "--fixed-strings", "--files-with-matches"]);
+    cmd.args(RG_CODE_TYPE);
+    cmd.args(RG_EXCLUDE_PATTERNS);
+    cmd.arg(keyword);
+    cmd.current_dir(repo_path);
 
-    let files: Vec<String> = match files_output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .take(5) // Only check first 5 files
-                .map(String::from)
-                .collect()
-        }
-        Ok(out) if out.status.code() == Some(1) => {
-            // No matches found - this is normal
-            return indicators;
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            warn!(
-                "rg failed finding files for stub indicators (keyword '{}'): exit code {:?}, stderr: {}",
-                keyword,
-                out.status.code(),
-                stderr.trim()
-            );
-            return indicators;
-        }
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                warn!("ripgrep (rg) not found - install with: cargo install ripgrep");
-            } else {
-                warn!(
-                    "Failed to execute rg for stub indicators (keyword '{}'): {}",
-                    keyword, e
-                );
-            }
-            return indicators;
-        }
+    let files: Vec<String> = match run_rg(&mut cmd)? {
+        RgOutcome::Success(stdout) => stdout.lines().take(5).map(String::from).collect(),
+        RgOutcome::NoMatch => return Ok(indicators),
     };
 
     // Check each file for all stub patterns in a single rg call
     // Using -e flag for multiple patterns reduces subprocess count by 12x
-    for file in files {
-        let mut args = vec![
-            "--fixed-strings".to_string(),
-            "--line-number".to_string(),
-            "--max-count".to_string(),
-            "36".to_string(), // 3 per pattern * 12 patterns
-            "-C".to_string(),
-            "1".to_string(),
-        ];
+    for file in &files {
+        let mut cmd = Command::new("rg");
+        cmd.args(["--fixed-strings", "--line-number", "--max-count", "36", "-C", "1"]);
 
         // Add each pattern with -e flag
         for pattern in STUB_PATTERNS {
-            args.push("-e".to_string());
-            args.push(pattern.to_string());
+            cmd.args(["-e", pattern]);
         }
 
-        args.push(file.clone());
+        cmd.arg(file);
+        cmd.current_dir(repo_path);
 
-        let output = Command::new("rg")
-            .args(&args)
-            .current_dir(repo_path)
-            .output();
+        if let Some(stdout) = run_rg_or_warn(&mut cmd, &format!("stub patterns in '{}'", file)) {
+            for line in stdout.lines() {
+                if let Some((line_num, context)) = parse_rg_line(line) {
+                    // Determine which pattern matched by checking the context
+                    let indicator = STUB_PATTERNS
+                        .iter()
+                        .find(|p| context.contains(*p))
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "stub".to_string());
 
-        match output {
-            Ok(out) if out.status.success() => {
-                let content = String::from_utf8_lossy(&out.stdout);
-                for line in content.lines() {
-                    if let Some((line_num, context)) = parse_rg_line(line) {
-                        // Determine which pattern matched by checking the context
-                        let indicator = STUB_PATTERNS
-                            .iter()
-                            .find(|p| context.contains(*p))
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "stub".to_string());
-
-                        indicators.push(StubIndicator {
-                            file: file.clone(),
-                            line: line_num,
-                            indicator,
-                            context,
-                        });
-                    }
+                    indicators.push(StubIndicator {
+                        file: file.clone(),
+                        line: line_num,
+                        indicator,
+                        context,
+                    });
                 }
-            }
-            Ok(out) if out.status.code() == Some(1) => {
-                // No matches found - this is normal for stub detection
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                warn!(
-                    "rg failed searching for stub patterns in '{}': exit code {:?}, stderr: {}",
-                    file,
-                    out.status.code(),
-                    stderr.trim()
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to execute rg for stub patterns in '{}': {}",
-                    file, e
-                );
             }
         }
     }
 
-    indicators
+    Ok(indicators)
 }
 
 /// Parse a ripgrep output line into line number and content.
@@ -595,49 +519,19 @@ fn search_and_count_array(
     pattern: &str,
 ) -> Option<(usize, String)> {
     // Find files with the pattern
-    let output = {
-        let mut cmd = Command::new("rg");
-        cmd.args(["--files-with-matches", "-g", file_glob]);
-        cmd.args(RG_EXCLUDE_PATTERNS);
-        cmd.arg(pattern);
-        cmd.current_dir(repo_path);
-        cmd.output()
-    };
+    let mut cmd = Command::new("rg");
+    cmd.args(["--files-with-matches", "-g", file_glob]);
+    cmd.args(RG_EXCLUDE_PATTERNS);
+    cmd.arg(pattern);
+    cmd.current_dir(repo_path);
 
-    let files: Vec<String> = match output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(String::from)
-                .collect()
-        }
-        Ok(out) if out.status.code() == Some(1) => {
-            // No matches found - this is normal
-            return None;
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            warn!(
-                "rg failed searching for array pattern '{}' in '{}': exit code {:?}, stderr: {}",
-                pattern,
-                file_glob,
-                out.status.code(),
-                stderr.trim()
-            );
-            return None;
-        }
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                warn!("ripgrep (rg) not found - install with: cargo install ripgrep");
-            } else {
-                warn!(
-                    "Failed to execute rg for array pattern '{}' in '{}': {}",
-                    pattern, file_glob, e
-                );
-            }
-            return None;
-        }
-    };
+    let files: Vec<String> = run_rg_or_warn(
+        &mut cmd,
+        &format!("array pattern '{}' in '{}'", pattern, file_glob),
+    )?
+    .lines()
+    .map(String::from)
+    .collect();
 
     for file in files {
         // Read the file and try to count array elements
@@ -685,7 +579,7 @@ fn count_array_elements(content: &str, pattern: &str) -> Option<usize> {
     // Find matching closing bracket
     let mut depth = 0;
     let mut end = start;
-    for (i, c) in content[start..].chars().enumerate() {
+    for (i, c) in content[start..].char_indices() {
         match c {
             '[' | '{' => depth += 1,
             ']' | '}' => {
@@ -973,6 +867,29 @@ mod tests {
     }
 
     #[test]
+    fn test_count_array_elements_multibyte_utf8() {
+        // Multi-byte UTF-8 characters (CJK) would cause a panic with
+        // .chars().enumerate() because enumerate yields char indices,
+        // not byte offsets. .char_indices() yields byte offsets correctly.
+        let content = r#"const ITEMS = ["日本語", "中文", "한국어"];"#;
+        let count = count_array_elements(content, r"ITEMS\s*=\s*\[");
+        assert_eq!(count, Some(3));
+    }
+
+    #[test]
+    fn test_count_array_elements_multibyte_utf8_multiline() {
+        let content = r#"
+        const TEMPLATES = [
+            { name: "テンプレート" },
+            { name: "шаблон" },
+            { name: "plantilla" },
+        ];
+        "#;
+        let count = count_array_elements(content, r"TEMPLATES\s*=\s*\[");
+        assert_eq!(count, Some(3));
+    }
+
+    #[test]
     fn test_entry_confidence_high() {
         let entry = EntryEvidence::new(
             "Test entry".to_string(),
@@ -981,7 +898,7 @@ mod tests {
                 KeywordMatch {
                     keyword: "test".to_string(),
                     files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
-                    occurrence_count: 10,
+                    occurrence_count: Some(10),
                     sample_lines: Some(vec![]),
                     appears_complete: true,
                 },
@@ -1002,7 +919,7 @@ mod tests {
                 KeywordMatch {
                     keyword: "test".to_string(),
                     files_found: vec!["a.rs".to_string()],
-                    occurrence_count: 1,
+                    occurrence_count: Some(1),
                     sample_lines: Some(vec![]),
                     appears_complete: false,
                 },

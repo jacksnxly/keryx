@@ -219,12 +219,13 @@ pub fn sanitize_for_prompt(text: &str) -> String {
     result = lines.join("\n");
 
     // 8. Truncate to max length (OWASP recommends 10,000 chars)
+    // Find char boundary BEFORE truncating to avoid panic on multi-byte UTF-8
     if result.len() > MAX_INPUT_LENGTH {
-        result.truncate(MAX_INPUT_LENGTH);
-        // Ensure we don't cut in the middle of a UTF-8 character
-        while !result.is_char_boundary(result.len()) {
-            result.pop();
+        let mut end = MAX_INPUT_LENGTH;
+        while end > 0 && !result.is_char_boundary(end) {
+            end -= 1;
         }
+        result.truncate(end);
     }
 
     result
@@ -453,6 +454,28 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_multibyte_utf8_truncation_boundary() {
+        // KRX-079: Test that truncation at multi-byte UTF-8 boundary doesn't panic
+        // The emoji 🎉 is 4 bytes (0xF0 0x9F 0x8E 0x89)
+        // Create a string where MAX_INPUT_LENGTH falls in the middle of a multi-byte char
+        let emoji = "🎉"; // 4 bytes
+        let prefix_len = MAX_INPUT_LENGTH - 2; // 2 bytes short of limit
+        let prefix = "a".repeat(prefix_len);
+        let text = format!("{}{}", prefix, emoji); // Total: prefix_len + 4 bytes
+
+        // This should NOT panic - the old code would panic here
+        let sanitized = sanitize_for_prompt(&text);
+
+        // Result should be valid UTF-8 and within limits
+        assert!(sanitized.len() <= MAX_INPUT_LENGTH);
+        assert!(sanitized.is_char_boundary(sanitized.len()));
+
+        // The emoji should be truncated (not included) since it doesn't fit
+        assert!(!sanitized.contains('🎉'));
+        assert_eq!(sanitized.len(), prefix_len);
+    }
+
+    #[test]
     fn test_sanitize_limits_lines() {
         let many_lines = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
         let sanitized = sanitize_for_prompt(&many_lines);
@@ -578,7 +601,7 @@ mod tests {
             vec![KeywordMatch {
                 keyword: "websocket".to_string(),
                 files_found: vec!["src/ws.rs".to_string()],
-                occurrence_count: 5,
+                occurrence_count: Some(5),
                 sample_lines: Some(vec!["pub struct WebSocket".to_string()]),
                 appears_complete: true,
             }],

@@ -176,7 +176,7 @@ fn test_keyword_search_finds_websocket() {
 
     let ws = ws_match.unwrap();
     assert!(
-        ws.occurrence_count > 0,
+        ws.occurrence_count.map_or(false, |c| c > 0),
         "Should have occurrence count > 0"
     );
     assert!(
@@ -412,7 +412,7 @@ fn test_confidence_low_for_nonexistent_feature() {
     );
     assert!(
         entry_ev.keyword_matches.is_empty() ||
-        entry_ev.keyword_matches.iter().all(|k| k.occurrence_count == 0),
+        entry_ev.keyword_matches.iter().all(|k| k.occurrence_count == Some(0) || k.occurrence_count.is_none()),
         "Should have no keyword matches for nonexistent feature"
     );
 }

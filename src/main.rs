@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use git2::Repository;
 use semver::Version;
 use tracing::{debug, warn, Level};
@@ -174,6 +174,39 @@ enum Commands {
     },
 }
 
+/// Configuration for init commands, avoiding too_many_arguments clippy warning.
+struct InitConfig {
+    /// Path to output changelog file.
+    output: PathBuf,
+    /// Preview without writing to file.
+    dry_run: bool,
+    /// Skip GitHub PR fetching.
+    no_prs: bool,
+    /// Fail on any errors instead of graceful degradation.
+    strict: bool,
+    /// Maximum number of PRs to fetch.
+    pr_limit: Option<usize>,
+    /// Skip verification pass.
+    no_verify: bool,
+    /// Enable verbose/debug logging.
+    verbose: bool,
+}
+
+impl InitConfig {
+    /// Create an `InitConfig` from the CLI arguments.
+    fn from_cli(cli: &Cli) -> Self {
+        Self {
+            output: cli.output.clone(),
+            dry_run: cli.dry_run,
+            no_prs: cli.no_prs,
+            strict: cli.strict,
+            pr_limit: cli.pr_limit,
+            no_verify: cli.no_verify,
+            verbose: cli.verbose,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -195,7 +228,8 @@ async fn main() -> Result<()> {
     let result = match cli.command {
         Some(Commands::Update) => run_update().await,
         Some(Commands::Init { unreleased, from_history }) => {
-            run_init(&cli.output, cli.dry_run, cli.no_prs, cli.strict, unreleased, from_history, cli.pr_limit, cli.no_verify, cli.verbose).await
+            let config = InitConfig::from_cli(&cli);
+            run_init(&config, unreleased, from_history).await
         }
         None => run_generate(cli).await,
     };
@@ -265,23 +299,37 @@ async fn run_update() -> Result<()> {
     Ok(())
 }
 
+/// Handle PR fetch errors with consistent messaging.
+///
+/// In strict mode, returns an error. Otherwise, prints a warning and returns an empty Vec.
+fn handle_pr_fetch_error(e: anyhow::Error, strict: bool) -> Result<Vec<keryx::PullRequest>> {
+    if strict {
+        bail!(
+            "GitHub API error: {}. \n\
+            Hint: Use --no-prs to skip PR fetching, or check your GitHub token.",
+            e
+        );
+    }
+
+    warn!("GitHub API error: {}", e);
+    eprintln!();
+    eprintln!("\x1b[33m⚠ Warning: Could not fetch pull requests\x1b[0m");
+    eprintln!("  Error: {}", e);
+    eprintln!("  Impact: Changelog will be generated from commits only (may be incomplete)");
+    eprintln!("  Fix: Set GITHUB_TOKEN or run `gh auth login`");
+    eprintln!("  Hint: Use --strict to fail instead of continuing with partial data");
+    eprintln!();
+
+    Ok(Vec::new())
+}
+
 /// Run the init command to create a new changelog.
-async fn run_init(
-    output: &PathBuf,
-    dry_run: bool,
-    no_prs: bool,
-    strict: bool,
-    unreleased: bool,
-    from_history: bool,
-    pr_limit: Option<usize>,
-    no_verify: bool,
-    verbose: bool,
-) -> Result<()> {
+async fn run_init(config: &InitConfig, unreleased: bool, from_history: bool) -> Result<()> {
     // Check if changelog already exists
-    if output.exists() && !dry_run {
+    if config.output.exists() && !config.dry_run {
         bail!(
             "{} already exists. Delete it first or use a different output path with -o.",
-            output.display()
+            config.output.display()
         );
     }
 
@@ -290,11 +338,11 @@ async fn run_init(
         .context("Not a git repository. Run keryx from within a git repository.")?;
 
     if unreleased {
-        run_init_unreleased(&repo, output, dry_run, no_prs, strict, pr_limit, no_verify, verbose).await
+        run_init_unreleased(&repo, config).await
     } else if from_history {
-        run_init_from_history(&repo, output, dry_run, no_prs, strict, pr_limit, no_verify, verbose).await
+        run_init_from_history(&repo, config).await
     } else {
-        run_init_basic(output, dry_run)
+        run_init_basic(&config.output, config.dry_run)
     }
 }
 
@@ -318,16 +366,7 @@ fn run_init_basic(output: &PathBuf, dry_run: bool) -> Result<()> {
 }
 
 /// Create changelog with all commits in [Unreleased] section.
-async fn run_init_unreleased(
-    repo: &Repository,
-    output: &PathBuf,
-    dry_run: bool,
-    no_prs: bool,
-    strict: bool,
-    pr_limit: Option<usize>,
-    no_verify: bool,
-    verbose: bool,
-) -> Result<()> {
+async fn run_init_unreleased(repo: &Repository, config: &InitConfig) -> Result<()> {
     check_claude_installed()
         .await
         .context("Claude Code CLI is required")?;
@@ -335,49 +374,30 @@ async fn run_init_unreleased(
     println!("Analyzing all commits for [Unreleased] section...");
 
     // Get all commits from root to HEAD (bypassing tag-based resolution)
-    let root_oid = find_root_commit(repo, strict)
+    let root_oid = find_root_commit(repo, config.strict)
         .context("Failed to find root commit")?;
     let head_oid = repo.head()?.peel_to_commit()?.id();
 
-    let commits = fetch_commits(repo, root_oid, head_oid, strict)
+    let commits = fetch_commits(repo, root_oid, head_oid, config.strict)
         .context("Failed to fetch commits")?;
 
     if commits.is_empty() {
         // Just create basic changelog if no commits
-        return run_init_basic(output, dry_run);
+        return run_init_basic(&config.output, config.dry_run);
     }
 
     println!("Found {} commits", commits.len());
 
     // Fetch PRs if not disabled
-    let pull_requests = if no_prs {
+    let pull_requests = if config.no_prs {
         Vec::new()
     } else {
-        match fetch_prs_for_repo(repo, pr_limit).await {
+        match fetch_prs_for_repo(repo, config.pr_limit).await {
             Ok(prs) => {
                 println!("Found {} merged PRs", prs.len());
                 prs
             }
-            Err(e) => {
-                if strict {
-                    bail!(
-                        "GitHub API error: {}. \n\
-                        Hint: Use --no-prs to skip PR fetching, or check your GitHub token.",
-                        e
-                    );
-                }
-
-                warn!("GitHub API error: {}", e);
-                eprintln!();
-                eprintln!("\x1b[33m⚠ Warning: Could not fetch pull requests\x1b[0m");
-                eprintln!("  Error: {}", e);
-                eprintln!("  Impact: Changelog will be generated from commits only (may be incomplete)");
-                eprintln!("  Fix: Set GITHUB_TOKEN or run `gh auth login`");
-                eprintln!("  Hint: Use --strict to fail instead of continuing with partial data");
-                eprintln!();
-
-                Vec::new()
-            }
+            Err(e) => handle_pr_fetch_error(e, config.strict)?,
         }
     };
 
@@ -400,11 +420,14 @@ async fn run_init_unreleased(
         .context("Failed to generate changelog entries")?;
 
     // Verify entries against codebase (unless --no-verify)
-    let changelog_output = if no_verify {
+    let changelog_output = if config.no_verify {
         debug!("Skipping verification (--no-verify flag)");
         draft_output
     } else {
-        verify_changelog_entries(&draft_output, verbose).await?
+        let repo_path = repo.workdir().context(
+            "Cannot verify in a bare repository. Use --no-verify to skip verification."
+        )?;
+        verify_changelog_entries(&draft_output, repo_path, config.verbose).await?
     };
 
     // Build the changelog content
@@ -421,15 +444,15 @@ async fn run_init_unreleased(
         }
     }
 
-    if dry_run {
+    if config.dry_run {
         println!("\n--- Dry Run Output ---\n");
         println!("{}", content);
     } else {
-        std::fs::write(output, &content)
+        std::fs::write(&config.output, &content)
             .context("Failed to write changelog")?;
         println!(
             "✓ Created {} with {} entries in [Unreleased]",
-            output.display(),
+            config.output.display(),
             changelog_output.entries.len()
         );
     }
@@ -441,17 +464,8 @@ async fn run_init_unreleased(
 ///
 /// Note: Verification is not yet implemented for this path as it processes
 /// multiple versions. The regular `keryx` command includes verification.
-async fn run_init_from_history(
-    repo: &Repository,
-    output: &PathBuf,
-    dry_run: bool,
-    no_prs: bool,
-    strict: bool,
-    pr_limit: Option<usize>,
-    no_verify: bool,
-    _verbose: bool,
-) -> Result<()> {
-    if !no_verify {
+async fn run_init_from_history(repo: &Repository, config: &InitConfig) -> Result<()> {
+    if !config.no_verify {
         eprintln!(
             "\x1b[33m⚠ Note: Verification is not yet supported for --from-history.\n  \
              Entries will be unverified. Use --no-verify to suppress this warning.\x1b[0m"
@@ -474,7 +488,7 @@ async fn run_init_from_history(
 
     if tags.is_empty() {
         println!("No semver tags found. Creating basic changelog instead.");
-        return run_init_basic(output, dry_run);
+        return run_init_basic(&config.output, config.dry_run);
     }
 
     println!("Found {} version tags: {}",
@@ -483,34 +497,15 @@ async fn run_init_from_history(
     );
 
     // Fetch PRs once if not disabled
-    let all_prs = if no_prs {
+    let all_prs = if config.no_prs {
         Vec::new()
     } else {
-        match fetch_prs_for_repo(repo, pr_limit).await {
+        match fetch_prs_for_repo(repo, config.pr_limit).await {
             Ok(prs) => {
                 println!("Found {} merged PRs", prs.len());
                 prs
             }
-            Err(e) => {
-                if strict {
-                    bail!(
-                        "GitHub API error: {}. \n\
-                        Hint: Use --no-prs to skip PR fetching, or check your GitHub token.",
-                        e
-                    );
-                }
-
-                warn!("GitHub API error: {}", e);
-                eprintln!();
-                eprintln!("\x1b[33m⚠ Warning: Could not fetch pull requests\x1b[0m");
-                eprintln!("  Error: {}", e);
-                eprintln!("  Impact: Changelog will be generated from commits only (may be incomplete)");
-                eprintln!("  Fix: Set GITHUB_TOKEN or run `gh auth login`");
-                eprintln!("  Hint: Use --strict to fail instead of continuing with partial data");
-                eprintln!();
-
-                Vec::new()
-            }
+            Err(e) => handle_pr_fetch_error(e, config.strict)?,
         }
     };
 
@@ -525,10 +520,10 @@ async fn run_init_from_history(
 
         // Get commits between previous tag and this tag
         let commits = if let Some(from_oid) = prev_oid {
-            match fetch_commits(repo, from_oid, tag.oid, strict) {
+            match fetch_commits(repo, from_oid, tag.oid, config.strict) {
                 Ok(c) => c,
                 Err(e) => {
-                    if strict {
+                    if config.strict {
                         bail!("Failed to fetch commits for tag {}: {}", tag.name, e);
                     }
                     warn!("Failed to fetch commits for tag {}: {}. Section may be incomplete.", tag.name, e);
@@ -537,20 +532,20 @@ async fn run_init_from_history(
             }
         } else {
             // First tag - get all commits from root to this tag
-            let root_oid = match find_root_commit(repo, strict) {
+            let root_oid = match find_root_commit(repo, config.strict) {
                 Ok(oid) => oid,
                 Err(e) => {
-                    if strict {
+                    if config.strict {
                         bail!("Failed to find root commit for tag {}: {}", tag.name, e);
                     }
                     warn!("Failed to find root commit for tag {}: {}. Using tag commit as fallback.", tag.name, e);
                     tag.oid
                 }
             };
-            match fetch_commits(repo, root_oid, tag.oid, strict) {
+            match fetch_commits(repo, root_oid, tag.oid, config.strict) {
                 Ok(c) => c,
                 Err(e) => {
-                    if strict {
+                    if config.strict {
                         bail!("Failed to fetch commits for tag {}: {}", tag.name, e);
                     }
                     warn!("Failed to fetch commits for tag {}: {}. Section may be incomplete.", tag.name, e);
@@ -616,10 +611,10 @@ async fn run_init_from_history(
     let latest_tag = tags.last().unwrap();
     let head = repo.head()?.peel_to_commit()?.id();
 
-    let unreleased_commits = match fetch_commits(repo, latest_tag.oid, head, strict) {
+    let unreleased_commits = match fetch_commits(repo, latest_tag.oid, head, config.strict) {
         Ok(c) => c,
         Err(e) => {
-            if strict {
+            if config.strict {
                 bail!("Failed to fetch unreleased commits: {}", e);
             }
             warn!("Failed to fetch unreleased commits: {}. Unreleased section may be incomplete.", e);
@@ -666,13 +661,13 @@ async fn run_init_from_history(
         content.push_str(&section);
     }
 
-    if dry_run {
+    if config.dry_run {
         println!("\n--- Dry Run Output ---\n");
         println!("{}", content);
     } else {
-        std::fs::write(output, &content)
+        std::fs::write(&config.output, &content)
             .context("Failed to write changelog")?;
-        println!("✓ Created {} with {} version(s)", output.display(), tags.len());
+        println!("✓ Created {} with {} version(s)", config.output.display(), tags.len());
     }
 
     Ok(())
@@ -721,29 +716,7 @@ async fn run_generate(cli: Cli) -> Result<()> {
                 println!("Found {} merged PRs", prs.len());
                 prs
             }
-            Err(e) => {
-                // Issue #4 fix: Don't silently mask GitHub API failures
-                // In strict mode, fail fast. Otherwise, warn clearly about impact.
-                if cli.strict {
-                    bail!(
-                        "GitHub API error: {}. \n\
-                        Hint: Use --no-prs to skip PR fetching, or check your GitHub token.",
-                        e
-                    );
-                }
-
-                // Warn clearly about the impact (changelog may be incomplete)
-                warn!("GitHub API error: {}", e);
-                eprintln!();
-                eprintln!("\x1b[33m⚠ Warning: Could not fetch pull requests\x1b[0m");
-                eprintln!("  Error: {}", e);
-                eprintln!("  Impact: Changelog will be generated from commits only (may be incomplete)");
-                eprintln!("  Fix: Set GITHUB_TOKEN or run `gh auth login`");
-                eprintln!("  Hint: Use --strict to fail instead of continuing with partial data");
-                eprintln!();
-
-                Vec::new()
-            }
+            Err(e) => handle_pr_fetch_error(e, cli.strict)?,
         }
     };
 
@@ -819,7 +792,10 @@ async fn run_generate(cli: Cli) -> Result<()> {
         debug!("Skipping verification (--no-verify flag)");
         draft_output
     } else {
-        verify_changelog_entries(&draft_output, cli.verbose).await?
+        let repo_path = repo.workdir().context(
+            "Cannot verify in a bare repository. Use --no-verify to skip verification."
+        )?;
+        verify_changelog_entries(&draft_output, repo_path, cli.verbose).await?
     };
 
     // Step 9: Write or display changelog
@@ -845,10 +821,9 @@ async fn run_generate(cli: Cli) -> Result<()> {
 /// 3. Returns corrected entries with hallucinations removed
 async fn verify_changelog_entries(
     draft: &keryx::ChangelogOutput,
+    repo_path: &std::path::Path,
     verbose: bool,
 ) -> Result<keryx::ChangelogOutput> {
-    use std::path::Path;
-
     // Check prerequisites
     check_ripgrep_installed()
         .context("Verification requires ripgrep")?;
@@ -856,7 +831,6 @@ async fn verify_changelog_entries(
     println!("Verifying entries against codebase...");
 
     // Gather evidence from the codebase
-    let repo_path = Path::new(".");
     let evidence = gather_verification_evidence(&draft.entries, repo_path);
 
     // Report verification findings
@@ -870,12 +844,21 @@ async fn verify_changelog_entries(
                 eprintln!("    └─ Found {} stub/TODO indicators", entry.stub_indicators.len());
             }
             for check in &entry.count_checks {
-                if !check.matches() {
-                    eprintln!(
-                        "    └─ Count mismatch: claimed {}, found {}",
-                        check.claimed_text,
-                        check.actual_count.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string())
-                    );
+                match check.matches() {
+                    Some(false) => {
+                        eprintln!(
+                            "    └─ Count mismatch: claimed {}, found {}",
+                            check.claimed_text,
+                            check.actual_count.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string())
+                        );
+                    }
+                    None => {
+                        eprintln!(
+                            "    └─ Could not verify: {}",
+                            check.claimed_text,
+                        );
+                    }
+                    Some(true) => {} // Verified match - no warning needed
                 }
             }
         }
@@ -1005,25 +988,64 @@ fn read_cargo_description() -> Option<String> {
     None
 }
 
-/// Get CLI features for context.
+/// Get CLI features for context by introspecting the Cli struct.
+/// This uses clap's CommandFactory to dynamically generate the list,
+/// preventing documentation rot when new flags are added.
 fn get_cli_features() -> Vec<String> {
-    vec![
-        "--set-version <VERSION>: Override auto-detected version".to_string(),
-        "--from <REF>: Start of commit range (tag, hash, or branch)".to_string(),
-        "--to <REF>: End of commit range (default: HEAD)".to_string(),
-        "-o, --output <PATH>: Changelog output path (default: CHANGELOG.md)".to_string(),
-        "--no-prs: Skip GitHub PR fetching, use commits only".to_string(),
-        "-l, --pr-limit <N>: Max PRs to fetch (default: 100, env: KERYX_PR_LIMIT)".to_string(),
-        "--dry-run: Preview without writing to file".to_string(),
-        "GitHub auth: Supports gh CLI, GITHUB_TOKEN, and GH_TOKEN".to_string(),
-        "Automatic backup: Creates .changelog.md.bak before modifying".to_string(),
-        "Handles [Unreleased] sections per Keep a Changelog spec".to_string(),
-    ]
+    let cmd = Cli::command();
+    let mut features: Vec<String> = cmd
+        .get_arguments()
+        .filter(|arg| {
+            // Skip internal clap arguments like "help" and "version"
+            let id = arg.get_id().as_str();
+            !["help", "version"].contains(&id)
+        })
+        .filter_map(|arg| {
+            let id = arg.get_id().as_str();
+            let help = arg.get_help().map(|h| h.to_string())?;
+            let short = arg.get_short().map(|s| format!("-{}, ", s)).unwrap_or_default();
+            let long = format!("--{}", id.replace('_', "-"));
+            Some(format!("{}{}: {}", short, long, help))
+        })
+        .collect();
+
+    // Add non-flag features that aren't captured by argument introspection
+    features.push("GitHub auth: Supports gh CLI, GITHUB_TOKEN, and GH_TOKEN".to_string());
+    features.push("Automatic backup: Creates .changelog.md.bak before modifying".to_string());
+    features.push("Handles [Unreleased] sections per Keep a Changelog spec".to_string());
+
+    features
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_get_cli_features_includes_all_flags() {
+        let features = get_cli_features();
+        let features_str = features.join("\n");
+
+        // These flags were previously missing from the hardcoded list
+        assert!(features_str.contains("--strict"), "Missing --strict flag");
+        assert!(features_str.contains("--force"), "Missing --force flag");
+        assert!(features_str.contains("--verbose"), "Missing --verbose flag");
+        assert!(features_str.contains("--no-verify"), "Missing --no-verify flag");
+
+        // Original flags should still be present
+        assert!(features_str.contains("--set-version"), "Missing --set-version flag");
+        assert!(features_str.contains("--dry-run"), "Missing --dry-run flag");
+        assert!(features_str.contains("--no-prs"), "Missing --no-prs flag");
+        assert!(features_str.contains("--from"), "Missing --from flag");
+        assert!(features_str.contains("--to"), "Missing --to flag");
+        assert!(features_str.contains("--output"), "Missing --output flag");
+        assert!(features_str.contains("--pr-limit"), "Missing --pr-limit flag");
+
+        // Non-flag features should be present
+        assert!(features_str.contains("GitHub auth"), "Missing GitHub auth feature");
+        assert!(features_str.contains("Automatic backup"), "Missing backup feature");
+        assert!(features_str.contains("[Unreleased]"), "Missing Unreleased feature");
+    }
 
     #[test]
     fn test_truncate_description_short_string() {

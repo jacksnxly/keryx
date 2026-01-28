@@ -64,12 +64,18 @@ impl EntryEvidence {
 
         // Boost for keyword matches
         for km in &self.keyword_matches {
-            if km.occurrence_count > 0 {
-                score += 10;
-                if km.appears_complete {
+            if let Some(count) = km.occurrence_count {
+                if count > 0 {
+                    // Verified occurrences found - boost confidence
                     score += 10;
+                    if km.appears_complete {
+                        score += 10;
+                    }
                 }
+                // Some(0) = explicitly counted zero occurrences - no boost
             }
+            // None = counting failed - no boost (cannot verify)
+
             if km.files_found.len() > 2 {
                 score += 5;
             }
@@ -78,10 +84,12 @@ impl EntryEvidence {
         // Penalty for stub indicators
         score -= (self.stub_indicators.len() as i32) * 15;
 
-        // Penalty for count mismatches
+        // Penalty for count mismatches or unverifiable counts
         for check in &self.count_checks {
-            if !check.matches() {
-                score -= 20;
+            match check.matches() {
+                Some(true) => {} // Verified match - no penalty
+                Some(false) => score -= 20, // Verified mismatch - significant penalty
+                None => score -= 10, // Could not verify - smaller penalty (suspicious but not proven wrong)
             }
         }
 
@@ -125,8 +133,10 @@ pub struct KeywordMatch {
     pub keyword: String,
     /// Files where the keyword was found.
     pub files_found: Vec<String>,
-    /// Number of occurrences.
-    pub occurrence_count: usize,
+    /// Number of occurrences: `Some(n)` = counted n occurrences, `None` = counting failed.
+    /// This distinction matters for confidence scoring: `None` should not boost confidence,
+    /// while `Some(0)` explicitly means zero occurrences were found.
+    pub occurrence_count: Option<usize>,
     /// Sample lines showing context (first few matches).
     /// `Some(vec)` = samples fetched (possibly empty), `None` = sampling failed.
     pub sample_lines: Option<Vec<String>>,
@@ -148,14 +158,19 @@ pub struct CountCheck {
 }
 
 impl CountCheck {
-    /// Returns true if counts match or if actual_count is unknown.
+    /// Returns whether the claimed count matches the actual count.
     ///
-    /// When `actual_count` is `None`, we give the benefit of the doubt
-    /// and assume the claim matches (we couldn't verify it either way).
-    pub fn matches(&self) -> bool {
+    /// - `Some(true)` - counts were verified and match
+    /// - `Some(false)` - counts were verified and don't match
+    /// - `None` - could not verify (either claimed or actual count is unknown)
+    ///
+    /// Previously this returned `true` when `actual_count` was `None`, which
+    /// incorrectly marked unverifiable claims as "verified matching." Now
+    /// callers must explicitly handle the "could not verify" case.
+    pub fn matches(&self) -> Option<bool> {
         match (self.claimed_count, self.actual_count) {
-            (Some(claimed), Some(actual)) => claimed == actual,
-            _ => true, // Unknown actual count = assume match
+            (Some(claimed), Some(actual)) => Some(claimed == actual),
+            _ => None, // Could not verify - either claimed or actual is unknown
         }
     }
 }
@@ -172,6 +187,7 @@ impl Serialize for CountCheck {
         state.serialize_field("claimed_count", &self.claimed_count)?;
         state.serialize_field("actual_count", &self.actual_count)?;
         state.serialize_field("source_location", &self.source_location)?;
+        // matches is now Option<bool>: null = could not verify, true/false = verified result
         state.serialize_field("matches", &self.matches())?;
         state.end()
     }
@@ -272,7 +288,7 @@ mod tests {
                 KeywordMatch {
                     keyword: "test".to_string(),
                     files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
-                    occurrence_count: 10,
+                    occurrence_count: Some(10),
                     sample_lines: Some(vec![]),
                     appears_complete: true,
                 },
@@ -291,7 +307,7 @@ mod tests {
                 KeywordMatch {
                     keyword: "test".to_string(),
                     files_found: vec!["a.rs".to_string()],
-                    occurrence_count: 1,
+                    occurrence_count: Some(1),
                     sample_lines: Some(vec![]),
                     appears_complete: false,
                 },
@@ -415,7 +431,7 @@ mod tests {
             actual_count: Some(5),
             source_location: None,
         };
-        assert!(check.matches());
+        assert_eq!(check.matches(), Some(true), "Equal counts should return Some(true)");
     }
 
     #[test]
@@ -426,44 +442,44 @@ mod tests {
             actual_count: Some(5),
             source_location: None,
         };
-        assert!(!check.matches());
+        assert_eq!(check.matches(), Some(false), "Different counts should return Some(false)");
     }
 
     #[test]
-    fn test_count_check_matches_when_actual_unknown() {
+    fn test_count_check_returns_none_when_actual_unknown() {
         let check = CountCheck {
             claimed_text: "10 widgets".to_string(),
             claimed_count: Some(10),
             actual_count: None,
             source_location: None,
         };
-        assert!(check.matches(), "Unknown actual count should assume match");
+        assert_eq!(check.matches(), None, "Unknown actual count should return None (could not verify)");
     }
 
     #[test]
-    fn test_count_check_matches_when_claimed_unknown() {
+    fn test_count_check_returns_none_when_claimed_unknown() {
         let check = CountCheck {
             claimed_text: "several items".to_string(),
             claimed_count: None,
             actual_count: Some(3),
             source_location: None,
         };
-        assert!(check.matches(), "Unknown claimed count should assume match");
+        assert_eq!(check.matches(), None, "Unknown claimed count should return None (could not verify)");
     }
 
     #[test]
-    fn test_count_check_matches_when_both_unknown() {
+    fn test_count_check_returns_none_when_both_unknown() {
         let check = CountCheck {
             claimed_text: "some things".to_string(),
             claimed_count: None,
             actual_count: None,
             source_location: None,
         };
-        assert!(check.matches(), "Both unknown should assume match");
+        assert_eq!(check.matches(), None, "Both unknown should return None (could not verify)");
     }
 
     #[test]
-    fn test_count_check_serialization_includes_matches() {
+    fn test_count_check_serialization_matches_false() {
         let check = CountCheck {
             claimed_text: "3 items".to_string(),
             claimed_count: Some(3),
@@ -473,10 +489,10 @@ mod tests {
 
         let json = serde_json::to_string(&check).expect("serialization should succeed");
 
-        // matches should be false (3 != 5)
+        // matches should be false (3 != 5) - verified mismatch
         assert!(
             json.contains(r#""matches":false"#),
-            "JSON should include computed matches field"
+            "JSON should include computed matches field as false: {}", json
         );
         assert!(json.contains(r#""claimed_text":"3 items""#));
     }
@@ -492,10 +508,28 @@ mod tests {
 
         let json = serde_json::to_string(&check).expect("serialization should succeed");
 
-        // matches should be true (5 == 5)
+        // matches should be true (5 == 5) - verified match
         assert!(
             json.contains(r#""matches":true"#),
-            "JSON should include computed matches field"
+            "JSON should include computed matches field as true: {}", json
+        );
+    }
+
+    #[test]
+    fn test_count_check_serialization_matches_null_when_unverifiable() {
+        let check = CountCheck {
+            claimed_text: "10 widgets".to_string(),
+            claimed_count: Some(10),
+            actual_count: None, // Verification failed
+            source_location: None,
+        };
+
+        let json = serde_json::to_string(&check).expect("serialization should succeed");
+
+        // matches should be null (could not verify)
+        assert!(
+            json.contains(r#""matches":null"#),
+            "JSON should include matches as null when unverifiable: {}", json
         );
     }
 
@@ -546,5 +580,113 @@ mod tests {
         assert_eq!(conf1, conf2);
         assert_eq!(conf2, conf3);
         assert_eq!(conf1, Confidence::Medium);
+    }
+
+    #[test]
+    fn test_occurrence_count_none_vs_zero_serialization() {
+        // None = counting failed
+        let km_none = KeywordMatch {
+            keyword: "feature".to_string(),
+            files_found: vec!["a.rs".to_string()],
+            occurrence_count: None,
+            sample_lines: Some(vec![]),
+            appears_complete: false,
+        };
+
+        // Some(0) = counted zero occurrences
+        let km_zero = KeywordMatch {
+            keyword: "feature".to_string(),
+            files_found: vec!["a.rs".to_string()],
+            occurrence_count: Some(0),
+            sample_lines: Some(vec![]),
+            appears_complete: false,
+        };
+
+        let json_none = serde_json::to_string(&km_none).expect("serialization should succeed");
+        let json_zero = serde_json::to_string(&km_zero).expect("serialization should succeed");
+
+        // JSON should distinguish the two cases
+        assert!(
+            json_none.contains(r#""occurrence_count":null"#),
+            "None should serialize as null: {}",
+            json_none
+        );
+        assert!(
+            json_zero.contains(r#""occurrence_count":0"#),
+            "Some(0) should serialize as 0: {}",
+            json_zero
+        );
+    }
+
+    #[test]
+    fn test_confidence_none_occurrence_count_no_boost() {
+        // Entry with None occurrence_count (counting failed) should NOT get the +10 boost
+        let entry_with_none = EntryEvidence::new(
+            "Feature with failed count".to_string(),
+            ChangelogCategory::Added,
+            vec![
+                KeywordMatch {
+                    keyword: "test".to_string(),
+                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                    occurrence_count: None, // Counting failed
+                    sample_lines: Some(vec![]),
+                    appears_complete: false,
+                },
+            ],
+            vec![],
+            vec![],
+        );
+
+        // Entry with Some(5) should get the +10 boost
+        let entry_with_count = EntryEvidence::new(
+            "Feature with count".to_string(),
+            ChangelogCategory::Added,
+            vec![
+                KeywordMatch {
+                    keyword: "test".to_string(),
+                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                    occurrence_count: Some(5), // Counted 5 occurrences
+                    sample_lines: Some(vec![]),
+                    appears_complete: false,
+                },
+            ],
+            vec![],
+            vec![],
+        );
+
+        // Both start at 50, both get +5 for >2 files
+        // entry_with_none: 50 + 5 = 55 (Medium)
+        // entry_with_count: 50 + 10 + 5 = 65 (Medium, but higher)
+        // The difference is the +10 boost for occurrence_count > 0
+
+        let conf_none = entry_with_none.confidence();
+        let conf_count = entry_with_count.confidence();
+
+        // Both should be Medium in this case, but entry_with_count has higher score
+        assert_eq!(conf_none, Confidence::Medium, "None count should be Medium (55)");
+        assert_eq!(conf_count, Confidence::Medium, "Some(5) count should be Medium (65)");
+    }
+
+    #[test]
+    fn test_confidence_some_zero_no_boost() {
+        // Entry with Some(0) (explicitly counted zero) should NOT get the +10 boost
+        let entry = EntryEvidence::new(
+            "Feature with zero count".to_string(),
+            ChangelogCategory::Added,
+            vec![
+                KeywordMatch {
+                    keyword: "test".to_string(),
+                    files_found: vec!["a.rs".to_string()],
+                    occurrence_count: Some(0), // Counted zero occurrences
+                    sample_lines: Some(vec![]),
+                    appears_complete: true,
+                },
+            ],
+            vec![],
+            vec![],
+        );
+
+        // Score: 50 (base) + 0 (no boost for count=0) = 50
+        assert_eq!(entry.confidence(), Confidence::Medium);
     }
 }

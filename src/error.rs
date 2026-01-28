@@ -100,7 +100,7 @@ pub enum VersionError {
     NoBaseVersion,
 }
 
-/// Errors from verification operations.
+/// Errors from verification and scanning operations.
 #[derive(Error, Debug)]
 pub enum VerificationError {
     #[error("ripgrep (rg) is required for verification but was not found.\n\n\
@@ -125,17 +125,7 @@ pub enum VerificationError {
              Check file permissions or reinstall ripgrep.\n\
              Or skip verification with: --no-verify")]
     RipgrepExecutionFailed(String),
-}
-
-/// Errors from scanner operations during evidence gathering.
-#[derive(Error, Debug)]
-pub enum ScannerError {
-    #[error("ripgrep failed with exit code {exit_code:?}: {stderr}")]
-    RipgrepFailed { exit_code: Option<i32>, stderr: String },
-
-    #[error("ripgrep (rg) not found - install with: cargo install ripgrep")]
-    RipgrepNotFound,
 
     #[error("I/O error during scan: {0}")]
-    IoError(String),
+    ScannerIoError(#[source] std::io::Error),
 }
