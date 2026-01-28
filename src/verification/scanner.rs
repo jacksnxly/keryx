@@ -373,24 +373,27 @@ fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Result<
         cmd.arg(file);
         cmd.current_dir(repo_path);
 
-        if let Some(stdout) = run_rg_or_warn(&mut cmd, &format!("stub patterns in '{}'", file)) {
-            for line in stdout.lines() {
-                if let Some((line_num, context)) = parse_rg_json_match(line) {
-                    // Determine which pattern matched by checking the context
-                    let indicator = STUB_PATTERNS
-                        .iter()
-                        .find(|p| context.contains(*p))
-                        .map(|p| p.to_string())
-                        .unwrap_or_else(|| "stub".to_string());
+        match run_rg(&mut cmd)? {
+            RgOutcome::Success(stdout) => {
+                for line in stdout.lines() {
+                    if let Some((line_num, context)) = parse_rg_json_match(line) {
+                        // Determine which pattern matched by checking the context
+                        let indicator = STUB_PATTERNS
+                            .iter()
+                            .find(|p| context.contains(*p))
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "stub".to_string());
 
-                    indicators.push(StubIndicator {
-                        file: file.clone(),
-                        line: line_num,
-                        indicator,
-                        context,
-                    });
+                        indicators.push(StubIndicator {
+                            file: file.clone(),
+                            line: line_num,
+                            indicator,
+                            context,
+                        });
+                    }
                 }
             }
+            RgOutcome::NoMatch => {}
         }
     }
 
