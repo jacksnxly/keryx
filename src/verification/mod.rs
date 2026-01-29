@@ -10,7 +10,7 @@ use crate::error::VerificationError;
 pub mod evidence;
 pub mod scanner;
 
-pub use evidence::{Confidence, CountCheck, EntryEvidence, KeywordMatch, StubIndicator, VerificationEvidence};
+pub use evidence::{Confidence, CountCheck, EntryEvidence, KeywordMatch, ScanSummary, StubIndicator, StubType, VerificationEvidence};
 pub use scanner::gather_verification_evidence;
 
 /// Check if ripgrep (rg) is installed and accessible.

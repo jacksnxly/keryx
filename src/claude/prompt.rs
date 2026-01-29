@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn test_build_verification_prompt_embeds_evidence_json() {
         use crate::changelog::ChangelogCategory;
-        use crate::verification::{EntryEvidence, KeywordMatch, VerificationEvidence};
+        use crate::verification::{EntryEvidence, KeywordMatch, ScanSummary, VerificationEvidence};
 
         let mut evidence = VerificationEvidence::empty();
         evidence.entries.push(EntryEvidence::new(
@@ -610,6 +610,7 @@ mod tests {
             }],
             vec![],
             vec![],
+            ScanSummary::default(),
         ));
 
         let draft = r#"{"entries": []}"#;
@@ -688,7 +689,7 @@ mod tests {
     #[test]
     fn test_build_verification_prompt_with_count_checks() {
         use crate::changelog::ChangelogCategory;
-        use crate::verification::{CountCheck, EntryEvidence, VerificationEvidence};
+        use crate::verification::{CountCheck, EntryEvidence, ScanSummary, VerificationEvidence};
 
         let mut evidence = VerificationEvidence::empty();
         evidence.entries.push(EntryEvidence::new(
@@ -702,6 +703,7 @@ mod tests {
                 source_location: Some("src/templates.rs".to_string()),
             }],
             vec![],
+            ScanSummary::default(),
         ));
 
         let draft = r#"{"entries": [{"category": "Added", "description": "Added 8 templates"}]}"#;

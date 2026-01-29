@@ -15,13 +15,20 @@ pub struct VerificationEvidence {
     pub project_structure_source: Option<String>,
     /// Key files content (e.g., Cargo.toml, package.json).
     pub key_files: Vec<KeyFileContent>,
+    /// Warnings encountered during evidence gathering.
+    ///
+    /// This tracks issues like failed file reads, command failures, or other
+    /// problems that may have degraded the quality of evidence. Callers can
+    /// check `warnings.is_empty()` to determine if evidence is complete.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Evidence for a single changelog entry.
 ///
 /// The confidence level is computed from the evidence data (keyword matches,
-/// stub indicators, count checks) rather than stored, ensuring it's always
-/// consistent with the evidence.
+/// stub indicators, count checks, scan summary) rather than stored, ensuring
+/// it's always consistent with the evidence.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EntryEvidence {
     /// The original entry description.
@@ -34,6 +41,9 @@ pub struct EntryEvidence {
     pub count_checks: Vec<CountCheck>,
     /// Stub/TODO indicators found.
     pub stub_indicators: Vec<StubIndicator>,
+    /// Summary of search operations performed for this entry.
+    #[serde(default)]
+    pub scan_summary: ScanSummary,
 }
 
 impl EntryEvidence {
@@ -44,6 +54,7 @@ impl EntryEvidence {
         keyword_matches: Vec<KeywordMatch>,
         count_checks: Vec<CountCheck>,
         stub_indicators: Vec<StubIndicator>,
+        scan_summary: ScanSummary,
     ) -> Self {
         Self {
             original_description,
@@ -51,6 +62,7 @@ impl EntryEvidence {
             keyword_matches,
             count_checks,
             stub_indicators,
+            scan_summary,
         }
     }
 
@@ -93,6 +105,10 @@ impl EntryEvidence {
             }
         }
 
+        // Penalty for search failures - each failed search means we couldn't verify
+        // that keyword, similar to an unverifiable count (-10 per failure)
+        score -= (self.scan_summary.failed_searches as i32) * 10;
+
         // No keyword matches at all is suspicious
         if self.keyword_matches.is_empty() {
             score -= 30;
@@ -115,12 +131,13 @@ impl Serialize for EntryEvidence {
     {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("EntryEvidence", 6)?;
+        let mut state = serializer.serialize_struct("EntryEvidence", 7)?;
         state.serialize_field("original_description", &self.original_description)?;
         state.serialize_field("category", &self.category)?;
         state.serialize_field("keyword_matches", &self.keyword_matches)?;
         state.serialize_field("count_checks", &self.count_checks)?;
         state.serialize_field("stub_indicators", &self.stub_indicators)?;
+        state.serialize_field("scan_summary", &self.scan_summary)?;
         state.serialize_field("confidence", &self.confidence())?;
         state.end()
     }
@@ -193,6 +210,61 @@ impl Serialize for CountCheck {
     }
 }
 
+/// Type of stub indicator found in code.
+///
+/// Each variant corresponds to a pattern from `STUB_PATTERNS` in scanner.rs.
+/// Serializes to lowercase strings (e.g., `"todo"`, `"fixme"`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StubType {
+    /// TODO comment marker.
+    Todo,
+    /// FIXME comment marker.
+    Fixme,
+    /// XXX comment marker.
+    Xxx,
+    /// HACK comment marker.
+    Hack,
+    /// Rust `unimplemented!()` macro.
+    Unimplemented,
+    /// Rust `todo!()` macro.
+    TodoMacro,
+    /// `panic!("not implemented")` pattern.
+    PanicNotImplemented,
+    /// `panic!("unimplemented")` pattern.
+    PanicUnimplemented,
+    /// `// stub` comment.
+    Stub,
+    /// `// placeholder` comment.
+    Placeholder,
+    /// Python `NotImplemented` constant.
+    NotImplemented,
+    /// Python `raise NotImplementedError` statement.
+    RaiseNotImplementedError,
+    /// Unknown stub pattern (fallback for unmatched patterns).
+    Unknown,
+}
+
+impl std::fmt::Display for StubType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StubType::Todo => write!(f, "TODO"),
+            StubType::Fixme => write!(f, "FIXME"),
+            StubType::Xxx => write!(f, "XXX"),
+            StubType::Hack => write!(f, "HACK"),
+            StubType::Unimplemented => write!(f, "unimplemented!"),
+            StubType::TodoMacro => write!(f, "todo!"),
+            StubType::PanicNotImplemented => write!(f, "panic!(\"not implemented\")"),
+            StubType::PanicUnimplemented => write!(f, "panic!(\"unimplemented\")"),
+            StubType::Stub => write!(f, "// stub"),
+            StubType::Placeholder => write!(f, "// placeholder"),
+            StubType::NotImplemented => write!(f, "NotImplemented"),
+            StubType::RaiseNotImplementedError => write!(f, "raise NotImplementedError"),
+            StubType::Unknown => write!(f, "stub"),
+        }
+    }
+}
+
 /// Indicator that code may be incomplete.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StubIndicator {
@@ -200,10 +272,63 @@ pub struct StubIndicator {
     pub file: String,
     /// The line number.
     pub line: usize,
-    /// The indicator text (e.g., "TODO", "unimplemented!").
-    pub indicator: String,
+    /// The type of stub indicator.
+    pub indicator: StubType,
     /// Context around the indicator.
     pub context: String,
+}
+
+/// Summary of search operations during entry analysis.
+///
+/// Tracks the outcomes of keyword searches to help assess evidence quality.
+/// A high failure rate indicates that confidence scoring may be unreliable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScanSummary {
+    /// Total number of keywords extracted from the entry.
+    pub total_keywords: usize,
+    /// Number of keywords that were searched successfully (found or not found).
+    pub successful_searches: usize,
+    /// Number of keyword searches that failed due to errors.
+    pub failed_searches: usize,
+}
+
+impl ScanSummary {
+    /// Create a new scan summary.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a keyword extraction.
+    pub fn add_keyword(&mut self) {
+        self.total_keywords += 1;
+    }
+
+    /// Record a successful search (regardless of whether matches were found).
+    pub fn add_success(&mut self) {
+        self.successful_searches += 1;
+    }
+
+    /// Record a failed search.
+    pub fn add_failure(&mut self) {
+        self.failed_searches += 1;
+    }
+
+    /// Check if any searches failed.
+    pub fn has_failures(&self) -> bool {
+        self.failed_searches > 0
+    }
+
+    /// Calculate the failure rate as a fraction (0.0 to 1.0).
+    ///
+    /// Returns 0.0 if no keywords were searched.
+    pub fn failure_rate(&self) -> f64 {
+        let total_searched = self.successful_searches + self.failed_searches;
+        if total_searched == 0 {
+            0.0
+        } else {
+            self.failed_searches as f64 / total_searched as f64
+        }
+    }
 }
 
 /// Confidence level for an entry.
@@ -258,7 +383,18 @@ impl VerificationEvidence {
             project_structure: None,
             project_structure_source: None,
             key_files: Vec::new(),
+            warnings: Vec::new(),
         }
+    }
+
+    /// Add a warning to the evidence.
+    pub fn add_warning(&mut self, warning: impl Into<String>) {
+        self.warnings.push(warning.into());
+    }
+
+    /// Check if evidence gathering was degraded (had warnings).
+    pub fn is_degraded(&self) -> bool {
+        !self.warnings.is_empty()
     }
 
     /// Check if any entries have low confidence.
@@ -295,6 +431,7 @@ mod tests {
             ],
             vec![],
             vec![],
+            ScanSummary::default(),
         )
     }
 
@@ -314,6 +451,7 @@ mod tests {
             ],
             vec![],
             vec![],
+            ScanSummary::default(),
         )
     }
 
@@ -328,10 +466,11 @@ mod tests {
                 StubIndicator {
                     file: "a.rs".to_string(),
                     line: 10,
-                    indicator: "TODO".to_string(),
+                    indicator: StubType::Todo,
                     context: "// TODO".to_string(),
                 },
             ],
+            ScanSummary::default(),
         )
     }
 
@@ -343,6 +482,48 @@ mod tests {
         assert!(evidence.project_structure.is_none());
         assert!(evidence.project_structure_source.is_none());
         assert!(evidence.key_files.is_empty());
+        assert!(evidence.warnings.is_empty());
+        assert!(!evidence.is_degraded());
+    }
+
+    #[test]
+    fn test_verification_evidence_add_warning() {
+        let mut evidence = VerificationEvidence::empty();
+        assert!(!evidence.is_degraded());
+
+        evidence.add_warning("First warning");
+        assert!(evidence.is_degraded());
+        assert_eq!(evidence.warnings.len(), 1);
+        assert_eq!(evidence.warnings[0], "First warning");
+
+        evidence.add_warning(String::from("Second warning"));
+        assert_eq!(evidence.warnings.len(), 2);
+    }
+
+    #[test]
+    fn test_verification_evidence_warnings_serialization() {
+        let mut evidence = VerificationEvidence::empty();
+        evidence.add_warning("Test warning");
+
+        let json = serde_json::to_string(&evidence).expect("serialization should succeed");
+        assert!(
+            json.contains(r#""warnings":["Test warning"]"#),
+            "JSON should include warnings: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_verification_evidence_empty_warnings_skipped_in_json() {
+        let evidence = VerificationEvidence::empty();
+
+        let json = serde_json::to_string(&evidence).expect("serialization should succeed");
+        // Empty warnings should be skipped due to skip_serializing_if
+        assert!(
+            !json.contains("warnings"),
+            "Empty warnings should be skipped in JSON: {}",
+            json
+        );
     }
 
     #[test]
@@ -635,6 +816,7 @@ mod tests {
             ],
             vec![],
             vec![],
+            ScanSummary::default(),
         );
 
         // Entry with Some(5) should get the +10 boost
@@ -652,6 +834,7 @@ mod tests {
             ],
             vec![],
             vec![],
+            ScanSummary::default(),
         );
 
         // Both start at 50, both get +5 for >2 files
@@ -684,9 +867,234 @@ mod tests {
             ],
             vec![],
             vec![],
+            ScanSummary::default(),
         );
 
         // Score: 50 (base) + 0 (no boost for count=0) = 50
         assert_eq!(entry.confidence(), Confidence::Medium);
+    }
+
+    // Tests for ScanSummary (KRX-085)
+
+    #[test]
+    fn test_scan_summary_default() {
+        let summary = ScanSummary::default();
+        assert_eq!(summary.total_keywords, 0);
+        assert_eq!(summary.successful_searches, 0);
+        assert_eq!(summary.failed_searches, 0);
+        assert!(!summary.has_failures());
+        assert_eq!(summary.failure_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_scan_summary_tracking() {
+        let mut summary = ScanSummary::new();
+        summary.add_keyword();
+        summary.add_keyword();
+        summary.add_keyword();
+        summary.add_success();
+        summary.add_success();
+        summary.add_failure();
+
+        assert_eq!(summary.total_keywords, 3);
+        assert_eq!(summary.successful_searches, 2);
+        assert_eq!(summary.failed_searches, 1);
+        assert!(summary.has_failures());
+        // 1 failure out of 3 searches = ~0.333
+        assert!((summary.failure_rate() - 0.333).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_scan_summary_failure_rate_no_searches() {
+        let summary = ScanSummary::new();
+        // No searches = 0.0 failure rate (not NaN)
+        assert_eq!(summary.failure_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_scan_summary_failure_rate_all_success() {
+        let mut summary = ScanSummary::new();
+        summary.add_success();
+        summary.add_success();
+        summary.add_success();
+
+        assert_eq!(summary.failure_rate(), 0.0);
+        assert!(!summary.has_failures());
+    }
+
+    #[test]
+    fn test_scan_summary_failure_rate_all_failures() {
+        let mut summary = ScanSummary::new();
+        summary.add_failure();
+        summary.add_failure();
+
+        assert_eq!(summary.failure_rate(), 1.0);
+        assert!(summary.has_failures());
+    }
+
+    #[test]
+    fn test_confidence_penalty_for_search_failures() {
+        // Entry with no failures
+        let entry_no_failures = EntryEvidence::new(
+            "Test feature".to_string(),
+            ChangelogCategory::Added,
+            vec![
+                KeywordMatch {
+                    keyword: "test".to_string(),
+                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                    occurrence_count: Some(10),
+                    sample_lines: Some(vec![]),
+                    appears_complete: true,
+                },
+            ],
+            vec![],
+            vec![],
+            ScanSummary::default(),
+        );
+
+        // Same entry but with 3 search failures
+        let mut summary_with_failures = ScanSummary::new();
+        summary_with_failures.add_keyword();
+        summary_with_failures.add_keyword();
+        summary_with_failures.add_keyword();
+        summary_with_failures.add_keyword();
+        summary_with_failures.add_success(); // 1 success (the match above)
+        summary_with_failures.add_failure();
+        summary_with_failures.add_failure();
+        summary_with_failures.add_failure();
+
+        let entry_with_failures = EntryEvidence::new(
+            "Test feature".to_string(),
+            ChangelogCategory::Added,
+            vec![
+                KeywordMatch {
+                    keyword: "test".to_string(),
+                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                    occurrence_count: Some(10),
+                    sample_lines: Some(vec![]),
+                    appears_complete: true,
+                },
+            ],
+            vec![],
+            vec![],
+            summary_with_failures,
+        );
+
+        // entry_no_failures: 50 + 10 + 10 + 5 = 75 (High)
+        // entry_with_failures: 50 + 10 + 10 + 5 - 30 = 45 (Medium, due to -10 * 3 failures)
+        assert_eq!(entry_no_failures.confidence(), Confidence::High);
+        assert_eq!(entry_with_failures.confidence(), Confidence::Medium);
+    }
+
+    #[test]
+    fn test_confidence_penalty_many_failures_drops_to_low() {
+        // Entry with many search failures should drop to low confidence
+        let mut summary = ScanSummary::new();
+        for _ in 0..5 {
+            summary.add_keyword();
+            summary.add_failure();
+        }
+
+        let entry = EntryEvidence::new(
+            "Test feature".to_string(),
+            ChangelogCategory::Added,
+            vec![],  // No keyword matches (all failed)
+            vec![],
+            vec![],
+            summary,
+        );
+
+        // Score: 50 - 30 (no matches) - 50 (5 failures * -10) = -30 (Low)
+        assert_eq!(entry.confidence(), Confidence::Low);
+    }
+
+    #[test]
+    fn test_scan_summary_serialization() {
+        let mut summary = ScanSummary::new();
+        summary.add_keyword();
+        summary.add_success();
+
+        let json = serde_json::to_string(&summary).expect("serialization should succeed");
+        assert!(json.contains("\"total_keywords\":1"));
+        assert!(json.contains("\"successful_searches\":1"));
+        assert!(json.contains("\"failed_searches\":0"));
+    }
+
+    #[test]
+    fn test_entry_evidence_serialization_includes_scan_summary() {
+        let mut summary = ScanSummary::new();
+        summary.add_keyword();
+        summary.add_failure();
+
+        let entry = EntryEvidence::new(
+            "Test feature".to_string(),
+            ChangelogCategory::Added,
+            vec![],
+            vec![],
+            vec![],
+            summary,
+        );
+
+        let json = serde_json::to_string(&entry).expect("serialization should succeed");
+        assert!(
+            json.contains("\"scan_summary\""),
+            "JSON should include scan_summary field: {}",
+            json
+        );
+        assert!(
+            json.contains("\"failed_searches\":1"),
+            "scan_summary should include failed_searches: {}",
+            json
+        );
+    }
+
+    // Tests for StubType enum (KRX-087)
+
+    #[test]
+    fn test_stub_type_serialization() {
+        assert_eq!(
+            serde_json::to_string(&StubType::Todo).unwrap(),
+            "\"todo\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StubType::Fixme).unwrap(),
+            "\"fixme\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StubType::Unimplemented).unwrap(),
+            "\"unimplemented\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StubType::TodoMacro).unwrap(),
+            "\"todomacro\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StubType::Unknown).unwrap(),
+            "\"unknown\""
+        );
+    }
+
+    #[test]
+    fn test_stub_type_display() {
+        assert_eq!(format!("{}", StubType::Todo), "TODO");
+        assert_eq!(format!("{}", StubType::Unimplemented), "unimplemented!");
+        assert_eq!(format!("{}", StubType::Unknown), "stub");
+    }
+
+    #[test]
+    fn test_stub_indicator_serialization_uses_stub_type() {
+        let indicator = StubIndicator {
+            file: "test.rs".to_string(),
+            line: 42,
+            indicator: StubType::Todo,
+            context: "// TODO: implement this".to_string(),
+        };
+
+        let json = serde_json::to_string(&indicator).expect("serialization should succeed");
+        assert!(
+            json.contains("\"indicator\":\"todo\""),
+            "StubIndicator should serialize indicator as lowercase: {}",
+            json
+        );
     }
 }

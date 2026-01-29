@@ -8,7 +8,7 @@ mod common;
 use std::fs;
 
 use keryx::changelog::{ChangelogCategory, ChangelogEntry};
-use keryx::verification::{gather_verification_evidence, Confidence};
+use keryx::verification::{gather_verification_evidence, Confidence, StubType};
 
 /// Create a test project with known code patterns.
 fn create_test_project() -> tempfile::TempDir {
@@ -288,17 +288,17 @@ fn test_stub_indicators_detected_for_incomplete_code() {
     );
 
     // Verify specific indicators are found
-    let indicators: Vec<&str> = entry_ev
+    let indicators: Vec<StubType> = entry_ev
         .stub_indicators
         .iter()
-        .map(|s| s.indicator.as_str())
+        .map(|s| s.indicator)
         .collect();
 
     // Check for various stub patterns
-    let has_todo = indicators.iter().any(|i| i.contains("TODO"));
-    let has_unimplemented = indicators.iter().any(|i| i.contains("unimplemented!"));
-    let has_fixme = indicators.iter().any(|i| i.contains("FIXME"));
-    let has_todo_macro = indicators.iter().any(|i| i.contains("todo!"));
+    let has_todo = indicators.contains(&StubType::Todo);
+    let has_unimplemented = indicators.contains(&StubType::Unimplemented);
+    let has_fixme = indicators.contains(&StubType::Fixme);
+    let has_todo_macro = indicators.contains(&StubType::TodoMacro);
 
     assert!(
         has_todo || has_unimplemented || has_fixme || has_todo_macro,

@@ -852,6 +852,13 @@ async fn verify_changelog_entries(
             if !entry.stub_indicators.is_empty() {
                 eprintln!("    └─ Found {} stub/TODO indicators", entry.stub_indicators.len());
             }
+            if entry.scan_summary.has_failures() {
+                eprintln!(
+                    "    └─ {} of {} keyword searches failed",
+                    entry.scan_summary.failed_searches,
+                    entry.scan_summary.successful_searches + entry.scan_summary.failed_searches
+                );
+            }
             for check in &entry.count_checks {
                 match check.matches() {
                     Some(false) => {
@@ -871,6 +878,18 @@ async fn verify_changelog_entries(
                 }
             }
         }
+        eprintln!();
+    }
+
+    // Summary of search failures across all entries
+    let total_failures: usize = evidence.entries.iter()
+        .map(|e| e.scan_summary.failed_searches)
+        .sum();
+    if total_failures > 0 {
+        eprintln!(
+            "\x1b[33m⚠ Note: {} keyword search(es) failed during verification. Confidence scores may be affected.\x1b[0m",
+            total_failures
+        );
         eprintln!();
     }
 

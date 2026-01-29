@@ -11,10 +11,11 @@ use crate::changelog::ChangelogEntry;
 use crate::error::VerificationError;
 use super::evidence::{
     CountCheck, EntryEvidence, KeyFileContent, KeywordMatch,
-    StubIndicator, VerificationEvidence,
+    ScanSummary, StubIndicator, StubType, VerificationEvidence,
 };
 
 /// Outcome of a ripgrep command execution.
+#[derive(Debug)]
 enum RgOutcome {
     /// Command succeeded with output.
     Success(String),
@@ -84,20 +85,20 @@ const RG_CODE_TYPE: &[&str] = &[
     "--type", "code",
 ];
 
-/// Patterns that indicate incomplete/stub code.
-const STUB_PATTERNS: &[&str] = &[
-    "TODO",
-    "FIXME",
-    "XXX",
-    "HACK",
-    "unimplemented!",
-    "todo!",
-    "panic!(\"not implemented",
-    "panic!(\"unimplemented",
-    "// stub",
-    "// placeholder",
-    "NotImplemented",
-    "raise NotImplementedError",
+/// Patterns that indicate incomplete/stub code and their corresponding types.
+const STUB_PATTERNS: &[(&str, StubType)] = &[
+    ("TODO", StubType::Todo),
+    ("FIXME", StubType::Fixme),
+    ("XXX", StubType::Xxx),
+    ("HACK", StubType::Hack),
+    ("unimplemented!", StubType::Unimplemented),
+    ("todo!", StubType::TodoMacro),
+    ("panic!(\"not implemented", StubType::PanicNotImplemented),
+    ("panic!(\"unimplemented", StubType::PanicUnimplemented),
+    ("// stub", StubType::Stub),
+    ("// placeholder", StubType::Placeholder),
+    ("NotImplemented", StubType::NotImplemented),
+    ("raise NotImplementedError", StubType::RaiseNotImplementedError),
 ];
 
 /// Common words to exclude from keyword extraction.
@@ -118,6 +119,10 @@ const STOP_WORDS: &[&str] = &[
 /// This function scans the codebase to verify claims made in the changelog entries.
 /// It extracts keywords, searches for them in the code, checks for stub indicators,
 /// and verifies numeric claims.
+///
+/// Warnings are recorded in `evidence.warnings` when sub-operations fail.
+/// Callers can check `evidence.is_degraded()` to determine if evidence gathering
+/// encountered issues that may affect its quality.
 pub fn gather_verification_evidence(
     entries: &[ChangelogEntry],
     repo_path: &Path,
@@ -125,30 +130,49 @@ pub fn gather_verification_evidence(
     let mut evidence = VerificationEvidence::empty();
 
     // Gather project structure
-    let (structure, source) = get_project_structure(repo_path);
+    let (structure, source, warning) = get_project_structure(repo_path);
     evidence.project_structure = structure;
     evidence.project_structure_source = source;
+    if let Some(w) = warning {
+        evidence.add_warning(w);
+    }
 
     // Gather key files
-    evidence.key_files = gather_key_files(repo_path);
+    let (key_files, key_file_warnings) = gather_key_files(repo_path);
+    evidence.key_files = key_files;
+    for w in key_file_warnings {
+        evidence.add_warning(w);
+    }
 
     // Process each entry
     for entry in entries {
-        let entry_evidence = analyze_entry(entry, repo_path);
+        let (entry_evidence, entry_warnings) = analyze_entry(entry, repo_path);
         evidence.entries.push(entry_evidence);
+        for w in entry_warnings {
+            evidence.add_warning(w);
+        }
     }
 
     evidence
 }
 
 /// Analyze a single changelog entry against the codebase.
-fn analyze_entry(entry: &ChangelogEntry, repo_path: &Path) -> EntryEvidence {
+///
+/// Returns the entry evidence and any warnings encountered during analysis.
+fn analyze_entry(entry: &ChangelogEntry, repo_path: &Path) -> (EntryEvidence, Vec<String>) {
     let description = &entry.description;
     let category = entry.category.clone();
+    let mut warnings = Vec::new();
+    let mut scan_summary = ScanSummary::new();
 
     // Extract keywords from the description
     let keywords = extract_keywords(description);
     debug!("Extracted keywords from '{}': {:?}", description, keywords);
+
+    // Track total keywords
+    for _ in &keywords {
+        scan_summary.add_keyword();
+    }
 
     // Search for each keyword in the codebase
     let mut keyword_matches = Vec::new();
@@ -157,14 +181,17 @@ fn analyze_entry(entry: &ChangelogEntry, repo_path: &Path) -> EntryEvidence {
     for keyword in &keywords {
         match search_keyword(keyword, repo_path) {
             Ok(Some(match_result)) => {
+                scan_summary.add_success();
                 // Check for stub indicators near the matches
                 let (stubs, stub_detection_ok) = match find_stub_indicators_near_keyword(keyword, repo_path) {
                     Ok(s) => (s, true),
                     Err(e) => {
-                        warn!(
-                            "Stub detection failed for keyword '{}': {}. Conservatively marking as incomplete.",
+                        let msg = format!(
+                            "Stub detection failed for keyword '{}': {}",
                             keyword, e
                         );
+                        warn!("{}. Conservatively marking as incomplete.", msg);
+                        warnings.push(msg);
                         (Vec::new(), false)
                     }
                 };
@@ -181,10 +208,14 @@ fn analyze_entry(entry: &ChangelogEntry, repo_path: &Path) -> EntryEvidence {
                 });
             }
             Ok(None) => {
-                // No matches found - this is normal, skip this keyword
+                // No matches found - this is a successful search that found nothing
+                scan_summary.add_success();
             }
             Err(e) => {
-                warn!("Error searching for keyword '{}': {}", keyword, e);
+                scan_summary.add_failure();
+                let msg = format!("Error searching for keyword '{}': {}", keyword, e);
+                warn!("{}", msg);
+                warnings.push(msg);
             }
         }
     }
@@ -201,13 +232,16 @@ fn analyze_entry(entry: &ChangelogEntry, repo_path: &Path) -> EntryEvidence {
         .collect();
 
     // Confidence is computed automatically by EntryEvidence
-    EntryEvidence::new(
+    let entry_evidence = EntryEvidence::new(
         description.clone(),
         category,
         keyword_matches,
         count_checks,
         unique_stub_indicators,
-    )
+        scan_summary,
+    );
+
+    (entry_evidence, warnings)
 }
 
 /// Extract meaningful keywords from a description.
@@ -366,7 +400,7 @@ fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Result<
         cmd.args(["--fixed-strings", "--line-number", "--max-count", "36", "--json", "-C", "1"]);
 
         // Add each pattern with -e flag
-        for pattern in STUB_PATTERNS {
+        for (pattern, _stub_type) in STUB_PATTERNS {
             cmd.args(["-e", pattern]);
         }
 
@@ -380,9 +414,9 @@ fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Result<
                         // Determine which pattern matched by checking the context
                         let indicator = STUB_PATTERNS
                             .iter()
-                            .find(|p| context.contains(*p))
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "stub".to_string());
+                            .find(|(pattern, _)| context.contains(pattern))
+                            .map(|(_, stub_type)| *stub_type)
+                            .unwrap_or(StubType::Unknown);
 
                         indicators.push(StubIndicator {
                             file: file.clone(),
@@ -669,9 +703,10 @@ fn count_array_elements(content: &str, pattern: &str) -> Option<usize> {
 
 /// Get project structure using tree command, with ls fallback.
 ///
-/// Returns `(content, source)` where source is `"tree"`, `"ls"`, or `None` if
-/// both commands failed.
-fn get_project_structure(repo_path: &Path) -> (Option<String>, Option<String>) {
+/// Returns `(content, source, warning)` where:
+/// - `source` is `"tree"`, `"ls"`, or `None` if both commands failed
+/// - `warning` is `Some(message)` if both tree and ls failed
+fn get_project_structure(repo_path: &Path) -> (Option<String>, Option<String>, Option<String>) {
     let output = Command::new("tree")
         .args([
             "-L", "3",
@@ -686,7 +721,7 @@ fn get_project_structure(repo_path: &Path) -> (Option<String>, Option<String>) {
             let tree = String::from_utf8_lossy(&out.stdout);
             // Truncate if too long
             let truncated: String = tree.lines().take(50).collect::<Vec<_>>().join("\n");
-            return (Some(truncated), Some("tree".to_string()));
+            return (Some(truncated), Some("tree".to_string()), None);
         }
         Ok(out) => {
             debug!(
@@ -711,24 +746,28 @@ fn get_project_structure(repo_path: &Path) -> (Option<String>, Option<String>) {
 
     match ls_output {
         Ok(ls_out) if ls_out.status.success() => {
-            (Some(String::from_utf8_lossy(&ls_out.stdout).to_string()), Some("ls".to_string()))
+            (Some(String::from_utf8_lossy(&ls_out.stdout).to_string()), Some("ls".to_string()), None)
         }
         Ok(ls_out) => {
-            debug!(
-                "ls command also failed (exit code {:?}), cannot get project structure",
+            let msg = format!(
+                "Failed to get project structure: both tree and ls commands failed (ls exit code {:?})",
                 ls_out.status.code()
             );
-            (None, None)
+            debug!("{}", msg);
+            (None, None, Some(msg))
         }
         Err(e) => {
-            debug!("ls command error: {}, cannot get project structure", e);
-            (None, None)
+            let msg = format!("Failed to get project structure: ls command error: {}", e);
+            debug!("{}", msg);
+            (None, None, Some(msg))
         }
     }
 }
 
 /// Gather content of key project files.
-fn gather_key_files(repo_path: &Path) -> Vec<KeyFileContent> {
+///
+/// Returns `(files, warnings)` where warnings contains any file read errors.
+fn gather_key_files(repo_path: &Path) -> (Vec<KeyFileContent>, Vec<String>) {
     let key_files = [
         "Cargo.toml",
         "package.json",
@@ -738,6 +777,7 @@ fn gather_key_files(repo_path: &Path) -> Vec<KeyFileContent> {
     ];
 
     let mut contents = Vec::new();
+    let mut warnings = Vec::new();
 
     for file in &key_files {
         let path = repo_path.join(file);
@@ -761,23 +801,22 @@ fn gather_key_files(repo_path: &Path) -> Vec<KeyFileContent> {
                     });
                 }
                 Err(e) => {
-                    warn!(
-                        "Key file '{}' exists but cannot be read: {}",
-                        file, e
-                    );
+                    let msg = format!("Key file '{}' exists but cannot be read: {}", file, e);
+                    warn!("{}", msg);
+                    warnings.push(msg);
                 }
             }
         }
     }
 
-    contents
+    (contents, warnings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::changelog::ChangelogCategory;
-    use super::super::evidence::Confidence;
+    use super::super::evidence::{Confidence, ScanSummary};
 
     #[test]
     fn test_extract_keywords() {
@@ -939,6 +978,7 @@ mod tests {
             ],
             vec![],
             vec![],
+            ScanSummary::default(),
         );
 
         assert_eq!(entry.confidence(), Confidence::High);
@@ -963,16 +1003,17 @@ mod tests {
                 StubIndicator {
                     file: "a.rs".to_string(),
                     line: 10,
-                    indicator: "TODO".to_string(),
+                    indicator: StubType::Todo,
                     context: "// TODO: implement".to_string(),
                 },
                 StubIndicator {
                     file: "a.rs".to_string(),
                     line: 20,
-                    indicator: "unimplemented!".to_string(),
+                    indicator: StubType::Unimplemented,
                     context: "unimplemented!()".to_string(),
                 },
             ],
+            ScanSummary::default(),
         );
 
         assert_eq!(entry.confidence(), Confidence::Low);
@@ -1144,13 +1185,14 @@ mod tests {
         fs::write(&readme_path, &content).expect("Failed to write test file");
 
         // This should not panic - it previously would if truncation hit mid-character
-        let result = gather_key_files(temp_dir.path());
+        let (files, warnings) = gather_key_files(temp_dir.path());
 
         // Verify we got the file
-        assert!(!result.is_empty(), "Should find README.md");
+        assert!(!files.is_empty(), "Should find README.md");
+        assert!(warnings.is_empty(), "Should have no warnings");
 
         // Find the README entry
-        let readme_entry = result.iter().find(|k| k.path == "README.md");
+        let readme_entry = files.iter().find(|k| k.path == "README.md");
         assert!(readme_entry.is_some(), "Should have README.md entry");
 
         let truncated = &readme_entry.unwrap().content;
@@ -1174,11 +1216,12 @@ mod tests {
         let readme_path = temp_dir.path().join("README.md");
         fs::write(&readme_path, content).expect("Failed to write test file");
 
-        let result = gather_key_files(temp_dir.path());
+        let (files, warnings) = gather_key_files(temp_dir.path());
 
-        assert!(!result.is_empty(), "Should find README.md");
+        assert!(!files.is_empty(), "Should find README.md");
+        assert!(warnings.is_empty(), "Should have no warnings");
 
-        let readme_entry = result.iter().find(|k| k.path == "README.md");
+        let readme_entry = files.iter().find(|k| k.path == "README.md");
         assert!(readme_entry.is_some());
 
         let file_content = &readme_entry.unwrap().content;
@@ -1188,5 +1231,173 @@ mod tests {
             "Small file should not be truncated"
         );
         assert_eq!(file_content, content);
+    }
+
+    // Tests for run_rg error construction (KRX-084)
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_rg_exit_code_2_returns_ripgrep_failed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let bin_dir = temp_dir.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+
+        // Create a mock rg script that exits with code 2 and writes to stderr
+        let rg_path = bin_dir.join("rg");
+        std::fs::write(
+            &rg_path,
+            r#"#!/bin/sh
+echo "rg: error: invalid regex pattern" >&2
+exit 2
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&rg_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&rg_path, perms).unwrap();
+
+        // Build command using the mock rg
+        let mut cmd = Command::new(&rg_path);
+        cmd.arg("test");
+
+        let result = run_rg(&mut cmd);
+
+        assert!(result.is_err(), "run_rg should return error for exit code 2");
+
+        match result.unwrap_err() {
+            VerificationError::RipgrepFailed { exit_code, stderr } => {
+                assert_eq!(exit_code, Some(2), "exit_code should be 2");
+                assert!(
+                    stderr.contains("invalid regex pattern"),
+                    "stderr should contain the error message, got: {}",
+                    stderr
+                );
+            }
+            other => panic!("Expected RipgrepFailed, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_rg_exit_code_3_returns_ripgrep_failed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let bin_dir = temp_dir.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+
+        // Create a mock rg script that exits with code 3 (permission denied scenario)
+        let rg_path = bin_dir.join("rg");
+        std::fs::write(
+            &rg_path,
+            r#"#!/bin/sh
+echo "rg: permission denied: /secret/file" >&2
+exit 3
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&rg_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&rg_path, perms).unwrap();
+
+        let mut cmd = Command::new(&rg_path);
+        cmd.arg("test");
+
+        let result = run_rg(&mut cmd);
+
+        assert!(result.is_err(), "run_rg should return error for exit code 3");
+
+        match result.unwrap_err() {
+            VerificationError::RipgrepFailed { exit_code, stderr } => {
+                assert_eq!(exit_code, Some(3), "exit_code should be 3");
+                assert!(
+                    stderr.contains("permission denied"),
+                    "stderr should contain the error message, got: {}",
+                    stderr
+                );
+            }
+            other => panic!("Expected RipgrepFailed, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_rg_exit_code_1_is_no_match() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let bin_dir = temp_dir.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+
+        // Create a mock rg that exits with code 1 (no matches)
+        let rg_path = bin_dir.join("rg");
+        std::fs::write(
+            &rg_path,
+            r#"#!/bin/sh
+exit 1
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&rg_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&rg_path, perms).unwrap();
+
+        let mut cmd = Command::new(&rg_path);
+        cmd.arg("test");
+
+        let result = run_rg(&mut cmd);
+
+        assert!(result.is_ok(), "run_rg should return Ok for exit code 1");
+        match result.unwrap() {
+            RgOutcome::NoMatch => {}
+            RgOutcome::Success(_) => panic!("Expected NoMatch, got Success"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_rg_success_returns_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let bin_dir = temp_dir.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+
+        // Create a mock rg that exits successfully with output
+        let rg_path = bin_dir.join("rg");
+        std::fs::write(
+            &rg_path,
+            r#"#!/bin/sh
+echo "file.rs:10:fn main() {"
+exit 0
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&rg_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&rg_path, perms).unwrap();
+
+        let mut cmd = Command::new(&rg_path);
+        cmd.arg("test");
+
+        let result = run_rg(&mut cmd);
+
+        assert!(result.is_ok(), "run_rg should return Ok for exit code 0");
+        match result.unwrap() {
+            RgOutcome::Success(stdout) => {
+                assert!(
+                    stdout.contains("file.rs:10:fn main()"),
+                    "stdout should contain the output, got: {}",
+                    stdout
+                );
+            }
+            RgOutcome::NoMatch => panic!("Expected Success, got NoMatch"),
+        }
     }
 }

@@ -6,8 +6,10 @@ use std::os::unix::fs::PermissionsExt;
 
 use keryx::changelog::{ChangelogCategory, ChangelogEntry};
 use keryx::verification::gather_verification_evidence;
+use serial_test::serial;
 
 #[test]
+#[serial]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_stub_scan_error_marks_incomplete() {
     let dir = tempfile::tempdir().expect("Failed to create temp dir");

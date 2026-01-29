@@ -66,6 +66,7 @@ wiremock = "0.6"
 temp-env = "0.3"
 mockall = "0.13"
 tokio-test = "0.4"
+serial_test = "3"
 
 # The profile that 'dist' will build with
 [profile.dist]
