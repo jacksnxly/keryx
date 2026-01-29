@@ -71,6 +71,34 @@ pub enum ClaudeError {
     SerializationFailed(String),
 }
 
+/// Errors from Codex CLI operations.
+#[derive(Error, Debug)]
+pub enum CodexError {
+    #[error("Codex CLI not found. Install with: npm install -g @openai/codex (then run `codex` or set CODEX_API_KEY)")]
+    NotInstalled,
+
+    #[error("Codex CLI failed to execute: {0}")]
+    ExecutionFailed(String),
+
+    #[error("Failed to spawn Codex process: {0}")]
+    SpawnFailed(#[source] std::io::Error),
+
+    #[error("Codex returned invalid JSON: {0}")]
+    InvalidJson(String),
+
+    #[error("Codex process timed out after {0} seconds")]
+    Timeout(u64),
+
+    #[error("Codex CLI exited with code {code}: {stderr}")]
+    NonZeroExit { code: i32, stderr: String },
+
+    #[error("All retry attempts failed: {0}")]
+    RetriesExhausted(#[source] Box<CodexError>),
+
+    #[error("Failed to serialize prompt data: {0}")]
+    SerializationFailed(String),
+}
+
 /// Errors from changelog operations.
 #[derive(Error, Debug)]
 pub enum ChangelogError {

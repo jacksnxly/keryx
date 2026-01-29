@@ -23,4 +23,4 @@ This project uses the vibe-coding-toolkit:
 
 **Phase:** Initial development
 
-**Current focus:** Defining core features via feature briefs
+**Current focus:** Defining core features via feature briefs (LLM providers: Claude primary with Codex fallback)

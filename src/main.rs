@@ -5,14 +5,24 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 
 use anyhow::{bail, Context, Result};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use git2::Repository;
 use semver::Version;
 use tracing::{debug, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use keryx::changelog::{parser::read_changelog, write_changelog, writer::generate_summary};
-use keryx::claude::{build_prompt, build_verification_prompt, check_claude_installed, generate_with_retry, prompt::ChangelogInput};
+use keryx::llm::{
+    build_prompt,
+    build_verification_prompt,
+    ChangelogInput,
+    LlmCompletion,
+    LlmError,
+    LlmProviderError,
+    LlmRouter,
+    Provider,
+    ProviderSelection,
+};
 use keryx::changelog::format::CHANGELOG_HEADER;
 use keryx::git::{commits::fetch_commits, range::{find_root_commit, resolve_range}, tags::{get_all_tags, get_latest_tag}};
 use keryx::github::{auth::get_github_token, prs::{fetch_merged_prs, parse_github_remote}};
@@ -103,10 +113,10 @@ impl UpdateChecker {
     }
 }
 
-/// Generate release notes from commits and PRs using Claude.
+/// Generate release notes from commits and PRs using Claude or Codex.
 #[derive(Parser, Debug)]
 #[command(name = "keryx")]
-#[command(about = "Generate release notes from commits and PRs using Claude")]
+#[command(about = "Generate release notes from commits and PRs using Claude or Codex")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -155,6 +165,25 @@ struct Cli {
     /// Skip verification pass (faster but may include inaccuracies)
     #[arg(long, global = true)]
     no_verify: bool,
+
+    /// LLM provider to use (fallback will be attempted on failure)
+    #[arg(long, value_enum, global = true)]
+    provider: Option<ProviderFlag>,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum ProviderFlag {
+    Claude,
+    Codex,
+}
+
+impl From<ProviderFlag> for Provider {
+    fn from(value: ProviderFlag) -> Self {
+        match value {
+            ProviderFlag::Claude => Provider::Claude,
+            ProviderFlag::Codex => Provider::Codex,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -190,11 +219,19 @@ struct InitConfig {
     no_verify: bool,
     /// Enable verbose/debug logging.
     verbose: bool,
+    /// LLM provider selection.
+    provider_selection: ProviderSelection,
 }
 
 impl InitConfig {
     /// Create an `InitConfig` from the CLI arguments.
     fn from_cli(cli: &Cli) -> Self {
+        let provider_selection = cli.provider
+            .clone()
+            .map(Provider::from)
+            .map(ProviderSelection::from_primary)
+            .unwrap_or_default();
+
         Self {
             output: cli.output.clone(),
             dry_run: cli.dry_run,
@@ -203,6 +240,7 @@ impl InitConfig {
             pr_limit: cli.pr_limit,
             no_verify: cli.no_verify,
             verbose: cli.verbose,
+            provider_selection,
         }
     }
 }
@@ -325,6 +363,8 @@ fn handle_pr_fetch_error(e: anyhow::Error, strict: bool) -> Result<Vec<keryx::Pu
 
 /// Run the init command to create a new changelog.
 async fn run_init(config: &InitConfig, unreleased: bool, from_history: bool) -> Result<()> {
+    let mut llm = LlmRouter::new(config.provider_selection);
+
     // Check if changelog already exists
     if config.output.exists() && !config.dry_run {
         bail!(
@@ -338,9 +378,9 @@ async fn run_init(config: &InitConfig, unreleased: bool, from_history: bool) -> 
         .context("Not a git repository. Run keryx from within a git repository.")?;
 
     if unreleased {
-        run_init_unreleased(&repo, config).await
+        run_init_unreleased(&repo, config, &mut llm).await
     } else if from_history {
-        run_init_from_history(&repo, config).await
+        run_init_from_history(&repo, config, &mut llm).await
     } else {
         run_init_basic(&config.output, config.dry_run)
     }
@@ -366,11 +406,7 @@ fn run_init_basic(output: &PathBuf, dry_run: bool) -> Result<()> {
 }
 
 /// Create changelog with all commits in [Unreleased] section.
-async fn run_init_unreleased(repo: &Repository, config: &InitConfig) -> Result<()> {
-    check_claude_installed()
-        .await
-        .context("Claude Code CLI is required")?;
-
+async fn run_init_unreleased(repo: &Repository, config: &InitConfig, llm: &mut LlmRouter) -> Result<()> {
     println!("Analyzing all commits for [Unreleased] section...");
 
     // Get all commits from root to HEAD (bypassing tag-based resolution)
@@ -414,10 +450,15 @@ async fn run_init_unreleased(repo: &Repository, config: &InitConfig) -> Result<(
 
     let prompt = build_prompt(&input).context("Failed to build prompt")?;
 
-    println!("Generating release notes with Claude...");
-    let draft_output = generate_with_retry(&prompt)
-        .await
-        .context("Failed to generate changelog entries")?;
+    println!(
+        "Generating release notes with {} (fallback: {})...",
+        llm.primary(),
+        llm.fallback()
+    );
+    let draft_completion = llm.generate(&prompt).await
+        .map_err(|e| handle_llm_error(e, config.verbose))?;
+    report_llm_fallback_if_any(&draft_completion, config.verbose);
+    let draft_output = draft_completion.output;
 
     // Verify entries against codebase (unless --no-verify)
     let changelog_output = if config.no_verify {
@@ -427,7 +468,7 @@ async fn run_init_unreleased(repo: &Repository, config: &InitConfig) -> Result<(
         let repo_path = repo.workdir().context(
             "Cannot verify in a bare repository. Use --no-verify to skip verification."
         )?;
-        verify_changelog_entries(&draft_output, repo_path, config.verbose).await?
+        verify_changelog_entries(&draft_output, repo_path, config.verbose, llm).await?
     };
 
     if changelog_output.entries.is_empty() {
@@ -469,17 +510,13 @@ async fn run_init_unreleased(repo: &Repository, config: &InitConfig) -> Result<(
 ///
 /// Note: Verification is not yet implemented for this path as it processes
 /// multiple versions. The regular `keryx` command includes verification.
-async fn run_init_from_history(repo: &Repository, config: &InitConfig) -> Result<()> {
+async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut LlmRouter) -> Result<()> {
     if !config.no_verify {
         eprintln!(
             "\x1b[33m⚠ Note: Verification is not yet supported for --from-history.\n  \
              Entries will be unverified. Use --no-verify to suppress this warning.\x1b[0m"
         );
     }
-
-    check_claude_installed()
-        .await
-        .context("Claude Code CLI is required")?;
 
     println!("Analyzing git history to build changelog from tags...");
 
@@ -581,7 +618,10 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig) -> Result
         };
 
         let prompt = build_prompt(&input).context("Failed to build prompt")?;
-        let changelog_output = generate_with_retry(&prompt).await?;
+        let draft_completion = llm.generate(&prompt).await
+            .map_err(|e| handle_llm_error(e, config.verbose))?;
+        report_llm_fallback_if_any(&draft_completion, config.verbose);
+        let changelog_output = draft_completion.output;
 
         // Get tag date from commit
         let tag_date = repo.find_commit(tag.oid)
@@ -641,7 +681,10 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig) -> Result
         };
 
         let prompt = build_prompt(&input)?;
-        let changelog_output = generate_with_retry(&prompt).await?;
+        let draft_completion = llm.generate(&prompt).await
+            .map_err(|e| handle_llm_error(e, config.verbose))?;
+        report_llm_fallback_if_any(&draft_completion, config.verbose);
+        let changelog_output = draft_completion.output;
 
         unreleased_section.push_str("## [Unreleased]\n\n");
         if !changelog_output.entries.is_empty() {
@@ -680,12 +723,14 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig) -> Result
 
 /// Run the changelog generation command.
 async fn run_generate(cli: Cli) -> Result<()> {
-    // Step 1: Check prerequisites
-    check_claude_installed()
-        .await
-        .context("Claude Code CLI is required")?;
+    let provider_selection = cli.provider
+        .clone()
+        .map(Provider::from)
+        .map(ProviderSelection::from_primary)
+        .unwrap_or_default();
+    let mut llm = LlmRouter::new(provider_selection);
 
-    // Step 2: Open git repository
+    // Step 1: Open git repository
     let repo = Repository::open(".")
         .context("Not a git repository. Run keryx from within a git repository.")?;
 
@@ -755,7 +800,7 @@ async fn run_generate(cli: Cli) -> Result<()> {
         }
     }
 
-    // Step 7: Build prompt and call Claude
+    // Step 7: Build prompt and call LLM provider
     let repo_name = get_repo_name(&repo).unwrap_or_else(|| "repository".to_string());
     let is_initial_release = base_version.is_none();
 
@@ -778,13 +823,18 @@ async fn run_generate(cli: Cli) -> Result<()> {
         cli_features,
     };
 
-    let prompt = build_prompt(&input).context("Failed to build prompt for Claude")?;
+    let prompt = build_prompt(&input).context("Failed to build prompt for LLM")?;
 
-    println!("Generating release notes with Claude...");
+    println!(
+        "Generating release notes with {} (fallback: {})...",
+        llm.primary(),
+        llm.fallback()
+    );
 
-    let draft_output = generate_with_retry(&prompt)
-        .await
-        .context("Failed to generate changelog entries")?;
+    let draft_completion = llm.generate(&prompt).await
+        .map_err(|e| handle_llm_error(e, cli.verbose))?;
+    report_llm_fallback_if_any(&draft_completion, cli.verbose);
+    let draft_output = draft_completion.output;
 
     if draft_output.entries.is_empty() {
         println!("No changelog entries generated. Nothing to add.");
@@ -799,7 +849,7 @@ async fn run_generate(cli: Cli) -> Result<()> {
         let repo_path = repo.workdir().context(
             "Cannot verify in a bare repository. Use --no-verify to skip verification."
         )?;
-        verify_changelog_entries(&draft_output, repo_path, cli.verbose).await?
+        verify_changelog_entries(&draft_output, repo_path, cli.verbose, &mut llm).await?
     };
 
     if changelog_output.entries.is_empty() {
@@ -822,7 +872,7 @@ async fn run_generate(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-/// Verify changelog entries against the codebase using a second Claude pass.
+/// Verify changelog entries against the codebase using a second LLM pass.
 ///
 /// This function:
 /// 1. Scans the codebase for evidence supporting/refuting each entry
@@ -832,6 +882,7 @@ async fn verify_changelog_entries(
     draft: &keryx::ChangelogOutput,
     repo_path: &std::path::Path,
     verbose: bool,
+    llm: &mut LlmRouter,
 ) -> Result<keryx::ChangelogOutput> {
     // Check prerequisites
     check_ripgrep_installed()
@@ -914,12 +965,17 @@ async fn verify_changelog_entries(
     let verification_prompt = build_verification_prompt(&draft_json, &evidence)
         .context("Failed to build verification prompt")?;
 
-    println!("Running verification agent...");
+    println!(
+        "Running verification agent with {} (fallback: {})...",
+        llm.primary(),
+        llm.fallback()
+    );
 
     // Run verification pass
-    let verified_output = generate_with_retry(&verification_prompt)
-        .await
-        .context("Failed to verify changelog entries")?;
+    let verified_completion = llm.generate(&verification_prompt).await
+        .map_err(|e| handle_llm_error(e, verbose))?;
+    report_llm_fallback_if_any(&verified_completion, verbose);
+    let verified_output = verified_completion.output;
 
     // Report what changed
     let original_count = draft.entries.len();
@@ -935,6 +991,69 @@ async fn verify_changelog_entries(
     }
 
     Ok(verified_output)
+}
+
+fn report_llm_fallback_if_any(completion: &LlmCompletion, verbose: bool) {
+    if let Some(primary_error) = &completion.primary_error {
+        eprintln!();
+        eprintln!(
+            "\x1b[33m⚠ {} failed, using {} instead\x1b[0m",
+            primary_error.provider(),
+            completion.provider
+        );
+        if verbose {
+            eprintln!("  Details: {}", primary_error.detail());
+        } else {
+            eprintln!("  Reason: {}", primary_error.summary());
+        }
+        eprintln!();
+    }
+}
+
+fn handle_llm_error(err: LlmError, verbose: bool) -> anyhow::Error {
+    let message = if verbose { err.detailed() } else { err.summary() };
+    let hint = llm_error_hint(&err);
+
+    let full_message = if let Some(hint) = hint {
+        format!("{}\nHint: {}", message, hint)
+    } else {
+        message
+    };
+
+    anyhow::anyhow!(full_message)
+}
+
+fn llm_error_hint(err: &LlmError) -> Option<String> {
+    let mut hints: Vec<&'static str> = Vec::new();
+
+    let primary = err.primary_error();
+    let fallback = err.fallback_error();
+
+    for provider_error in [primary, fallback].into_iter().flatten() {
+        if let Some(hint) = provider_install_hint(provider_error) {
+            if !hints.contains(&hint) {
+                hints.push(hint);
+            }
+        }
+    }
+
+    if hints.is_empty() {
+        None
+    } else {
+        Some(hints.join(" | "))
+    }
+}
+
+fn provider_install_hint(err: &LlmProviderError) -> Option<&'static str> {
+    match err {
+        LlmProviderError::Claude(keryx::ClaudeError::NotInstalled) => Some(
+            "Install Claude Code CLI: npm install -g @anthropic-ai/claude-code (then run `claude login`)",
+        ),
+        LlmProviderError::Codex(keryx::CodexError::NotInstalled) => Some(
+            "Install Codex CLI: npm install -g @openai/codex (then run `codex` or set CODEX_API_KEY)",
+        ),
+        _ => None,
+    }
 }
 
 /// Truncate a description for display.

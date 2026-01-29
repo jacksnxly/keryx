@@ -2,7 +2,7 @@
 
 > Greek for "herald" - announces your releases
 
-AI-powered release notes generator that creates changelogs from merged PRs and conventional commits using Claude.
+AI-powered release notes generator that creates changelogs from merged PRs and conventional commits using Claude or Codex.
 
 ## Installation
 
@@ -38,7 +38,9 @@ Remove-Item (Get-Command keryx).Source
 
 ### Prerequisites
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) must be installed and authenticated
+- At least one LLM CLI installed and authenticated:
+  - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
+  - Codex CLI (fallback provider)
 - For PR fetching: GitHub CLI (`gh`) authenticated, or `GITHUB_TOKEN`/`GH_TOKEN` environment variable
 
 ## Usage
@@ -52,6 +54,9 @@ keryx --dry-run
 
 # Skip GitHub PR fetching (commits only)
 keryx --no-prs
+
+# Choose provider explicitly (fallback still applies on failure)
+keryx --provider codex
 
 # Specify version manually
 keryx --set-version 1.0.0
@@ -109,6 +114,7 @@ keryx uses sensible defaults with no configuration required. All options are ava
 | `-o, --output` | Changelog file path | `CHANGELOG.md` |
 | `--no-prs` | Skip GitHub PR fetching | `false` |
 | `--dry-run` | Preview without writing | `false` |
+| `--provider` | LLM provider (`claude` or `codex`) | Claude → Codex fallback |
 
 ### Init Command Flags
 

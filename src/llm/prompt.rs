@@ -1,13 +1,20 @@
-//! Prompt construction for Claude.
+//! Prompt construction for LLM providers.
 
 use semver::Version;
+use thiserror::Error;
 
-use crate::error::ClaudeError;
 use crate::git::ParsedCommit;
 use crate::github::PullRequest;
 use crate::verification::VerificationEvidence;
 
-/// Input to Claude for changelog generation.
+/// Errors from prompt construction.
+#[derive(Error, Debug)]
+pub enum PromptError {
+    #[error("Failed to serialize prompt data: {0}")]
+    SerializationFailed(String),
+}
+
+/// Input to the LLM for changelog generation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChangelogInput {
     pub commits: Vec<ParsedCommit>,
@@ -20,17 +27,17 @@ pub struct ChangelogInput {
     pub cli_features: Option<Vec<String>>,
 }
 
-/// Build the prompt for Claude to generate changelog entries.
+/// Build the prompt for the LLM to generate changelog entries.
 ///
 /// Follows the spec's prompt structure exactly.
 /// Sanitizes commit messages and PR bodies to prevent prompt injection.
 ///
 /// # Errors
 ///
-/// Returns `ClaudeError::SerializationFailed` if the commits or PRs cannot be
+/// Returns `PromptError::SerializationFailed` if the commits or PRs cannot be
 /// serialized to JSON. This is a hard error rather than a fallback to ensure
-/// malformed prompts are never sent to Claude.
-pub fn build_prompt(input: &ChangelogInput) -> Result<String, ClaudeError> {
+/// malformed prompts are never sent to the provider.
+pub fn build_prompt(input: &ChangelogInput) -> Result<String, PromptError> {
     // Sanitize commits before serializing
     let sanitized_commits: Vec<_> = input.commits.iter().map(|c| {
         let mut commit = c.clone();
@@ -47,9 +54,9 @@ pub fn build_prompt(input: &ChangelogInput) -> Result<String, ClaudeError> {
     }).collect();
 
     let commits_json = serde_json::to_string_pretty(&sanitized_commits)
-        .map_err(|e| ClaudeError::SerializationFailed(format!("commits: {}", e)))?;
+        .map_err(|e| PromptError::SerializationFailed(format!("commits: {}", e)))?;
     let prs_json = serde_json::to_string_pretty(&sanitized_prs)
-        .map_err(|e| ClaudeError::SerializationFailed(format!("pull requests: {}", e)))?;
+        .map_err(|e| PromptError::SerializationFailed(format!("pull requests: {}", e)))?;
 
     let is_initial_release = input.previous_version.is_none();
     let repo_name = &input.repository_name;
@@ -119,14 +126,14 @@ Respond with JSON:
 
 /// Build the verification prompt to validate and correct changelog entries.
 ///
-/// This prompt asks Claude to review draft entries against codebase evidence
+/// This prompt asks the LLM to review draft entries against codebase evidence
 /// and correct any inaccuracies or hallucinations.
 pub fn build_verification_prompt(
     draft_entries_json: &str,
     evidence: &VerificationEvidence,
-) -> Result<String, ClaudeError> {
+) -> Result<String, PromptError> {
     let evidence_json = serde_json::to_string_pretty(evidence)
-        .map_err(|e| ClaudeError::SerializationFailed(format!("evidence: {}", e)))?;
+        .map_err(|e| PromptError::SerializationFailed(format!("evidence: {}", e)))?;
 
     Ok(format!(
         r#"You are verifying changelog entries against codebase evidence to catch hallucinations and inaccuracies.
