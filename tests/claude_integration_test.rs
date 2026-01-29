@@ -222,10 +222,14 @@ const MOCK_INVALID_THEN_VALID: &str = r#"#!/bin/bash
 # CALL_COUNT is passed as env var
 if [ "$CALL_COUNT" -eq 1 ]; then
     # First call: return invalid JSON
-    echo '{"result": "not valid json {", "is_error": false}'
+    cat <<'EOF'
+{"result": "not valid json {", "is_error": false}
+EOF
 else
     # Subsequent calls: return valid JSON
-    echo '{"result": "{\"entries\": [{\"category\": \"Added\", \"description\": \"Test feature\"}]}", "is_error": false}'
+    cat <<'EOF'
+{"result": "{\"entries\": [{\"category\": \"Added\", \"description\": \"Test feature\"}]}", "is_error": false}
+EOF
 fi
 "#;
 
@@ -347,7 +351,9 @@ async fn test_retries_exhausted_includes_last_error() {
 /// Mock that returns truncated JSON.
 const MOCK_PARTIAL_JSON: &str = r#"#!/bin/bash
 # Return JSON that's cut off mid-stream
-echo '{"result": "{\"entries\": [{\"category\": \"Added\", \"description\": \"Test", "is_error": false}'
+cat <<'EOF'
+{"result": "{\"entries\": [{\"category\": \"Added\", \"description\": \"Test", "is_error": false}
+EOF
 "#;
 
 #[tokio::test]
@@ -387,7 +393,9 @@ async fn test_partial_json_handled_gracefully() {
 
 /// Mock that returns valid JSON immediately.
 const MOCK_SUCCESS: &str = r#"#!/bin/bash
-echo '{"result": "{\"entries\": [{\"category\": \"Added\", \"description\": \"New feature\"}]}", "is_error": false}'
+cat <<'EOF'
+{"result": "{\"entries\": [{\"category\": \"Added\", \"description\": \"New feature\"}]}", "is_error": false}
+EOF
 "#;
 
 #[tokio::test]
@@ -419,7 +427,9 @@ if [ "$CALL_COUNT" -lt 3 ]; then
     echo "Temporary network error" >&2
     exit 1
 else
-    echo '{"result": "{\"entries\": []}", "is_error": false}'
+    cat <<'EOF'
+{"result": "{\"entries\": []}", "is_error": false}
+EOF
 fi
 "#;
 
@@ -486,7 +496,9 @@ async fn test_nonzero_exit_captures_detailed_stderr() {
 
 /// Mock that returns is_error: true.
 const MOCK_IS_ERROR_TRUE: &str = r#"#!/bin/bash
-echo '{"result": "Claude encountered an internal error", "is_error": true}'
+cat <<'EOF'
+{"result": "Claude encountered an internal error", "is_error": true}
+EOF
 "#;
 
 #[tokio::test]

@@ -70,6 +70,9 @@ fn run_rg_or_warn(cmd: &mut Command, context: &str) -> Option<String> {
     }
 }
 
+/// Max number of lines to include in project structure output.
+const PROJECT_STRUCTURE_MAX_LINES: usize = 50;
+
 /// Common ripgrep arguments to exclude build/dependency directories.
 const RG_EXCLUDE_PATTERNS: &[&str] = &[
     "-g", "!target",
@@ -720,7 +723,11 @@ fn get_project_structure(repo_path: &Path) -> (Option<String>, Option<String>, O
         Ok(out) if out.status.success() => {
             let tree = String::from_utf8_lossy(&out.stdout);
             // Truncate if too long
-            let truncated: String = tree.lines().take(50).collect::<Vec<_>>().join("\n");
+            let truncated: String = tree
+                .lines()
+                .take(PROJECT_STRUCTURE_MAX_LINES)
+                .collect::<Vec<_>>()
+                .join("\n");
             return (Some(truncated), Some("tree".to_string()), None);
         }
         Ok(out) => {
@@ -746,7 +753,13 @@ fn get_project_structure(repo_path: &Path) -> (Option<String>, Option<String>, O
 
     match ls_output {
         Ok(ls_out) if ls_out.status.success() => {
-            (Some(String::from_utf8_lossy(&ls_out.stdout).to_string()), Some("ls".to_string()), None)
+            let listing = String::from_utf8_lossy(&ls_out.stdout);
+            let truncated = listing
+                .lines()
+                .take(PROJECT_STRUCTURE_MAX_LINES)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (Some(truncated), Some("ls".to_string()), None)
         }
         Ok(ls_out) => {
             let msg = format!(
