@@ -19,6 +19,12 @@ This project uses the vibe-coding-toolkit:
 3. `/implement-feature` → Build from spec
 4. `/review-code` → Audit & approve
 
+## SOPs
+
+| Guide | Description |
+|-------|-------------|
+| `SOP/publish_releases.md` | Full release process: merge PR → bump version → tag → GitHub Release |
+
 ## Project Status
 
 **Phase:** Initial development
