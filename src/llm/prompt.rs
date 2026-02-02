@@ -59,7 +59,7 @@ pub fn build_prompt(input: &ChangelogInput) -> Result<String, PromptError> {
         .map_err(|e| PromptError::SerializationFailed(format!("pull requests: {}", e)))?;
 
     let is_initial_release = input.previous_version.is_none();
-    let repo_name = &input.repository_name;
+    let repo_name = sanitize_for_prompt(&input.repository_name);
 
     let context = if is_initial_release {
         let mut ctx = format!(

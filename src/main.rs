@@ -27,7 +27,7 @@ use keryx::changelog::format::CHANGELOG_HEADER;
 use keryx::git::{commits::fetch_commits, range::{find_root_commit, resolve_range}, tags::{get_all_tags, get_latest_tag}};
 use keryx::github::{auth::get_github_token, prs::{fetch_merged_prs, parse_github_remote}};
 use keryx::verification::{check_ripgrep_installed, gather_verification_evidence};
-use keryx::version::calculate_next_version;
+use keryx::version::{calculate_next_version, calculate_next_version_with_llm, VersionBumpInput};
 
 /// Result from the background update check.
 struct UpdateResult {
@@ -165,6 +165,10 @@ struct Cli {
     /// Skip verification pass (faster but may include inaccuracies)
     #[arg(long, global = true)]
     no_verify: bool,
+
+    /// Skip LLM-based version bump (use algorithmic bump from commit types)
+    #[arg(long, global = true)]
+    no_llm_bump: bool,
 
     /// LLM provider to use (fallback will be attempted on failure)
     #[arg(long, value_enum, global = true)]
@@ -772,14 +776,32 @@ async fn run_generate(cli: Cli) -> Result<()> {
 
     // Step 6: Determine version
     let base_version = get_latest_tag(&repo)?.and_then(|t| t.version);
-    let next_version = cli.set_version.unwrap_or_else(|| {
-        calculate_next_version(base_version.as_ref(), &commits)
-    });
+    let repo_name_for_bump = get_repo_name(&repo).unwrap_or_else(|| "repository".to_string());
+
+    let (next_version, bump_reasoning) = if let Some(explicit) = cli.set_version.clone() {
+        (explicit, None)
+    } else if cli.no_llm_bump {
+        (calculate_next_version(base_version.as_ref(), &commits), None)
+    } else {
+        let bump_input = VersionBumpInput {
+            commits: &commits,
+            pull_requests: &pull_requests,
+            previous_version: base_version.as_ref(),
+            repository_name: &repo_name_for_bump,
+        };
+        calculate_next_version_with_llm(&bump_input, &mut llm, cli.verbose).await
+    };
 
     println!("Version: {} -> {}",
         base_version.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
         next_version
     );
+
+    if cli.verbose {
+        if let Some(ref reasoning) = bump_reasoning {
+            println!("  LLM bump reasoning: {}", reasoning);
+        }
+    }
 
     // Step 6b: Check if version already exists in changelog
     if let Some(parsed) = read_changelog(&cli.output)

@@ -171,16 +171,20 @@ impl fmt::Display for LlmError {
 
 impl std::error::Error for LlmError {}
 
-/// Successful generation with metadata.
-pub struct LlmCompletion {
-    pub output: ChangelogOutput,
+/// Successful generation with metadata, generic over the output type.
+pub struct LlmCompletion<T = ChangelogOutput> {
+    pub output: T,
     pub provider: Provider,
     pub primary_error: Option<LlmProviderError>,
 }
 
+/// Type alias for raw-string completions.
+pub type LlmRawCompletion = LlmCompletion<String>;
+
 #[async_trait]
 trait ProviderRunner {
     async fn run(&self, provider: Provider, prompt: &str) -> Result<ChangelogOutput, LlmProviderError>;
+    async fn run_raw(&self, provider: Provider, prompt: &str) -> Result<String, LlmProviderError>;
 }
 
 struct DefaultRunner;
@@ -191,6 +195,13 @@ impl ProviderRunner for DefaultRunner {
         match provider {
             Provider::Claude => claude::generate_with_retry(prompt).await.map_err(LlmProviderError::from),
             Provider::Codex => codex::generate_with_retry(prompt).await.map_err(LlmProviderError::from),
+        }
+    }
+
+    async fn run_raw(&self, provider: Provider, prompt: &str) -> Result<String, LlmProviderError> {
+        match provider {
+            Provider::Claude => claude::generate_raw_with_retry(prompt).await.map_err(LlmProviderError::from),
+            Provider::Codex => codex::generate_raw_with_retry(prompt).await.map_err(LlmProviderError::from),
         }
     }
 }
@@ -219,24 +230,35 @@ impl LlmRouter {
 
     pub async fn generate(&mut self, prompt: &str) -> Result<LlmCompletion, LlmError> {
         let runner = DefaultRunner;
-        self.generate_with_runner(prompt, &runner).await
+        self.try_with_fallback(prompt, |r, p, pr| Box::pin(r.run(p, pr)), &runner)
+            .await
     }
 
-    async fn generate_with_runner<R: ProviderRunner>(
+    pub async fn generate_raw(&mut self, prompt: &str) -> Result<LlmRawCompletion, LlmError> {
+        let runner = DefaultRunner;
+        self.try_with_fallback(prompt, |r, p, pr| Box::pin(r.run_raw(p, pr)), &runner)
+            .await
+    }
+
+    async fn try_with_fallback<T, R, F>(
         &mut self,
         prompt: &str,
+        run_fn: F,
         runner: &R,
-    ) -> Result<LlmCompletion, LlmError> {
+    ) -> Result<LlmCompletion<T>, LlmError>
+    where
+        F: for<'a> Fn(&'a R, Provider, &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, LlmProviderError>> + Send + 'a>>,
+    {
         let primary = self.primary;
         let fallback = self.fallback;
 
-        match runner.run(primary, prompt).await {
+        match run_fn(runner, primary, prompt).await {
             Ok(output) => Ok(LlmCompletion {
                 output,
                 provider: primary,
                 primary_error: None,
             }),
-            Err(primary_error) => match runner.run(fallback, prompt).await {
+            Err(primary_error) => match run_fn(runner, fallback, prompt).await {
                 Ok(output) => {
                     self.primary = fallback;
                     self.fallback = primary;
@@ -254,6 +276,27 @@ impl LlmRouter {
                 }),
             },
         }
+    }
+
+    // Test-only entry points that accept a custom runner.
+    #[cfg(test)]
+    async fn generate_with_runner<R: ProviderRunner>(
+        &mut self,
+        prompt: &str,
+        runner: &R,
+    ) -> Result<LlmCompletion, LlmError> {
+        self.try_with_fallback(prompt, |r, p, pr| Box::pin(r.run(p, pr)), runner)
+            .await
+    }
+
+    #[cfg(test)]
+    async fn generate_raw_with_runner<R: ProviderRunner>(
+        &mut self,
+        prompt: &str,
+        runner: &R,
+    ) -> Result<LlmRawCompletion, LlmError> {
+        self.try_with_fallback(prompt, |r, p, pr| Box::pin(r.run_raw(p, pr)), runner)
+            .await
     }
 }
 
@@ -302,6 +345,15 @@ mod tests {
                 Provider::Codex => Err(LlmProviderError::Codex(CodexError::NotInstalled)),
             }
         }
+
+        async fn run_raw(&self, provider: Provider, _prompt: &str) -> Result<String, LlmProviderError> {
+            match provider {
+                Provider::Claude if self.claude_ok => Ok(r#"{"bump_type": "minor", "reasoning": "test"}"#.to_string()),
+                Provider::Codex if self.codex_ok => Ok(r#"{"bump_type": "minor", "reasoning": "test"}"#.to_string()),
+                Provider::Claude => Err(LlmProviderError::Claude(ClaudeError::NotInstalled)),
+                Provider::Codex => Err(LlmProviderError::Codex(CodexError::NotInstalled)),
+            }
+        }
     }
 
     #[test]
@@ -330,5 +382,49 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(router.primary(), Provider::Codex);
         assert_eq!(router.fallback(), Provider::Claude);
+    }
+
+    #[tokio::test]
+    async fn generate_raw_succeeds_on_primary() {
+        let mut router = LlmRouter::new(ProviderSelection::default());
+        let runner = FakeRunner {
+            claude_ok: true,
+            codex_ok: true,
+        };
+
+        let result = router.generate_raw_with_runner("test", &runner).await;
+        assert!(result.is_ok());
+        let completion = result.unwrap();
+        assert_eq!(completion.provider, Provider::Claude);
+        assert!(completion.primary_error.is_none());
+        assert!(completion.output.contains("bump_type"));
+    }
+
+    #[tokio::test]
+    async fn generate_raw_falls_back_on_primary_failure() {
+        let mut router = LlmRouter::new(ProviderSelection::default());
+        let runner = FakeRunner {
+            claude_ok: false,
+            codex_ok: true,
+        };
+
+        let result = router.generate_raw_with_runner("test", &runner).await;
+        assert!(result.is_ok());
+        let completion = result.unwrap();
+        assert_eq!(completion.provider, Provider::Codex);
+        assert!(completion.primary_error.is_some());
+        assert_eq!(router.primary(), Provider::Codex);
+    }
+
+    #[tokio::test]
+    async fn generate_raw_fails_when_both_fail() {
+        let mut router = LlmRouter::new(ProviderSelection::default());
+        let runner = FakeRunner {
+            claude_ok: false,
+            codex_ok: false,
+        };
+
+        let result = router.generate_raw_with_runner("test", &runner).await;
+        assert!(result.is_err());
     }
 }

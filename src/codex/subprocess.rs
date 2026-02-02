@@ -99,29 +99,43 @@ pub async fn check_codex_installed() -> Result<(), CodexError> {
 ///
 /// If the timeout is exceeded, returns `CodexError::Timeout`.
 pub async fn run_codex(prompt: &str) -> Result<String, CodexError> {
-    let timeout_duration = get_timeout();
-    let timeout_secs = timeout_duration.as_secs();
-
     let mut schema_file = NamedTempFile::new()
         .map_err(|e| CodexError::ExecutionFailed(format!("Failed to create schema file: {}", e)))?;
     schema_file
         .write_all(CHANGELOG_SCHEMA.as_bytes())
         .map_err(|e| CodexError::ExecutionFailed(format!("Failed to write schema file: {}", e)))?;
 
-    let output = timeout(
-        timeout_duration,
-        Command::new("codex")
-            .arg("exec")
-            .arg("--output-schema")
-            .arg(schema_file.path())
-            .arg(prompt)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
-    )
-    .await
-    .map_err(|_| CodexError::Timeout(timeout_secs))?
-    .map_err(CodexError::SpawnFailed)?;
+    run_codex_command(prompt, &["--output-schema", &schema_file.path().display().to_string()]).await
+}
+
+/// Run Codex CLI with a prompt and return the raw text response.
+///
+/// Unlike `run_codex`, this does **not** use `--output-schema`,
+/// so the response is free-form text rather than structured JSON.
+/// Used for tasks like version-bump determination where the LLM
+/// returns a simple JSON blob without needing a schema file.
+pub async fn run_codex_raw(prompt: &str) -> Result<String, CodexError> {
+    run_codex_command(prompt, &[]).await
+}
+
+/// Shared subprocess helper: runs `codex exec [extra_args...] <prompt>`.
+async fn run_codex_command(prompt: &str, extra_args: &[&str]) -> Result<String, CodexError> {
+    let timeout_duration = get_timeout();
+    let timeout_secs = timeout_duration.as_secs();
+
+    let mut cmd = Command::new("codex");
+    cmd.arg("exec");
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.arg(prompt)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = timeout(timeout_duration, cmd.output())
+        .await
+        .map_err(|_| CodexError::Timeout(timeout_secs))?
+        .map_err(CodexError::SpawnFailed)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
