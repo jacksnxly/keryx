@@ -164,6 +164,9 @@ pub fn stage_paths_and_commit(
 ) -> Result<Oid, CommitError> {
     let mut index = repo.index().map_err(CommitError::StagingFailed)?;
 
+    // Start from a clean index at HEAD so pre-staged changes don't leak into group commits.
+    reset_index_to_head(repo, &mut index)?;
+
     for path in paths {
         let change = file_changes.get(path.as_str());
         let status = change.map(|c| &c.status);
@@ -207,6 +210,21 @@ pub fn stage_paths_and_commit(
         .map_err(CommitError::CommitFailed)?;
 
     Ok(oid)
+}
+
+fn reset_index_to_head(repo: &Repository, index: &mut git2::Index) -> Result<(), CommitError> {
+    match repo.head() {
+        Ok(head) => {
+            let tree = head.peel_to_tree().map_err(CommitError::CommitFailed)?;
+            index.read_tree(&tree).map_err(CommitError::StagingFailed)?;
+        }
+        Err(e) if e.code() == ErrorCode::UnbornBranch || e.code() == ErrorCode::NotFound => {
+            index.clear().map_err(CommitError::StagingFailed)?;
+        }
+        Err(e) => return Err(CommitError::CommitFailed(e)),
+    }
+
+    Ok(())
 }
 
 fn resolve_parent_commit(repo: &Repository) -> Result<Option<git2::Commit<'_>>, CommitError> {
@@ -382,6 +400,11 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "file a\n").unwrap();
         std::fs::write(dir.path().join("b.txt"), "file b\n").unwrap();
         std::fs::write(dir.path().join("c.txt"), "file c\n").unwrap();
+
+        // Pre-stage c.txt to ensure it doesn't leak into the commit
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("c.txt")).unwrap();
+        index.write().unwrap();
 
         // Stage only a.txt and b.txt
         let mut statuses = std::collections::HashMap::new();

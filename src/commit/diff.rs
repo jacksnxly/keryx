@@ -1,5 +1,6 @@
 //! Diff collection from the working tree using git2.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use git2::{Delta, Diff, DiffFormat, DiffOptions, ErrorCode, Repository, Tree};
@@ -127,12 +128,12 @@ pub fn collect_diff(repo: &Repository) -> Result<DiffSummary, CommitError> {
 /// Collects changed files from both diffs, deduplicates by path (staged takes
 /// precedence), and assembles the unified diff text with addition/deletion counts.
 fn build_summary(staged: &Diff<'_>, unstaged: &Diff<'_>) -> Result<DiffSummary, CommitError> {
-    let mut changed_files = Vec::new();
-    collect_files_from_diff(staged, &mut changed_files);
-    collect_files_from_diff(unstaged, &mut changed_files);
+    let mut changed_files_map: HashMap<String, ChangedFile> = HashMap::new();
+    collect_files_from_diff(staged, &mut changed_files_map);
+    collect_files_from_diff(unstaged, &mut changed_files_map);
 
+    let mut changed_files: Vec<ChangedFile> = changed_files_map.into_values().collect();
     changed_files.sort_by(|a, b| a.path.cmp(&b.path));
-    changed_files.dedup_by(|a, b| a.path == b.path);
 
     if changed_files.is_empty() {
         return Err(CommitError::NoChanges);
@@ -158,7 +159,7 @@ fn build_summary(staged: &Diff<'_>, unstaged: &Diff<'_>) -> Result<DiffSummary, 
 }
 
 /// Collect changed file entries from a diff.
-fn collect_files_from_diff(diff: &Diff<'_>, files: &mut Vec<ChangedFile>) {
+fn collect_files_from_diff(diff: &Diff<'_>, files: &mut HashMap<String, ChangedFile>) {
     for delta_idx in 0..diff.deltas().len() {
         let delta = diff.get_delta(delta_idx).unwrap();
         let status = match delta.status() {
@@ -192,9 +193,13 @@ fn collect_files_from_diff(diff: &Diff<'_>, files: &mut Vec<ChangedFile>) {
             }
         };
 
-        if !path.is_empty() {
-            files.push(ChangedFile { path, status, old_path });
+        if path.is_empty() {
+            continue;
         }
+
+        let next = ChangedFile { path: path.clone(), status, old_path };
+
+        files.entry(path).or_insert(next);
     }
 }
 
