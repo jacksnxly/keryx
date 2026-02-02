@@ -12,6 +12,7 @@ use tracing::{debug, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use keryx::changelog::{parser::read_changelog, write_changelog, writer::generate_summary};
+use keryx::commit::{collect_diff, generate_commit_message, stage_and_commit};
 use keryx::llm::{
     build_prompt,
     build_verification_prompt,
@@ -205,6 +206,13 @@ enum Commands {
         #[arg(long, conflicts_with = "unreleased")]
         from_history: bool,
     },
+
+    /// Generate a commit message from staged/unstaged changes using AI
+    Commit {
+        /// Print the generated message to stdout without committing
+        #[arg(long)]
+        message_only: bool,
+    },
 }
 
 /// Configuration for init commands, avoiding too_many_arguments clippy warning.
@@ -272,6 +280,9 @@ async fn main() -> Result<()> {
         Some(Commands::Init { unreleased, from_history }) => {
             let config = InitConfig::from_cli(&cli);
             run_init(&config, unreleased, from_history).await
+        }
+        Some(Commands::Commit { message_only }) => {
+            run_commit(message_only, cli.dry_run, cli.verbose, cli.provider).await
         }
         None => run_generate(cli).await,
     };
@@ -725,6 +736,117 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut
     Ok(())
 }
 
+/// Run the commit message generation command.
+async fn run_commit(
+    message_only: bool,
+    dry_run: bool,
+    verbose: bool,
+    provider_flag: Option<ProviderFlag>,
+) -> Result<()> {
+    let provider_selection = provider_flag
+        .map(Provider::from)
+        .map(ProviderSelection::from_primary)
+        .unwrap_or_default();
+    let mut llm = LlmRouter::new(provider_selection);
+
+    // Open git repository
+    let repo = Repository::open(".")
+        .context("Not a git repository. Run keryx from within a git repository.")?;
+
+    // Collect diff
+    let diff = collect_diff(&repo).map_err(|e| match &e {
+        keryx::CommitError::NoChanges => anyhow::anyhow!("Nothing to commit (working tree clean)"),
+        _ => anyhow::anyhow!("{}", e),
+    })?;
+
+    if verbose {
+        debug!(
+            "Found {} changed files ({} additions, {} deletions)",
+            diff.changed_files.len(),
+            diff.additions,
+            diff.deletions
+        );
+        if diff.truncated {
+            debug!("Diff was truncated at 30,000 characters");
+        }
+    }
+
+    println!(
+        "Analyzing {} changed file{}...",
+        diff.changed_files.len(),
+        if diff.changed_files.len() == 1 { "" } else { "s" }
+    );
+
+    // Get branch name from HEAD
+    let branch_name = repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().map(String::from))
+        .unwrap_or_else(|| "HEAD".to_string());
+
+    // Generate commit message
+    println!(
+        "Generating commit message with {} (fallback: {})...",
+        llm.primary(),
+        llm.fallback()
+    );
+
+    let (message, completion) = generate_commit_message(&diff, &branch_name, &mut llm, verbose)
+        .await
+        .map_err(|e| handle_llm_error(e, verbose))?;
+
+    report_llm_fallback_if_any(&completion, verbose);
+
+    // Display the generated message
+    println!();
+    println!("\x1b[1m{}\x1b[0m", message.subject);
+    if let Some(ref body) = message.body {
+        if !body.trim().is_empty() {
+            println!();
+            println!("{}", body.trim());
+        }
+    }
+    if message.breaking {
+        println!();
+        println!("\x1b[33m⚠ BREAKING CHANGE\x1b[0m");
+    }
+    // Show changelog metadata
+    if let Some(ref cat) = message.changelog_category {
+        if let Some(ref desc) = message.changelog_description {
+            println!();
+            println!(
+                "\x1b[36mChangelog ({}):\x1b[0m {}",
+                cat, desc
+            );
+        }
+    } else if verbose {
+        println!();
+        println!("\x1b[2mInternal change — excluded from changelog\x1b[0m");
+    }
+    println!();
+
+    // If message-only or dry-run, stop here
+    if message_only || dry_run {
+        if message_only {
+            // In message-only mode, print just the raw message to stdout for piping
+            print!("{}", message.format());
+        }
+        return Ok(());
+    }
+
+    // Stage all changes and commit
+    let formatted = message.format();
+    let oid = stage_and_commit(&repo, &formatted)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    println!(
+        "\x1b[32m\u{2713} Created commit {}\x1b[0m",
+        &oid.to_string()[..7]
+    );
+
+    Ok(())
+}
+
 /// Run the changelog generation command.
 async fn run_generate(cli: Cli) -> Result<()> {
     let provider_selection = cli.provider
@@ -1015,7 +1137,7 @@ async fn verify_changelog_entries(
     Ok(verified_output)
 }
 
-fn report_llm_fallback_if_any(completion: &LlmCompletion, verbose: bool) {
+fn report_llm_fallback_if_any<T>(completion: &LlmCompletion<T>, verbose: bool) {
     if let Some(primary_error) = &completion.primary_error {
         eprintln!();
         eprintln!(

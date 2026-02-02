@@ -242,7 +242,7 @@ pub fn sanitize_for_prompt(text: &str) -> String {
 }
 
 /// Remove control characters except newlines (\n), carriage returns (\r), and tabs (\t).
-fn remove_control_chars(text: &str) -> String {
+pub(crate) fn remove_control_chars(text: &str) -> String {
     text.chars()
         .filter(|c| {
             !c.is_control() || *c == '\n' || *c == '\r' || *c == '\t'
@@ -251,7 +251,7 @@ fn remove_control_chars(text: &str) -> String {
 }
 
 /// Remove ANSI escape sequences (terminal color codes, cursor movement, etc.).
-fn remove_ansi_escapes(text: &str) -> String {
+pub(crate) fn remove_ansi_escapes(text: &str) -> String {
     // ANSI escape sequences start with ESC (0x1B) followed by '[' and end with a letter
     // Common patterns: \x1b[...m (colors), \x1b[...H (cursor), etc.
     let mut result = String::with_capacity(text.len());
@@ -284,7 +284,7 @@ fn remove_ansi_escapes(text: &str) -> String {
 }
 
 /// Filter known prompt injection patterns (OWASP recommended).
-fn filter_injection_patterns(text: &str) -> String {
+pub(crate) fn filter_injection_patterns(text: &str) -> String {
     let mut result = text.to_string();
 
     // Common injection patterns to neutralize
@@ -326,7 +326,7 @@ fn filter_injection_patterns(text: &str) -> String {
 }
 
 /// Normalize excessive whitespace (collapse multiple spaces, remove excessive newlines).
-fn normalize_whitespace(text: &str) -> String {
+pub(crate) fn normalize_whitespace(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut prev_space = false;
     let mut newline_count = 0;
