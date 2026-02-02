@@ -143,9 +143,6 @@ pub enum CommitError {
     #[error("Failed to create commit: {0}")]
     CommitFailed(#[source] git2::Error),
 
-    #[error("Failed to parse LLM response: {0}")]
-    InvalidResponse(String),
-
     #[error("Git config error (missing user.name or user.email): {0}")]
     ConfigError(#[source] git2::Error),
 }

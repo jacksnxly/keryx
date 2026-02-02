@@ -1,10 +1,13 @@
 //! Commit message generation via LLM and git staging/commit operations.
 
-use git2::{IndexAddOption, Oid, Repository};
+use std::collections::HashMap;
 use std::path::Path;
+
+use git2::{IndexAddOption, Oid, Repository};
 use serde::Deserialize;
 use tracing::debug;
 
+use crate::changelog::ChangelogCategory;
 use crate::commit::diff::DiffSummary;
 use crate::commit::prompt::build_commit_prompt;
 use crate::error::CommitError;
@@ -18,9 +21,8 @@ pub struct CommitMessage {
     pub body: Option<String>,
     #[serde(default)]
     pub breaking: bool,
-    /// Keep a Changelog category: "added", "changed", "fixed", "removed",
-    /// "deprecated", "security", or None for internal-only changes.
-    pub changelog_category: Option<String>,
+    /// Keep a Changelog category, or None for internal-only changes.
+    pub changelog_category: Option<ChangelogCategory>,
     /// User-facing description for the changelog, written for end users.
     /// None when changelog_category is None (internal change).
     pub changelog_description: Option<String>,
@@ -44,17 +46,16 @@ impl CommitMessage {
         // Subject
         parts.push(self.subject.clone());
 
-        // Body (if present)
-        let has_body = self.body.as_ref().is_some_and(|b| !b.trim().is_empty());
-        if has_body {
+        // Body (if present and non-empty)
+        if let Some(body) = self.body.as_deref().filter(|b| !b.trim().is_empty()) {
             parts.push(String::new()); // blank line
-            parts.push(self.body.as_ref().unwrap().trim().to_string());
+            parts.push(body.trim().to_string());
         }
 
         // Trailers
         let mut trailers = Vec::new();
         if let Some(ref cat) = self.changelog_category {
-            trailers.push(format!("Changelog: {cat}"));
+            trailers.push(format!("Changelog: {}", cat.as_str().to_lowercase()));
         }
         if let Some(ref desc) = self.changelog_description {
             trailers.push(format!("Changelog-Description: {desc}"));
@@ -99,23 +100,13 @@ pub async fn generate_commit_message(
     let json_str = extract_json(&completion.output);
     let message: CommitMessage = serde_json::from_str(&json_str)
         .map_err(|e| {
-            // Wrap in LlmError via a provider error on the active provider
             debug!("Failed to parse LLM response as CommitMessage: {}", e);
             debug!("Raw response: {}", &completion.output);
-            // We return an LlmError by constructing it manually
-            LlmError::AllProvidersFailed {
-                primary: completion.provider,
-                primary_error: crate::llm::router::LlmProviderError::Claude(
-                    crate::error::ClaudeError::InvalidJson(format!(
-                        "Could not parse commit message JSON: {}. Response: {}",
-                        e,
-                        &completion.output[..completion.output.len().min(200)]
-                    )),
-                ),
-                fallback: completion.provider,
-                fallback_error: crate::llm::router::LlmProviderError::Claude(
-                    crate::error::ClaudeError::InvalidJson("Parse failure (see primary)".to_string()),
-                ),
+
+            LlmError::ResponseParseFailed {
+                provider: completion.provider,
+                raw_output: completion.output.clone(),
+                parse_error: format!("Could not parse commit message JSON: {}", e),
             }
         })?;
 
@@ -168,7 +159,7 @@ pub fn stage_and_commit(repo: &Repository, message: &str) -> Result<Oid, CommitE
 pub fn stage_paths_and_commit(
     repo: &Repository,
     paths: &[String],
-    file_statuses: &std::collections::HashMap<String, crate::commit::diff::FileStatus>,
+    file_statuses: &HashMap<String, crate::commit::diff::FileStatus>,
     message: &str,
 ) -> Result<Oid, CommitError> {
     let mut index = repo.index().map_err(CommitError::StagingFailed)?;
@@ -208,6 +199,7 @@ pub fn stage_paths_and_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::changelog::ChangelogCategory;
     use git2::Signature;
 
     #[test]
@@ -228,7 +220,7 @@ mod tests {
             subject: "fix(parser): resolve memory leak".to_string(),
             body: Some("The parser was holding references to\nalready-freed buffers.".to_string()),
             breaking: false,
-            changelog_category: Some("fixed".to_string()),
+            changelog_category: Some(ChangelogCategory::Fixed),
             changelog_description: Some("Fix memory leak in parser".to_string()),
         };
         let formatted = msg.format();
@@ -258,7 +250,7 @@ mod tests {
             subject: "fix(api): handle timeout".to_string(),
             body: None,
             breaking: false,
-            changelog_category: Some("fixed".to_string()),
+            changelog_category: Some(ChangelogCategory::Fixed),
             changelog_description: Some("Fix API timeout on large repos".to_string()),
         };
         let formatted = msg.format();
@@ -291,7 +283,7 @@ mod tests {
             subject: "feat: new thing".to_string(),
             body: None,
             breaking: false,
-            changelog_category: Some("added".to_string()),
+            changelog_category: Some(ChangelogCategory::Added),
             changelog_description: Some("Add new thing".to_string()),
         };
         assert!(user_facing.is_user_facing());
@@ -313,7 +305,7 @@ mod tests {
         assert_eq!(msg.subject, "feat: add feature");
         assert_eq!(msg.body.unwrap(), "Details here");
         assert!(!msg.breaking);
-        assert_eq!(msg.changelog_category.unwrap(), "added");
+        assert_eq!(msg.changelog_category.unwrap(), ChangelogCategory::Added);
         assert_eq!(msg.changelog_description.unwrap(), "Add feature");
     }
 
@@ -338,6 +330,13 @@ mod tests {
         let json = r#"{"subject": "feat: new api"}"#;
         let msg: CommitMessage = serde_json::from_str(json).unwrap();
         assert!(!msg.breaking);
+    }
+
+    #[test]
+    fn test_commit_message_deserialize_invalid_category_fails() {
+        let json = r#"{"subject": "feat: thing", "changelog_category": "enhanced", "changelog_description": "Something"}"#;
+        let result = serde_json::from_str::<CommitMessage>(json);
+        assert!(result.is_err(), "Invalid changelog category should fail deserialization");
     }
 
     #[test]

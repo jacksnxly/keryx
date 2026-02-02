@@ -3,6 +3,8 @@
 //! Detects when changes span multiple logical concerns and groups files
 //! into separate atomic commits.
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
 use tracing::{debug, warn};
 
@@ -94,8 +96,13 @@ pub async fn analyze_split(
     let analysis: SplitAnalysis = match serde_json::from_str(&json_str) {
         Ok(a) => a,
         Err(e) => {
-            debug!("Failed to parse split analysis JSON: {}", e);
-            debug!("Raw response: {}", &completion.output);
+            warn!("Failed to parse split analysis JSON: {}", e);
+            eprintln!(
+                "\x1b[33m⚠ Split analysis response could not be parsed, falling back to single commit\x1b[0m"
+            );
+            if verbose {
+                debug!("Raw response: {}", &completion.output);
+            }
             return Ok(None);
         }
     };
@@ -114,6 +121,12 @@ pub async fn analyze_split(
 
     if let Some(error) = validate_split(&analysis, &changed_files) {
         warn!("Split analysis validation failed: {}", error);
+        eprintln!(
+            "\x1b[33m⚠ Split analysis failed validation, falling back to single commit\x1b[0m"
+        );
+        if verbose {
+            eprintln!("  Details: {}", error);
+        }
         return Ok(None);
     }
 
@@ -129,7 +142,7 @@ pub async fn analyze_split(
 ///
 /// Returns an error message if validation fails, or `None` if valid.
 pub fn validate_split(analysis: &SplitAnalysis, changed_files: &[&str]) -> Option<String> {
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut seen: HashSet<&str> = HashSet::new();
 
     for group in &analysis.groups {
         for file in &group.files {

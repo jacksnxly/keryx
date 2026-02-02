@@ -2,7 +2,8 @@
 
 use std::fmt;
 
-use git2::{Delta, Diff, DiffFormat, DiffOptions, Repository};
+use git2::{Delta, Diff, DiffFormat, DiffOptions, ErrorCode, Repository, Tree};
+use tracing::warn;
 
 use crate::error::CommitError;
 
@@ -46,6 +47,26 @@ pub struct DiffSummary {
     pub deletions: usize,
 }
 
+/// Resolve the HEAD tree, distinguishing empty-repo errors from real failures.
+///
+/// Returns `Ok(None)` for repos with no commits (unborn branch / not found),
+/// `Ok(Some(tree))` for repos with a valid HEAD, or `Err(CommitError::DiffFailed)`
+/// for real errors (corrupt HEAD, permission issues, missing objects).
+fn resolve_head_tree(repo: &Repository) -> Result<Option<Tree<'_>>, CommitError> {
+    let head_ref = match repo.head() {
+        Ok(r) => r,
+        Err(e)
+            if e.code() == ErrorCode::UnbornBranch || e.code() == ErrorCode::NotFound =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(CommitError::DiffFailed(e)),
+    };
+
+    let tree = head_ref.peel_to_tree().map_err(CommitError::DiffFailed)?;
+    Ok(Some(tree))
+}
+
 /// Collect the working tree diff scoped to specific file paths.
 ///
 /// Same logic as [`collect_diff`] but uses `DiffOptions::pathspec()` to restrict
@@ -54,10 +75,7 @@ pub fn collect_diff_for_paths(
     repo: &Repository,
     paths: &[String],
 ) -> Result<DiffSummary, CommitError> {
-    let head_tree = repo
-        .head()
-        .ok()
-        .and_then(|r| r.peel_to_tree().ok());
+    let head_tree = resolve_head_tree(repo)?;
 
     // Staged changes with pathspec filter
     let mut staged_opts = DiffOptions::new();
@@ -78,34 +96,7 @@ pub fn collect_diff_for_paths(
         .diff_index_to_workdir(None, Some(&mut unstaged_opts))
         .map_err(CommitError::DiffFailed)?;
 
-    let mut changed_files = Vec::new();
-    collect_files_from_diff(&staged_diff, &mut changed_files);
-    collect_files_from_diff(&unstaged_diff, &mut changed_files);
-
-    changed_files.sort_by(|a, b| a.path.cmp(&b.path));
-    changed_files.dedup_by(|a, b| a.path == b.path);
-
-    if changed_files.is_empty() {
-        return Err(CommitError::NoChanges);
-    }
-
-    let mut diff_text = String::new();
-    let mut additions = 0usize;
-    let mut deletions = 0usize;
-    let mut truncated = false;
-
-    append_diff_text(&staged_diff, &mut diff_text, &mut additions, &mut deletions, &mut truncated);
-    if !truncated {
-        append_diff_text(&unstaged_diff, &mut diff_text, &mut additions, &mut deletions, &mut truncated);
-    }
-
-    Ok(DiffSummary {
-        diff_text,
-        changed_files,
-        truncated,
-        additions,
-        deletions,
-    })
+    build_summary(&staged_diff, &unstaged_diff)
 }
 
 /// Collect the working tree diff (staged + unstaged + untracked).
@@ -113,18 +104,12 @@ pub fn collect_diff_for_paths(
 /// Merges `diff_tree_to_index` (staged changes) with `diff_index_to_workdir`
 /// (unstaged changes including untracked files) to capture all pending changes.
 pub fn collect_diff(repo: &Repository) -> Result<DiffSummary, CommitError> {
-    // Get the HEAD tree (if any commits exist)
-    let head_tree = repo
-        .head()
-        .ok()
-        .and_then(|r| r.peel_to_tree().ok());
+    let head_tree = resolve_head_tree(repo)?;
 
-    // Staged changes: HEAD tree -> index
     let staged_diff = repo
         .diff_tree_to_index(head_tree.as_ref(), None, None)
         .map_err(CommitError::DiffFailed)?;
 
-    // Unstaged + untracked changes: index -> workdir
     let mut opts = DiffOptions::new();
     opts.include_untracked(true)
         .recurse_untracked_dirs(true);
@@ -132,12 +117,18 @@ pub fn collect_diff(repo: &Repository) -> Result<DiffSummary, CommitError> {
         .diff_index_to_workdir(None, Some(&mut opts))
         .map_err(CommitError::DiffFailed)?;
 
-    // Collect changed files from both diffs
-    let mut changed_files = Vec::new();
-    collect_files_from_diff(&staged_diff, &mut changed_files);
-    collect_files_from_diff(&unstaged_diff, &mut changed_files);
+    build_summary(&staged_diff, &unstaged_diff)
+}
 
-    // Deduplicate by path (staged takes precedence)
+/// Merge staged and unstaged diffs into a single [`DiffSummary`].
+///
+/// Collects changed files from both diffs, deduplicates by path (staged takes
+/// precedence), and assembles the unified diff text with addition/deletion counts.
+fn build_summary(staged: &Diff<'_>, unstaged: &Diff<'_>) -> Result<DiffSummary, CommitError> {
+    let mut changed_files = Vec::new();
+    collect_files_from_diff(staged, &mut changed_files);
+    collect_files_from_diff(unstaged, &mut changed_files);
+
     changed_files.sort_by(|a, b| a.path.cmp(&b.path));
     changed_files.dedup_by(|a, b| a.path == b.path);
 
@@ -145,15 +136,14 @@ pub fn collect_diff(repo: &Repository) -> Result<DiffSummary, CommitError> {
         return Err(CommitError::NoChanges);
     }
 
-    // Collect unified diff text
     let mut diff_text = String::new();
     let mut additions = 0usize;
     let mut deletions = 0usize;
     let mut truncated = false;
 
-    append_diff_text(&staged_diff, &mut diff_text, &mut additions, &mut deletions, &mut truncated);
+    append_diff_text(staged, &mut diff_text, &mut additions, &mut deletions, &mut truncated);
     if !truncated {
-        append_diff_text(&unstaged_diff, &mut diff_text, &mut additions, &mut deletions, &mut truncated);
+        append_diff_text(unstaged, &mut diff_text, &mut additions, &mut deletions, &mut truncated);
     }
 
     Ok(DiffSummary {
@@ -207,7 +197,7 @@ fn append_diff_text(
         return;
     }
 
-    diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+    if let Err(e) = diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
         if *truncated {
             return true;
         }
@@ -234,8 +224,10 @@ fn append_diff_text(
         text.push_str(content);
 
         true
-    })
-    .ok();
+    }) {
+        warn!("Failed to collect diff text: {e}");
+        *truncated = true;
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +320,68 @@ mod tests {
         let paths = vec!["nonexistent.txt".to_string()];
         let result = collect_diff_for_paths(&repo, &paths);
         assert!(matches!(result, Err(CommitError::NoChanges)));
+    }
+
+    #[test]
+    fn test_collect_diff_empty_repo_returns_none_head_tree() {
+        // An empty repo (no commits) should not error — head_tree should be None
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        // Create a file so there's something to diff
+        std::fs::write(dir.path().join("new.txt"), "hello\n").unwrap();
+
+        let summary = collect_diff(&repo).unwrap();
+        assert!(summary.changed_files.iter().any(|f| f.path == "new.txt"));
+    }
+
+    #[test]
+    fn test_collect_diff_corrupt_head_propagates_error() {
+        // A corrupt HEAD should propagate as CommitError::DiffFailed, not silently produce None
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        // Create an initial commit so HEAD exists
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+
+        // Corrupt HEAD by pointing it to a non-existent ref
+        std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/\0invalid").unwrap();
+
+        // Re-open the repo to pick up the corrupt HEAD
+        let repo = Repository::open(dir.path()).unwrap();
+        let result = collect_diff(&repo);
+        assert!(
+            matches!(result, Err(CommitError::DiffFailed(_))),
+            "Expected DiffFailed for corrupt HEAD, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_collect_diff_for_paths_corrupt_head_propagates_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        // Create an initial commit so HEAD exists
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+
+        // Corrupt HEAD
+        std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/\0invalid").unwrap();
+
+        let repo = Repository::open(dir.path()).unwrap();
+        let paths = vec!["file.txt".to_string()];
+        let result = collect_diff_for_paths(&repo, &paths);
+        assert!(
+            matches!(result, Err(CommitError::DiffFailed(_))),
+            "Expected DiffFailed for corrupt HEAD, got: {:?}",
+            result
+        );
     }
 
     #[test]
