@@ -9,7 +9,7 @@ use backoff::ExponentialBackoff;
 use crate::changelog::ChangelogOutput;
 use crate::error::CodexError;
 
-use super::subprocess::run_codex;
+use super::subprocess::{run_codex, run_codex_raw};
 
 /// Trait for executing Codex CLI commands.
 ///
@@ -41,6 +41,60 @@ const MAX_INTERVAL_SECS: u64 = 30;
 /// Makes up to 3 attempts with exponential backoff on failure.
 pub async fn generate_with_retry(prompt: &str) -> Result<ChangelogOutput, CodexError> {
     generate_with_retry_impl(prompt, &DefaultExecutor).await
+}
+
+/// Executor for raw (non-schema) Codex calls.
+pub struct RawExecutor;
+
+#[async_trait]
+impl CodexExecutor for RawExecutor {
+    async fn run(&self, prompt: &str) -> Result<String, CodexError> {
+        run_codex_raw(prompt).await
+    }
+}
+
+/// Generate a raw string response with retry logic (no ChangelogOutput parsing).
+///
+/// Uses `codex exec` without `--output-schema`, with the same retry pattern.
+pub async fn generate_raw_with_retry(prompt: &str) -> Result<String, CodexError> {
+    generate_raw_with_retry_impl(prompt, &RawExecutor).await
+}
+
+/// Internal raw retry implementation that accepts any executor (for testing).
+pub(crate) async fn generate_raw_with_retry_impl<E: CodexExecutor>(
+    prompt: &str,
+    executor: &E,
+) -> Result<String, CodexError> {
+    let mut backoff = ExponentialBackoff {
+        initial_interval: Duration::from_secs(INITIAL_INTERVAL_SECS),
+        max_interval: Duration::from_secs(MAX_INTERVAL_SECS),
+        max_elapsed_time: None,
+        ..Default::default()
+    };
+
+    let mut attempts = 0;
+    let mut last_error = None;
+
+    while attempts < MAX_ATTEMPTS {
+        attempts += 1;
+
+        match executor.run(prompt).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                last_error = Some(e);
+
+                if attempts < MAX_ATTEMPTS
+                    && let Some(wait_duration) = backoff.next_backoff()
+                {
+                    tokio::time::sleep(wait_duration).await;
+                }
+            }
+        }
+    }
+
+    Err(CodexError::RetriesExhausted(Box::new(
+        last_error.expect("last_error should be Some after failed retries"),
+    )))
 }
 
 /// Internal implementation that accepts any executor (for testing).

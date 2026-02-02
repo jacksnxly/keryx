@@ -133,6 +133,39 @@ pub async fn run_codex(prompt: &str) -> Result<String, CodexError> {
     Ok(stdout)
 }
 
+/// Run Codex CLI with a prompt and return the raw text response.
+///
+/// Unlike `run_codex`, this does **not** use `--output-schema`,
+/// so the response is free-form text rather than structured JSON.
+/// Used for tasks like version-bump determination where the LLM
+/// returns a simple JSON blob without needing a schema file.
+pub async fn run_codex_raw(prompt: &str) -> Result<String, CodexError> {
+    let timeout_duration = get_timeout();
+    let timeout_secs = timeout_duration.as_secs();
+
+    let output = timeout(
+        timeout_duration,
+        Command::new("codex")
+            .arg("exec")
+            .arg(prompt)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| CodexError::Timeout(timeout_secs))?
+    .map_err(CodexError::SpawnFailed)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let code = output.status.code().unwrap_or(-1);
+        return Err(CodexError::NonZeroExit { code, stderr });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    Ok(stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

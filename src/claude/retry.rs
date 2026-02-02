@@ -43,6 +43,54 @@ pub async fn generate_with_retry(prompt: &str) -> Result<ChangelogOutput, Claude
     generate_with_retry_impl(prompt, &DefaultExecutor).await
 }
 
+/// Generate a raw string response with retry logic (no ChangelogOutput parsing).
+///
+/// Makes up to 3 attempts with exponential backoff on failure.
+/// The Claude CLI JSON envelope is unwrapped, but no further parsing is done.
+pub async fn generate_raw_with_retry(prompt: &str) -> Result<String, ClaudeError> {
+    generate_raw_with_retry_impl(prompt, &DefaultExecutor).await
+}
+
+/// Internal raw retry implementation that accepts any executor (for testing).
+pub(crate) async fn generate_raw_with_retry_impl<E: ClaudeExecutor>(
+    prompt: &str,
+    executor: &E,
+) -> Result<String, ClaudeError> {
+    let mut backoff = ExponentialBackoff {
+        initial_interval: Duration::from_secs(INITIAL_INTERVAL_SECS),
+        max_interval: Duration::from_secs(MAX_INTERVAL_SECS),
+        max_elapsed_time: None,
+        ..Default::default()
+    };
+
+    let mut attempts = 0;
+    let mut last_error = None;
+
+    while attempts < MAX_ATTEMPTS {
+        attempts += 1;
+
+        match executor.run(prompt).await {
+            Ok(response) => {
+                let content = unwrap_claude_envelope(&response);
+                return Ok(content);
+            }
+            Err(e) => {
+                last_error = Some(e);
+
+                if attempts < MAX_ATTEMPTS
+                    && let Some(wait_duration) = backoff.next_backoff()
+                {
+                    tokio::time::sleep(wait_duration).await;
+                }
+            }
+        }
+    }
+
+    Err(ClaudeError::RetriesExhausted(Box::new(
+        last_error.expect("last_error should be Some after failed retries"),
+    )))
+}
+
 /// Internal implementation that accepts any executor (for testing).
 pub(crate) async fn generate_with_retry_impl<E: ClaudeExecutor>(
     prompt: &str,
@@ -100,6 +148,24 @@ struct ClaudeCliResponse {
     is_error: bool,
 }
 
+/// Unwrap the Claude CLI JSON envelope, returning the inner `result` string.
+///
+/// If the response cannot be parsed as an envelope, returns the raw response as-is.
+/// If the envelope indicates an error (`is_error: true`), the error text is still
+/// returned — callers that care should check separately.
+pub(crate) fn unwrap_claude_envelope(response: &str) -> String {
+    if let Ok(envelope) = serde_json::from_str::<ClaudeCliResponse>(response) {
+        envelope.result
+    } else {
+        tracing::warn!(
+            "Could not parse as Claude CLI envelope - treating as raw response. \
+             This may indicate a Claude CLI version mismatch. Consider running \
+             'claude --version' to check your installation."
+        );
+        response.to_string()
+    }
+}
+
 /// Parse Claude's JSON response into ChangelogOutput.
 fn parse_claude_response(response: &str) -> Result<ChangelogOutput, ClaudeError> {
     // First, try to parse as Claude CLI JSON envelope
@@ -109,7 +175,6 @@ fn parse_claude_response(response: &str) -> Result<ChangelogOutput, ClaudeError>
         }
         envelope.result
     } else {
-        // Fallback: treat as raw response
         tracing::warn!(
             "Could not parse as Claude CLI envelope - treating as raw response. \
              This may indicate a Claude CLI version mismatch. Consider running \
