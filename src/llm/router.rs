@@ -158,7 +158,7 @@ impl LlmError {
                 fallback_error.detail()
             ),
             LlmError::ResponseParseFailed { provider, raw_output, parse_error } => {
-                let truncated = &raw_output[..raw_output.len().min(500)];
+                let truncated: String = raw_output.chars().take(500).collect();
                 format!(
                     "{} returned unparseable output. Parse error: {}. Response: {}",
                     provider, parse_error, truncated
