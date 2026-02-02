@@ -171,19 +171,15 @@ impl fmt::Display for LlmError {
 
 impl std::error::Error for LlmError {}
 
-/// Successful generation with metadata.
-pub struct LlmCompletion {
-    pub output: ChangelogOutput,
+/// Successful generation with metadata, generic over the output type.
+pub struct LlmCompletion<T = ChangelogOutput> {
+    pub output: T,
     pub provider: Provider,
     pub primary_error: Option<LlmProviderError>,
 }
 
-/// Successful raw-string generation with metadata.
-pub struct LlmRawCompletion {
-    pub output: String,
-    pub provider: Provider,
-    pub primary_error: Option<LlmProviderError>,
-}
+/// Type alias for raw-string completions.
+pub type LlmRawCompletion = LlmCompletion<String>;
 
 #[async_trait]
 trait ProviderRunner {
@@ -234,24 +230,35 @@ impl LlmRouter {
 
     pub async fn generate(&mut self, prompt: &str) -> Result<LlmCompletion, LlmError> {
         let runner = DefaultRunner;
-        self.generate_with_runner(prompt, &runner).await
+        self.try_with_fallback(prompt, |r, p, pr| Box::pin(r.run(p, pr)), &runner)
+            .await
     }
 
-    async fn generate_with_runner<R: ProviderRunner>(
+    pub async fn generate_raw(&mut self, prompt: &str) -> Result<LlmRawCompletion, LlmError> {
+        let runner = DefaultRunner;
+        self.try_with_fallback(prompt, |r, p, pr| Box::pin(r.run_raw(p, pr)), &runner)
+            .await
+    }
+
+    async fn try_with_fallback<T, R, F>(
         &mut self,
         prompt: &str,
+        run_fn: F,
         runner: &R,
-    ) -> Result<LlmCompletion, LlmError> {
+    ) -> Result<LlmCompletion<T>, LlmError>
+    where
+        F: for<'a> Fn(&'a R, Provider, &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, LlmProviderError>> + Send + 'a>>,
+    {
         let primary = self.primary;
         let fallback = self.fallback;
 
-        match runner.run(primary, prompt).await {
+        match run_fn(runner, primary, prompt).await {
             Ok(output) => Ok(LlmCompletion {
                 output,
                 provider: primary,
                 primary_error: None,
             }),
-            Err(primary_error) => match runner.run(fallback, prompt).await {
+            Err(primary_error) => match run_fn(runner, fallback, prompt).await {
                 Ok(output) => {
                     self.primary = fallback;
                     self.fallback = primary;
@@ -271,43 +278,25 @@ impl LlmRouter {
         }
     }
 
-    pub async fn generate_raw(&mut self, prompt: &str) -> Result<LlmRawCompletion, LlmError> {
-        let runner = DefaultRunner;
-        self.generate_raw_with_runner(prompt, &runner).await
+    // Test-only entry points that accept a custom runner.
+    #[cfg(test)]
+    async fn generate_with_runner<R: ProviderRunner>(
+        &mut self,
+        prompt: &str,
+        runner: &R,
+    ) -> Result<LlmCompletion, LlmError> {
+        self.try_with_fallback(prompt, |r, p, pr| Box::pin(r.run(p, pr)), runner)
+            .await
     }
 
+    #[cfg(test)]
     async fn generate_raw_with_runner<R: ProviderRunner>(
         &mut self,
         prompt: &str,
         runner: &R,
     ) -> Result<LlmRawCompletion, LlmError> {
-        let primary = self.primary;
-        let fallback = self.fallback;
-
-        match runner.run_raw(primary, prompt).await {
-            Ok(output) => Ok(LlmRawCompletion {
-                output,
-                provider: primary,
-                primary_error: None,
-            }),
-            Err(primary_error) => match runner.run_raw(fallback, prompt).await {
-                Ok(output) => {
-                    self.primary = fallback;
-                    self.fallback = primary;
-                    Ok(LlmRawCompletion {
-                        output,
-                        provider: fallback,
-                        primary_error: Some(primary_error),
-                    })
-                }
-                Err(fallback_error) => Err(LlmError::AllProvidersFailed {
-                    primary,
-                    primary_error,
-                    fallback,
-                    fallback_error,
-                }),
-            },
-        }
+        self.try_with_fallback(prompt, |r, p, pr| Box::pin(r.run_raw(p, pr)), runner)
+            .await
     }
 }
 

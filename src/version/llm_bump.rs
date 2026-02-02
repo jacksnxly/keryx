@@ -4,11 +4,13 @@
 //! Falls back to the algorithmic approach on any failure.
 
 use semver::Version;
+use serde::de::{self, Deserializer};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::git::ParsedCommit;
 use crate::github::PullRequest;
+use crate::llm::extract_json;
 use crate::llm::prompt::sanitize_for_prompt;
 use crate::llm::LlmRouter;
 use crate::version::bump::{apply_bump_to_version, determine_bump_type, BumpType};
@@ -21,11 +23,46 @@ pub struct VersionBumpInput<'a> {
     pub repository_name: &'a str,
 }
 
+/// Typed bump type for LLM deserialization with case-insensitive support.
+///
+/// Kept private to this module to avoid coupling `BumpType` to serde.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawBumpType {
+    Major,
+    Minor,
+    Patch,
+}
+
+impl<'de> Deserialize<'de> for RawBumpType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "major" => Ok(RawBumpType::Major),
+            "minor" => Ok(RawBumpType::Minor),
+            "patch" => Ok(RawBumpType::Patch),
+            _ => Err(de::Error::unknown_variant(&s, &["major", "minor", "patch"])),
+        }
+    }
+}
+
+impl From<RawBumpType> for BumpType {
+    fn from(raw: RawBumpType) -> Self {
+        match raw {
+            RawBumpType::Major => BumpType::Major,
+            RawBumpType::Minor => BumpType::Minor,
+            RawBumpType::Patch => BumpType::Patch,
+        }
+    }
+}
+
 /// Response from the LLM for version bump.
 #[derive(Deserialize)]
 struct VersionBumpResponse {
-    bump_type: String,
-    reasoning: String,
+    bump_type: RawBumpType,
+    reasoning: Option<String>,
 }
 
 /// Build the prompt for LLM-based version bump determination.
@@ -52,7 +89,15 @@ fn build_version_bump_prompt(input: &VersionBumpInput) -> Result<String, crate::
                 .body
                 .as_deref()
                 .map(|b| {
-                    let truncated = if b.len() > 500 { &b[..500] } else { b };
+                    let truncated = if b.len() > 500 {
+                        let mut end = 500;
+                        while end > 0 && !b.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        &b[..end]
+                    } else {
+                        b
+                    };
                     sanitize_for_prompt(truncated)
                 })
                 .unwrap_or_default();
@@ -64,6 +109,8 @@ fn build_version_bump_prompt(input: &VersionBumpInput) -> Result<String, crate::
         Some(v) => format!("The previous version is {}.", v),
         None => "There is no previous version (initial release).".to_string(),
     };
+
+    let sanitized_repo = sanitize_for_prompt(input.repository_name);
 
     Ok(format!(
         r#"You are determining the next semantic version bump for the project "{repo}".
@@ -86,7 +133,7 @@ Analyze the commits and PRs above. Determine whether this release warrants a **m
 
 Respond with JSON only (no markdown wrapping):
 {{"bump_type": "major|minor|patch", "reasoning": "brief explanation"}}"#,
-        repo = input.repository_name,
+        repo = sanitized_repo,
         version_context = version_context,
         commits = sanitized_commits.join("\n"),
         prs = if sanitized_prs.is_empty() {
@@ -100,51 +147,21 @@ Respond with JSON only (no markdown wrapping):
 /// Parse the LLM response into a BumpType.
 ///
 /// Handles JSON that may be wrapped in markdown code blocks.
+/// Invalid bump types are rejected at deserialization time.
 fn parse_version_bump_response(response: &str) -> Option<(BumpType, String)> {
     // Try to extract JSON from markdown wrapping
-    let json_str = extract_json_from_response(response);
+    let json_str = extract_json(response);
 
-    let parsed: VersionBumpResponse = serde_json::from_str(&json_str).ok()?;
-
-    let bump = match parsed.bump_type.to_lowercase().as_str() {
-        "major" => BumpType::Major,
-        "minor" => BumpType::Minor,
-        "patch" => BumpType::Patch,
-        _ => return None,
+    let parsed: VersionBumpResponse = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            debug!("Failed to parse version bump JSON: {}", e);
+            return None;
+        }
     };
 
-    Some((bump, parsed.reasoning))
-}
-
-/// Extract JSON from a response that may be wrapped in markdown code blocks.
-fn extract_json_from_response(response: &str) -> String {
-    let trimmed = response.trim();
-
-    // Try markdown code block
-    if let Some(start) = trimmed.find("```json") {
-        if let Some(end) = trimmed[start + 7..].find("```") {
-            return trimmed[start + 7..start + 7 + end].trim().to_string();
-        }
-    }
-
-    // Try bare code block
-    if let Some(start) = trimmed.find("```") {
-        if let Some(end) = trimmed[start + 3..].find("```") {
-            let inner = trimmed[start + 3..start + 3 + end].trim();
-            if inner.starts_with('{') {
-                return inner.to_string();
-            }
-        }
-    }
-
-    // Try finding a JSON object directly
-    if let Some(start) = trimmed.find('{') {
-        if let Some(end) = trimmed.rfind('}') {
-            return trimmed[start..=end].to_string();
-        }
-    }
-
-    trimmed.to_string()
+    let bump: BumpType = parsed.bump_type.into();
+    Some((bump, parsed.reasoning.unwrap_or_default()))
 }
 
 /// Determine the version bump using an LLM, with algorithmic fallback.
@@ -162,26 +179,46 @@ pub async fn determine_version_with_llm(
         Ok(p) => p,
         Err(e) => {
             warn!("Failed to build version bump prompt: {}. Using algorithmic bump.", e);
+            eprintln!(
+                "\x1b[33m⚠ LLM version bump failed (prompt error), using algorithmic bump\x1b[0m"
+            );
+            eprintln!("  Reason: {}", e);
             return (algorithmic_bump, None);
         }
     };
 
     let response = match llm.generate_raw(&prompt).await {
         Ok(completion) => {
-            if verbose {
-                if let Some(ref primary_err) = completion.primary_error {
-                    debug!(
-                        "Version bump: primary provider ({}) failed: {}. Used {}.",
-                        primary_err.provider(),
-                        primary_err.summary(),
-                        completion.provider
-                    );
+            if let Some(ref primary_err) = completion.primary_error {
+                warn!(
+                    "Version bump: primary provider ({}) failed: {}. Used {}.",
+                    primary_err.provider(),
+                    primary_err.summary(),
+                    completion.provider
+                );
+                eprintln!();
+                eprintln!(
+                    "\x1b[33m⚠ {} failed, using {} for version bump\x1b[0m",
+                    primary_err.provider(),
+                    completion.provider
+                );
+                if verbose {
+                    eprintln!("  Details: {}", primary_err.detail());
+                } else {
+                    eprintln!("  Reason: {}", primary_err.summary());
                 }
+                eprintln!();
             }
             completion.output
         }
         Err(e) => {
             warn!("LLM version bump failed: {}. Using algorithmic bump.", e.summary());
+            eprintln!();
+            eprintln!(
+                "\x1b[33m⚠ LLM version bump failed, using algorithmic bump\x1b[0m"
+            );
+            eprintln!("  Reason: {}", e.summary());
+            eprintln!();
             return (algorithmic_bump, None);
         }
     };
@@ -196,6 +233,11 @@ pub async fn determine_version_with_llm(
                 "Could not parse LLM version bump response. Using algorithmic bump. Response: {}",
                 response.chars().take(200).collect::<String>()
             );
+            eprintln!();
+            eprintln!(
+                "\x1b[33m⚠ Could not parse LLM version bump response, using algorithmic bump\x1b[0m"
+            );
+            eprintln!();
             (algorithmic_bump, None)
         }
     }
@@ -273,16 +315,25 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_missing_fields() {
+    fn test_parse_missing_reasoning_succeeds() {
         let response = r#"{"bump_type": "minor"}"#;
-        assert!(parse_version_bump_response(response).is_none());
+        let (bump, reasoning) = parse_version_bump_response(response).unwrap();
+        assert_eq!(bump, BumpType::Minor);
+        assert_eq!(reasoning, "");
     }
 
     #[test]
-    fn test_parse_case_insensitive_bump_type() {
+    fn test_parse_case_insensitive_uppercase() {
         let response = r#"{"bump_type": "MINOR", "reasoning": "test"}"#;
         let (bump, _) = parse_version_bump_response(response).unwrap();
         assert_eq!(bump, BumpType::Minor);
+    }
+
+    #[test]
+    fn test_parse_case_insensitive_mixed_case() {
+        let response = r#"{"bump_type": "Major", "reasoning": "test"}"#;
+        let (bump, _) = parse_version_bump_response(response).unwrap();
+        assert_eq!(bump, BumpType::Major);
     }
 
     #[test]
@@ -311,6 +362,213 @@ mod tests {
         assert!(prompt.contains("1.2.3"));
         assert!(prompt.contains("add auth"));
         assert!(prompt.contains("major|minor|patch"));
+    }
+
+    #[test]
+    fn test_build_prompt_pr_body_multibyte_utf8_truncation() {
+        // KRX-089: PR body truncation must respect UTF-8 character boundaries.
+        // The emoji 🎉 is 4 bytes (0xF0 0x9F 0x8E 0x89).
+        // Place it so byte 500 falls mid-character.
+        let prefix = "a".repeat(498); // 498 ASCII bytes
+        let body = format!("{}🎉🎉", prefix); // 498 + 4 + 4 = 506 bytes
+
+        let pr = PullRequest {
+            number: std::num::NonZeroU64::new(1).unwrap(),
+            title: "Test PR".to_string(),
+            body: Some(body),
+            merged_at: None,
+            labels: vec![],
+        };
+
+        let input = VersionBumpInput {
+            commits: &[],
+            pull_requests: &[pr],
+            previous_version: None,
+            repository_name: "test-repo",
+        };
+
+        // This should NOT panic - the old code panicked on multi-byte boundary
+        let result = build_version_bump_prompt(&input);
+        assert!(result.is_ok());
+
+        let prompt = result.unwrap();
+        // The prompt should be valid UTF-8 (guaranteed by String type) and contain PR info
+        assert!(prompt.contains("Test PR"));
+
+        // Verify the body snippet in the prompt is bounded to <= 500 bytes.
+        // The prompt contains the sanitized PR line: "PR #1: Test PR - <body_snippet>"
+        // Extract the body portion after "Test PR - "
+        if let Some(pr_line_start) = prompt.find("PR #1: Test PR - ") {
+            let body_start = pr_line_start + "PR #1: Test PR - ".len();
+            // The body snippet goes to end of line
+            let body_end = prompt[body_start..]
+                .find('\n')
+                .map(|i| body_start + i)
+                .unwrap_or(prompt.len());
+            let body_in_prompt = &prompt[body_start..body_end];
+            assert!(
+                body_in_prompt.len() <= 500,
+                "Body snippet in prompt should be <= 500 bytes, was {}",
+                body_in_prompt.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_prompt_pr_body_cjk_truncation() {
+        // CJK characters are 3 bytes each in UTF-8.
+        // Fill so byte 500 falls mid-character.
+        let prefix = "a".repeat(499); // 499 ASCII bytes
+        // Next char '中' is 3 bytes: byte 499..502, so byte 500 is mid-char
+        let body = format!("{}中文测试", prefix);
+
+        let pr = PullRequest {
+            number: std::num::NonZeroU64::new(2).unwrap(),
+            title: "CJK test".to_string(),
+            body: Some(body),
+            merged_at: None,
+            labels: vec![],
+        };
+
+        let input = VersionBumpInput {
+            commits: &[],
+            pull_requests: &[pr],
+            previous_version: None,
+            repository_name: "test-repo",
+        };
+
+        // Should not panic
+        let result = build_version_bump_prompt(&input);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_prompt_with_populated_prs() {
+        use chrono::Utc;
+        use crate::git::CommitType;
+
+        let commits = vec![ParsedCommit {
+            hash: "abc123".to_string(),
+            message: "feat: add dashboard".to_string(),
+            commit_type: Some(CommitType::Feat),
+            scope: None,
+            breaking: false,
+            timestamp: Utc::now(),
+        }];
+
+        let prs = vec![
+            PullRequest {
+                number: std::num::NonZeroU64::new(42).unwrap(),
+                title: "Add user dashboard".to_string(),
+                body: Some("Implements the new dashboard with charts and filters.".to_string()),
+                merged_at: None,
+                labels: vec![],
+            },
+            PullRequest {
+                number: std::num::NonZeroU64::new(43).unwrap(),
+                title: "Fix login regression".to_string(),
+                body: None,
+                merged_at: None,
+                labels: vec![],
+            },
+        ];
+
+        let input = VersionBumpInput {
+            commits: &commits,
+            pull_requests: &prs,
+            previous_version: Some(&Version::new(2, 0, 0)),
+            repository_name: "my-app",
+        };
+
+        let prompt = build_version_bump_prompt(&input).unwrap();
+        assert!(prompt.contains("my-app"));
+        assert!(prompt.contains("2.0.0"));
+        assert!(prompt.contains("PR #42"));
+        assert!(prompt.contains("Add user dashboard"));
+        assert!(prompt.contains("charts and filters"));
+        assert!(prompt.contains("PR #43"));
+        assert!(prompt.contains("Fix login regression"));
+        assert!(prompt.contains("add dashboard"));
+        // Should not contain "(none)" since PRs are present
+        assert!(!prompt.contains("(none)"));
+    }
+
+    #[test]
+    fn test_build_prompt_long_body_truncated_to_500_bytes() {
+        let long_body = "x".repeat(1000);
+
+        let pr = PullRequest {
+            number: std::num::NonZeroU64::new(10).unwrap(),
+            title: "Big PR".to_string(),
+            body: Some(long_body),
+            merged_at: None,
+            labels: vec![],
+        };
+
+        let input = VersionBumpInput {
+            commits: &[],
+            pull_requests: &[pr],
+            previous_version: Some(&Version::new(1, 0, 0)),
+            repository_name: "test",
+        };
+
+        let prompt = build_version_bump_prompt(&input).unwrap();
+        assert!(prompt.contains("Big PR"));
+
+        // The body_snippet passed to the prompt should be at most 500 chars of 'x'
+        // Count consecutive 'x' chars in the prompt to verify truncation
+        let max_x_run = prompt
+            .split(|c: char| c != 'x')
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_x_run <= 500,
+            "Body should be truncated to <= 500 bytes, longest x-run was {}",
+            max_x_run
+        );
+    }
+
+    // ============================================
+    // extract_json edge cases
+    // ============================================
+
+    /// Empty code block should return empty string (no valid JSON).
+    #[test]
+    fn test_extract_json_empty_code_block() {
+        let response = "```json\n```";
+        let result = extract_json(response);
+        // Empty string is returned from the code block extraction
+        assert_eq!(result, "");
+    }
+
+    /// Multiple JSON objects - the shared extract_json uses proper JSON parsing
+    /// and correctly extracts the first valid object.
+    #[test]
+    fn test_extract_json_multiple_objects() {
+        let response = r#"{"bump_type": "minor", "reasoning": "feat"} {"bump_type": "patch", "reasoning": "fix"}"#;
+        let result = extract_json(response);
+        assert!(result.contains("bump_type"));
+        // The improved extractor finds the first valid JSON object
+        let (bump, _) = parse_version_bump_response(response).unwrap();
+        assert_eq!(bump, BumpType::Minor);
+    }
+
+    /// Response with only closing braces - should fall through to returning trimmed input.
+    #[test]
+    fn test_extract_json_only_closing_braces() {
+        let response = "}}";
+        let result = extract_json(response);
+        // No opening brace found first, so trimmed input is returned as-is
+        assert_eq!(result, "}}");
+    }
+
+    /// Response with mismatched braces - should still extract something.
+    #[test]
+    fn test_extract_json_no_json_present() {
+        let response = "This is just plain text with no JSON";
+        let result = extract_json(response);
+        assert_eq!(result, response);
     }
 
     #[test]
