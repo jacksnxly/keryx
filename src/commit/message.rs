@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use git2::{IndexAddOption, Oid, Repository};
+use git2::{ErrorCode, IndexAddOption, Oid, Repository};
 use serde::Deserialize;
 use tracing::debug;
 
 use crate::changelog::ChangelogCategory;
-use crate::commit::diff::DiffSummary;
+use crate::commit::diff::{ChangedFile, DiffSummary, FileStatus};
 use crate::commit::prompt::build_commit_prompt;
 use crate::error::CommitError;
 use crate::llm::extract_json;
@@ -134,15 +134,15 @@ pub fn stage_and_commit(repo: &Repository, message: &str) -> Result<Oid, CommitE
         .signature()
         .map_err(CommitError::ConfigError)?;
 
-    // Get the parent commit (HEAD)
-    let parent = repo
-        .head()
-        .and_then(|h| h.peel_to_commit())
-        .map_err(CommitError::CommitFailed)?;
+    let parent = resolve_parent_commit(repo)?;
+    let mut parents = Vec::new();
+    if let Some(ref parent) = parent {
+        parents.push(parent);
+    }
 
     // Create the commit
     let oid = repo
-        .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+        .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
         .map_err(CommitError::CommitFailed)?;
 
     Ok(oid)
@@ -159,22 +159,34 @@ pub fn stage_and_commit(repo: &Repository, message: &str) -> Result<Oid, CommitE
 pub fn stage_paths_and_commit(
     repo: &Repository,
     paths: &[String],
-    file_statuses: &HashMap<String, crate::commit::diff::FileStatus>,
+    file_changes: &HashMap<String, ChangedFile>,
     message: &str,
 ) -> Result<Oid, CommitError> {
     let mut index = repo.index().map_err(CommitError::StagingFailed)?;
 
     for path in paths {
-        let status = file_statuses.get(path.as_str());
-        if matches!(status, Some(crate::commit::diff::FileStatus::Deleted)) {
+        let change = file_changes.get(path.as_str());
+        let status = change.map(|c| &c.status);
+        if matches!(status, Some(FileStatus::Deleted)) {
             index
                 .remove_path(Path::new(path))
                 .map_err(CommitError::StagingFailed)?;
-        } else {
-            index
-                .add_path(Path::new(path))
-                .map_err(CommitError::StagingFailed)?;
+            continue;
         }
+
+        if matches!(status, Some(FileStatus::Renamed)) {
+            if let Some(old_path) = change.and_then(|c| c.old_path.as_deref()) {
+                if old_path != path {
+                    index
+                        .remove_path(Path::new(old_path))
+                        .map_err(CommitError::StagingFailed)?;
+                }
+            }
+        }
+
+        index
+            .add_path(Path::new(path))
+            .map_err(CommitError::StagingFailed)?;
     }
 
     index.write().map_err(CommitError::StagingFailed)?;
@@ -184,16 +196,27 @@ pub fn stage_paths_and_commit(
 
     let sig = repo.signature().map_err(CommitError::ConfigError)?;
 
-    let parent = repo
-        .head()
-        .and_then(|h| h.peel_to_commit())
-        .map_err(CommitError::CommitFailed)?;
+    let parent = resolve_parent_commit(repo)?;
+    let mut parents = Vec::new();
+    if let Some(ref parent) = parent {
+        parents.push(parent);
+    }
 
     let oid = repo
-        .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+        .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
         .map_err(CommitError::CommitFailed)?;
 
     Ok(oid)
+}
+
+fn resolve_parent_commit(repo: &Repository) -> Result<Option<git2::Commit<'_>>, CommitError> {
+    match repo.head() {
+        Ok(head) => Ok(Some(head.peel_to_commit().map_err(CommitError::CommitFailed)?)),
+        Err(e) if e.code() == ErrorCode::UnbornBranch || e.code() == ErrorCode::NotFound => {
+            Ok(None)
+        }
+        Err(e) => Err(CommitError::CommitFailed(e)),
+    }
 }
 
 #[cfg(test)]
@@ -362,8 +385,22 @@ mod tests {
 
         // Stage only a.txt and b.txt
         let mut statuses = std::collections::HashMap::new();
-        statuses.insert("a.txt".to_string(), crate::commit::diff::FileStatus::Added);
-        statuses.insert("b.txt".to_string(), crate::commit::diff::FileStatus::Added);
+        statuses.insert(
+            "a.txt".to_string(),
+            ChangedFile {
+                path: "a.txt".to_string(),
+                status: FileStatus::Added,
+                old_path: None,
+            },
+        );
+        statuses.insert(
+            "b.txt".to_string(),
+            ChangedFile {
+                path: "b.txt".to_string(),
+                status: FileStatus::Added,
+                old_path: None,
+            },
+        );
 
         let paths = vec!["a.txt".to_string(), "b.txt".to_string()];
         let oid = stage_paths_and_commit(&repo, &paths, &statuses, "feat: add a and b").unwrap();
@@ -399,8 +436,22 @@ mod tests {
         std::fs::write(dir.path().join("b.txt"), "file b\n").unwrap();
 
         let mut statuses = std::collections::HashMap::new();
-        statuses.insert("a.txt".to_string(), crate::commit::diff::FileStatus::Added);
-        statuses.insert("b.txt".to_string(), crate::commit::diff::FileStatus::Added);
+        statuses.insert(
+            "a.txt".to_string(),
+            ChangedFile {
+                path: "a.txt".to_string(),
+                status: FileStatus::Added,
+                old_path: None,
+            },
+        );
+        statuses.insert(
+            "b.txt".to_string(),
+            ChangedFile {
+                path: "b.txt".to_string(),
+                status: FileStatus::Added,
+                old_path: None,
+            },
+        );
 
         // First commit: a.txt
         let oid1 = stage_paths_and_commit(
@@ -456,7 +507,11 @@ mod tests {
         let mut statuses = std::collections::HashMap::new();
         statuses.insert(
             "to_delete.txt".to_string(),
-            crate::commit::diff::FileStatus::Deleted,
+            ChangedFile {
+                path: "to_delete.txt".to_string(),
+                status: FileStatus::Deleted,
+                old_path: None,
+            },
         );
 
         let oid = stage_paths_and_commit(
@@ -470,6 +525,106 @@ mod tests {
         let commit = repo.find_commit(oid).unwrap();
         let tree = commit.tree().unwrap();
         assert!(tree.get_name("to_delete.txt").is_none());
+    }
+
+    #[test]
+    fn test_stage_paths_and_commit_rename_removes_old_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@test.com").unwrap();
+
+        // Create a file and commit it
+        let old_path = dir.path().join("old.txt");
+        std::fs::write(&old_path, "original\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("old.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = Signature::now("Test User", "test@test.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init with file", &tree, &[])
+            .unwrap();
+
+        // Rename on disk
+        let new_path = dir.path().join("new.txt");
+        std::fs::rename(&old_path, &new_path).unwrap();
+
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert(
+            "new.txt".to_string(),
+            ChangedFile {
+                path: "new.txt".to_string(),
+                status: FileStatus::Renamed,
+                old_path: Some("old.txt".to_string()),
+            },
+        );
+
+        let oid = stage_paths_and_commit(
+            &repo,
+            &["new.txt".to_string()],
+            &statuses,
+            "refactor: rename old to new",
+        )
+        .unwrap();
+
+        let commit = repo.find_commit(oid).unwrap();
+        let tree = commit.tree().unwrap();
+        assert!(tree.get_name("new.txt").is_some());
+        assert!(tree.get_name("old.txt").is_none());
+    }
+
+    #[test]
+    fn test_stage_and_commit_initial_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        // Set up git config for the test repo
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@test.com").unwrap();
+
+        // Create a new file in an empty repo
+        std::fs::write(dir.path().join("test.txt"), "hello\n").unwrap();
+
+        let oid = stage_and_commit(&repo, "feat: initial commit").unwrap();
+        let commit = repo.find_commit(oid).unwrap();
+        assert_eq!(commit.parent_count(), 0);
+    }
+
+    #[test]
+    fn test_stage_paths_and_commit_initial_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@test.com").unwrap();
+
+        std::fs::write(dir.path().join("test.txt"), "hello\n").unwrap();
+
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert(
+            "test.txt".to_string(),
+            ChangedFile {
+                path: "test.txt".to_string(),
+                status: FileStatus::Added,
+                old_path: None,
+            },
+        );
+
+        let oid = stage_paths_and_commit(
+            &repo,
+            &["test.txt".to_string()],
+            &statuses,
+            "feat: initial commit",
+        )
+        .unwrap();
+
+        let commit = repo.find_commit(oid).unwrap();
+        assert_eq!(commit.parent_count(), 0);
     }
 
     #[test]

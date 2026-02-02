@@ -15,7 +15,7 @@ use tracing_subscriber::FmtSubscriber;
 use keryx::changelog::{parser::read_changelog, write_changelog, writer::generate_summary};
 use keryx::commit::{
     analyze_split, collect_diff, collect_diff_for_paths, generate_commit_message,
-    stage_and_commit, stage_paths_and_commit, DiffSummary, SPLIT_ANALYSIS_THRESHOLD,
+    stage_and_commit, stage_paths_and_commit, ChangedFile, DiffSummary, SPLIT_ANALYSIS_THRESHOLD,
 };
 use keryx::llm::{
     build_prompt,
@@ -929,10 +929,10 @@ async fn run_split_commits(
     }
     println!();
 
-    let file_statuses: HashMap<String, keryx::commit::FileStatus> = diff
+    let file_changes: HashMap<String, ChangedFile> = diff
         .changed_files
         .iter()
-        .map(|f| (f.path.clone(), f.status.clone()))
+        .map(|f| (f.path.clone(), f.clone()))
         .collect();
 
     // Collect all group diffs upfront before any commits advance HEAD.
@@ -975,7 +975,7 @@ async fn run_split_commits(
         all_messages.push(formatted.clone());
 
         if !config.message_only && !config.dry_run {
-            let oid = stage_paths_and_commit(repo, &group.files, &file_statuses, &formatted)
+            let oid = stage_paths_and_commit(repo, &group.files, &file_changes, &formatted)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             println!(

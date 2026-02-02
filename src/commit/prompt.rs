@@ -148,6 +148,7 @@ mod tests {
                 .map(|(path, status)| ChangedFile {
                     path: path.to_string(),
                     status,
+                    old_path: None,
                 })
                 .collect(),
             truncated: false,

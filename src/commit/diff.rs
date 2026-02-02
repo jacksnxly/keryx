@@ -35,6 +35,8 @@ impl fmt::Display for FileStatus {
 pub struct ChangedFile {
     pub path: String,
     pub status: FileStatus,
+    /// Old path for renamed files (None for non-rename changes).
+    pub old_path: Option<String>,
 }
 
 /// Summary of changes in the working tree.
@@ -167,20 +169,31 @@ fn collect_files_from_diff(diff: &Diff<'_>, files: &mut Vec<ChangedFile>) {
             _ => FileStatus::Modified,
         };
 
-        // Skip binary files
-        if delta.flags().is_binary() {
-            continue;
-        }
-
-        let path = delta
+        let new_path = delta
             .new_file()
             .path()
-            .or_else(|| delta.old_file().path())
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
+            .map(|p| p.to_string_lossy().to_string());
+        let old_path = delta
+            .old_file()
+            .path()
+            .map(|p| p.to_string_lossy().to_string());
+
+        let (path, old_path) = match status {
+            FileStatus::Renamed => {
+                let path = new_path
+                    .clone()
+                    .or_else(|| old_path.clone())
+                    .unwrap_or_default();
+                (path, old_path)
+            }
+            _ => {
+                let path = new_path.or(old_path).unwrap_or_default();
+                (path, None)
+            }
+        };
 
         if !path.is_empty() {
-            files.push(ChangedFile { path, status });
+            files.push(ChangedFile { path, status, old_path });
         }
     }
 }
@@ -333,6 +346,19 @@ mod tests {
 
         let summary = collect_diff(&repo).unwrap();
         assert!(summary.changed_files.iter().any(|f| f.path == "new.txt"));
+    }
+
+    #[test]
+    fn test_collect_diff_includes_binary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        // Create a binary file (includes NUL byte)
+        let binary_path = dir.path().join("image.bin");
+        std::fs::write(&binary_path, [0u8, 159, 146, 150]).unwrap();
+
+        let summary = collect_diff(&repo).unwrap();
+        assert!(summary.changed_files.iter().any(|f| f.path == "image.bin"));
     }
 
     #[test]
