@@ -1,9 +1,13 @@
 //! Keep a Changelog formatting types and utilities.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Changelog categories per Keep a Changelog spec.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Serializes to lowercase (e.g., `"added"`). Deserializes case-insensitively
+/// so both `"Added"` (from changelog LLM) and `"added"` (from commit LLM) work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ChangelogCategory {
     Added,
     Changed,
@@ -36,6 +40,16 @@ impl ChangelogCategory {
             Self::Fixed => 4,
             Self::Security => 5,
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChangelogCategory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<ChangelogCategory>().map_err(serde::de::Error::custom)
     }
 }
 

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-02-02
+
+### Added
+
+- Generate commit messages from staged changes using AI
+- Automatically split large changesets into multiple focused commits
+- Support file renames and initial commits in AI commit workflow
+- LLM-based semantic version bumping that intelligently determines the next version number based on changes
+
+### Changed
+
+- Improve error messages when AI responses or git state are invalid
+
+### Fixed
+
+- Fix duplicate files in commit diffs and prevent pre-staged changes from leaking into split commits
+- Fix potential crash when truncating non-ASCII LLM responses
+
+
 ## [0.3.0] - 2026-02-02
 
 ### Added

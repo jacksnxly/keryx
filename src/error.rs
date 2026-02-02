@@ -128,6 +128,25 @@ pub enum VersionError {
     NoBaseVersion,
 }
 
+/// Errors from commit message generation operations.
+#[derive(Error, Debug)]
+pub enum CommitError {
+    #[error("No changes to commit (working tree is clean)")]
+    NoChanges,
+
+    #[error("Failed to collect diff: {0}")]
+    DiffFailed(#[source] git2::Error),
+
+    #[error("Failed to stage changes: {0}")]
+    StagingFailed(#[source] git2::Error),
+
+    #[error("Failed to create commit: {0}")]
+    CommitFailed(#[source] git2::Error),
+
+    #[error("Git config error (missing user.name or user.email): {0}")]
+    ConfigError(#[source] git2::Error),
+}
+
 /// Errors from verification and scanning operations.
 #[derive(Error, Debug)]
 pub enum VerificationError {

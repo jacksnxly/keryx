@@ -113,6 +113,12 @@ pub enum LlmError {
         fallback: Provider,
         fallback_error: LlmProviderError,
     },
+    /// The LLM returned a response that could not be parsed as valid JSON.
+    ResponseParseFailed {
+        provider: Provider,
+        raw_output: String,
+        parse_error: String,
+    },
 }
 
 impl LlmError {
@@ -129,6 +135,10 @@ impl LlmError {
                 primary_error.summary(),
                 fallback,
                 fallback_error.summary()
+            ),
+            LlmError::ResponseParseFailed { provider, parse_error, .. } => format!(
+                "{} returned unparseable output: {}",
+                provider, parse_error
             ),
         }
     }
@@ -147,18 +157,27 @@ impl LlmError {
                 fallback,
                 fallback_error.detail()
             ),
+            LlmError::ResponseParseFailed { provider, raw_output, parse_error } => {
+                let truncated: String = raw_output.chars().take(500).collect();
+                format!(
+                    "{} returned unparseable output. Parse error: {}. Response: {}",
+                    provider, parse_error, truncated
+                )
+            }
         }
     }
 
     pub fn primary_error(&self) -> Option<&LlmProviderError> {
         match self {
             LlmError::AllProvidersFailed { primary_error, .. } => Some(primary_error),
+            LlmError::ResponseParseFailed { .. } => None,
         }
     }
 
     pub fn fallback_error(&self) -> Option<&LlmProviderError> {
         match self {
             LlmError::AllProvidersFailed { fallback_error, .. } => Some(fallback_error),
+            LlmError::ResponseParseFailed { .. } => None,
         }
     }
 }
