@@ -12,7 +12,10 @@ use tracing::{debug, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use keryx::changelog::{parser::read_changelog, write_changelog, writer::generate_summary};
-use keryx::commit::{collect_diff, generate_commit_message, stage_and_commit};
+use keryx::commit::{
+    analyze_split, collect_diff, collect_diff_for_paths, generate_commit_message,
+    stage_and_commit, stage_paths_and_commit, SPLIT_ANALYSIS_THRESHOLD,
+};
 use keryx::llm::{
     build_prompt,
     build_verification_prompt,
@@ -212,6 +215,10 @@ enum Commands {
         /// Print the generated message to stdout without committing
         #[arg(long)]
         message_only: bool,
+
+        /// Skip split analysis, always create a single commit
+        #[arg(long)]
+        no_split: bool,
     },
 }
 
@@ -281,8 +288,8 @@ async fn main() -> Result<()> {
             let config = InitConfig::from_cli(&cli);
             run_init(&config, unreleased, from_history).await
         }
-        Some(Commands::Commit { message_only }) => {
-            run_commit(message_only, cli.dry_run, cli.verbose, cli.provider).await
+        Some(Commands::Commit { message_only, no_split }) => {
+            run_commit(message_only, no_split, cli.dry_run, cli.verbose, cli.provider).await
         }
         None => run_generate(cli).await,
     };
@@ -737,8 +744,13 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut
 }
 
 /// Run the commit message generation command.
+///
+/// Orchestrates the full commit flow: collects diff, optionally analyzes
+/// whether to split into multiple commits, then dispatches to either
+/// [`run_single_commit`] or [`run_split_commits`].
 async fn run_commit(
     message_only: bool,
+    no_split: bool,
     dry_run: bool,
     verbose: bool,
     provider_flag: Option<ProviderFlag>,
@@ -784,20 +796,205 @@ async fn run_commit(
         .and_then(|h| h.shorthand().map(String::from))
         .unwrap_or_else(|| "HEAD".to_string());
 
-    // Generate commit message
+    // Attempt split analysis if conditions are met
+    let file_count = diff.changed_files.len();
+    let analysis = if !no_split && file_count >= SPLIT_ANALYSIS_THRESHOLD {
+        if verbose {
+            debug!(
+                "Attempting split analysis ({} files >= threshold {})",
+                file_count, SPLIT_ANALYSIS_THRESHOLD
+            );
+        }
+
+        println!("Checking if changes should be split into multiple commits...");
+
+        match analyze_split(&diff, &branch_name, &mut llm, verbose).await {
+            Ok(Some(analysis)) => Some(analysis),
+            Ok(None) => {
+                if verbose {
+                    debug!("Split analysis returned single group or was invalid");
+                }
+                None
+            }
+            Err(e) => {
+                warn!("Split analysis failed: {}", e.summary());
+                eprintln!(
+                    "\x1b[33m⚠ Split analysis failed, falling back to single commit\x1b[0m"
+                );
+                if verbose {
+                    eprintln!("  Details: {}", e.detailed());
+                }
+                None
+            }
+        }
+    } else {
+        if verbose && !no_split {
+            debug!(
+                "Skipping split analysis ({} files < threshold {})",
+                file_count, SPLIT_ANALYSIS_THRESHOLD
+            );
+        }
+        None
+    };
+
+    // Dispatch to single or split commit
+    match analysis {
+        Some(analysis) => {
+            run_split_commits(&repo, &diff, &analysis, &branch_name, &mut llm, message_only, dry_run, verbose).await
+        }
+        None => {
+            run_single_commit(&repo, &diff, &branch_name, &mut llm, message_only, dry_run, verbose).await
+        }
+    }
+}
+
+/// Run a single commit for all changes (original behavior).
+async fn run_single_commit(
+    repo: &Repository,
+    diff: &keryx::commit::DiffSummary,
+    branch_name: &str,
+    llm: &mut LlmRouter,
+    message_only: bool,
+    dry_run: bool,
+    verbose: bool,
+) -> Result<()> {
     println!(
         "Generating commit message with {} (fallback: {})...",
         llm.primary(),
         llm.fallback()
     );
 
-    let (message, completion) = generate_commit_message(&diff, &branch_name, &mut llm, verbose)
+    let (message, completion) = generate_commit_message(diff, branch_name, llm, verbose)
         .await
         .map_err(|e| handle_llm_error(e, verbose))?;
 
     report_llm_fallback_if_any(&completion, verbose);
 
-    // Display the generated message
+    display_commit_message(&message, verbose);
+
+    if message_only || dry_run {
+        if message_only {
+            print!("{}", message.format());
+        }
+        return Ok(());
+    }
+
+    let formatted = message.format();
+    let oid = stage_and_commit(repo, &formatted)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    println!(
+        "\x1b[32m\u{2713} Created commit {}\x1b[0m",
+        &oid.to_string()[..7]
+    );
+
+    Ok(())
+}
+
+/// Run split commits: one per commit group from the analysis.
+async fn run_split_commits(
+    repo: &Repository,
+    diff: &keryx::commit::DiffSummary,
+    analysis: &keryx::commit::SplitAnalysis,
+    branch_name: &str,
+    llm: &mut LlmRouter,
+    message_only: bool,
+    dry_run: bool,
+    verbose: bool,
+) -> Result<()> {
+    // Display proposed split summary
+    println!();
+    println!(
+        "\x1b[1mProposed split into {} commits:\x1b[0m",
+        analysis.groups.len()
+    );
+    for (i, group) in analysis.groups.iter().enumerate() {
+        println!(
+            "  {}. {} ({} file{})",
+            i + 1,
+            group.label,
+            group.files.len(),
+            if group.files.len() == 1 { "" } else { "s" }
+        );
+        if verbose {
+            for file in &group.files {
+                println!("     - {}", file);
+            }
+        }
+    }
+    println!();
+
+    // Build file_statuses map from the full diff
+    let file_statuses: std::collections::HashMap<String, keryx::commit::FileStatus> = diff
+        .changed_files
+        .iter()
+        .map(|f| (f.path.clone(), f.status.clone()))
+        .collect();
+
+    let mut commit_oids: Vec<(String, git2::Oid)> = Vec::new();
+    let mut all_messages: Vec<String> = Vec::new();
+
+    for (i, group) in analysis.groups.iter().enumerate() {
+        println!(
+            "\x1b[1m[{}/{}] {}\x1b[0m",
+            i + 1,
+            analysis.groups.len(),
+            group.label
+        );
+
+        // Collect filtered diff for this group's files
+        let group_diff = collect_diff_for_paths(repo, &group.files)
+            .map_err(|e| anyhow::anyhow!("Failed to collect diff for group '{}': {}", group.label, e))?;
+
+        // Generate commit message for this group
+        println!(
+            "  Generating message with {} (fallback: {})...",
+            llm.primary(),
+            llm.fallback()
+        );
+
+        let (message, completion) = generate_commit_message(&group_diff, branch_name, llm, verbose)
+            .await
+            .map_err(|e| handle_llm_error(e, verbose))?;
+
+        report_llm_fallback_if_any(&completion, verbose);
+
+        display_commit_message(&message, verbose);
+
+        let formatted = message.format();
+        all_messages.push(formatted.clone());
+
+        if !message_only && !dry_run {
+            let oid = stage_paths_and_commit(repo, &group.files, &file_statuses, &formatted)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            println!(
+                "\x1b[32m  \u{2713} Created commit {}\x1b[0m",
+                &oid.to_string()[..7]
+            );
+            commit_oids.push((group.label.clone(), oid));
+        }
+    }
+
+    // Print final output
+    if message_only {
+        print!("{}", all_messages.join("\n---\n"));
+    } else if !dry_run && !commit_oids.is_empty() {
+        println!();
+        println!(
+            "\x1b[32m\u{2713} Created {} commits:\x1b[0m",
+            commit_oids.len()
+        );
+        for (label, oid) in &commit_oids {
+            println!("  {} — {}", &oid.to_string()[..7], label);
+        }
+    }
+
+    Ok(())
+}
+
+/// Display a commit message to the user.
+fn display_commit_message(message: &keryx::commit::CommitMessage, verbose: bool) {
     println!();
     println!("\x1b[1m{}\x1b[0m", message.subject);
     if let Some(ref body) = message.body {
@@ -810,41 +1007,16 @@ async fn run_commit(
         println!();
         println!("\x1b[33m⚠ BREAKING CHANGE\x1b[0m");
     }
-    // Show changelog metadata
     if let Some(ref cat) = message.changelog_category {
         if let Some(ref desc) = message.changelog_description {
             println!();
-            println!(
-                "\x1b[36mChangelog ({}):\x1b[0m {}",
-                cat, desc
-            );
+            println!("\x1b[36mChangelog ({}):\x1b[0m {}", cat, desc);
         }
     } else if verbose {
         println!();
         println!("\x1b[2mInternal change — excluded from changelog\x1b[0m");
     }
     println!();
-
-    // If message-only or dry-run, stop here
-    if message_only || dry_run {
-        if message_only {
-            // In message-only mode, print just the raw message to stdout for piping
-            print!("{}", message.format());
-        }
-        return Ok(());
-    }
-
-    // Stage all changes and commit
-    let formatted = message.format();
-    let oid = stage_and_commit(&repo, &formatted)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    println!(
-        "\x1b[32m\u{2713} Created commit {}\x1b[0m",
-        &oid.to_string()[..7]
-    );
-
-    Ok(())
 }
 
 /// Run the changelog generation command.

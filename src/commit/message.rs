@@ -1,6 +1,7 @@
 //! Commit message generation via LLM and git staging/commit operations.
 
 use git2::{IndexAddOption, Oid, Repository};
+use std::path::Path;
 use serde::Deserialize;
 use tracing::debug;
 
@@ -156,6 +157,54 @@ pub fn stage_and_commit(repo: &Repository, message: &str) -> Result<Oid, CommitE
     Ok(oid)
 }
 
+/// Stage specific file paths and create a commit.
+///
+/// Unlike [`stage_and_commit`] which stages everything, this function uses
+/// `index.add_path()` for each file individually, and `index.remove_path()`
+/// for deleted files (detected via the `file_statuses` map).
+///
+/// HEAD advances after each call, so subsequent calls for remaining groups
+/// see the correct parent automatically.
+pub fn stage_paths_and_commit(
+    repo: &Repository,
+    paths: &[String],
+    file_statuses: &std::collections::HashMap<String, crate::commit::diff::FileStatus>,
+    message: &str,
+) -> Result<Oid, CommitError> {
+    let mut index = repo.index().map_err(CommitError::StagingFailed)?;
+
+    for path in paths {
+        let status = file_statuses.get(path.as_str());
+        if matches!(status, Some(crate::commit::diff::FileStatus::Deleted)) {
+            index
+                .remove_path(Path::new(path))
+                .map_err(CommitError::StagingFailed)?;
+        } else {
+            index
+                .add_path(Path::new(path))
+                .map_err(CommitError::StagingFailed)?;
+        }
+    }
+
+    index.write().map_err(CommitError::StagingFailed)?;
+
+    let tree_id = index.write_tree().map_err(CommitError::StagingFailed)?;
+    let tree = repo.find_tree(tree_id).map_err(CommitError::CommitFailed)?;
+
+    let sig = repo.signature().map_err(CommitError::ConfigError)?;
+
+    let parent = repo
+        .head()
+        .and_then(|h| h.peel_to_commit())
+        .map_err(CommitError::CommitFailed)?;
+
+    let oid = repo
+        .commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+        .map_err(CommitError::CommitFailed)?;
+
+    Ok(oid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +338,139 @@ mod tests {
         let json = r#"{"subject": "feat: new api"}"#;
         let msg: CommitMessage = serde_json::from_str(json).unwrap();
         assert!(!msg.breaking);
+    }
+
+    #[test]
+    fn test_stage_paths_and_commit_selective_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@test.com").unwrap();
+
+        // Create initial commit
+        let sig = Signature::now("Test User", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        // Create 3 new files
+        std::fs::write(dir.path().join("a.txt"), "file a\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "file b\n").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "file c\n").unwrap();
+
+        // Stage only a.txt and b.txt
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert("a.txt".to_string(), crate::commit::diff::FileStatus::Added);
+        statuses.insert("b.txt".to_string(), crate::commit::diff::FileStatus::Added);
+
+        let paths = vec!["a.txt".to_string(), "b.txt".to_string()];
+        let oid = stage_paths_and_commit(&repo, &paths, &statuses, "feat: add a and b").unwrap();
+        let commit = repo.find_commit(oid).unwrap();
+        assert_eq!(commit.message().unwrap(), "feat: add a and b");
+
+        // Verify a.txt and b.txt are in the committed tree
+        let tree = commit.tree().unwrap();
+        assert!(tree.get_name("a.txt").is_some());
+        assert!(tree.get_name("b.txt").is_some());
+        // c.txt should NOT be in the committed tree
+        assert!(tree.get_name("c.txt").is_none());
+    }
+
+    #[test]
+    fn test_stage_paths_and_commit_sequential_multi_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@test.com").unwrap();
+
+        // Create initial commit
+        let sig = Signature::now("Test User", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        // Create files
+        std::fs::write(dir.path().join("a.txt"), "file a\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "file b\n").unwrap();
+
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert("a.txt".to_string(), crate::commit::diff::FileStatus::Added);
+        statuses.insert("b.txt".to_string(), crate::commit::diff::FileStatus::Added);
+
+        // First commit: a.txt
+        let oid1 = stage_paths_and_commit(
+            &repo,
+            &["a.txt".to_string()],
+            &statuses,
+            "feat: add a",
+        )
+        .unwrap();
+
+        // Second commit: b.txt — HEAD should have advanced
+        let oid2 = stage_paths_and_commit(
+            &repo,
+            &["b.txt".to_string()],
+            &statuses,
+            "feat: add b",
+        )
+        .unwrap();
+
+        assert_ne!(oid1, oid2);
+
+        // Verify second commit's parent is the first commit
+        let commit2 = repo.find_commit(oid2).unwrap();
+        assert_eq!(commit2.parent_id(0).unwrap(), oid1);
+    }
+
+    #[test]
+    fn test_stage_paths_and_commit_deleted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@test.com").unwrap();
+
+        // Create a file and commit it
+        let file_path = dir.path().join("to_delete.txt");
+        std::fs::write(&file_path, "will be deleted\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_path(std::path::Path::new("to_delete.txt"))
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = Signature::now("Test User", "test@test.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init with file", &tree, &[])
+            .unwrap();
+
+        // Delete the file from disk
+        std::fs::remove_file(&file_path).unwrap();
+
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert(
+            "to_delete.txt".to_string(),
+            crate::commit::diff::FileStatus::Deleted,
+        );
+
+        let oid = stage_paths_and_commit(
+            &repo,
+            &["to_delete.txt".to_string()],
+            &statuses,
+            "fix: remove deprecated file",
+        )
+        .unwrap();
+
+        let commit = repo.find_commit(oid).unwrap();
+        let tree = commit.tree().unwrap();
+        assert!(tree.get_name("to_delete.txt").is_none());
     }
 
     #[test]

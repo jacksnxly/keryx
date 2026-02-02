@@ -46,6 +46,68 @@ pub struct DiffSummary {
     pub deletions: usize,
 }
 
+/// Collect the working tree diff scoped to specific file paths.
+///
+/// Same logic as [`collect_diff`] but uses `DiffOptions::pathspec()` to restrict
+/// both staged and unstaged diffs to only the given paths.
+pub fn collect_diff_for_paths(
+    repo: &Repository,
+    paths: &[String],
+) -> Result<DiffSummary, CommitError> {
+    let head_tree = repo
+        .head()
+        .ok()
+        .and_then(|r| r.peel_to_tree().ok());
+
+    // Staged changes with pathspec filter
+    let mut staged_opts = DiffOptions::new();
+    for p in paths {
+        staged_opts.pathspec(p);
+    }
+    let staged_diff = repo
+        .diff_tree_to_index(head_tree.as_ref(), None, Some(&mut staged_opts))
+        .map_err(CommitError::DiffFailed)?;
+
+    // Unstaged + untracked changes with pathspec filter
+    let mut unstaged_opts = DiffOptions::new();
+    unstaged_opts.include_untracked(true).recurse_untracked_dirs(true);
+    for p in paths {
+        unstaged_opts.pathspec(p);
+    }
+    let unstaged_diff = repo
+        .diff_index_to_workdir(None, Some(&mut unstaged_opts))
+        .map_err(CommitError::DiffFailed)?;
+
+    let mut changed_files = Vec::new();
+    collect_files_from_diff(&staged_diff, &mut changed_files);
+    collect_files_from_diff(&unstaged_diff, &mut changed_files);
+
+    changed_files.sort_by(|a, b| a.path.cmp(&b.path));
+    changed_files.dedup_by(|a, b| a.path == b.path);
+
+    if changed_files.is_empty() {
+        return Err(CommitError::NoChanges);
+    }
+
+    let mut diff_text = String::new();
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    let mut truncated = false;
+
+    append_diff_text(&staged_diff, &mut diff_text, &mut additions, &mut deletions, &mut truncated);
+    if !truncated {
+        append_diff_text(&unstaged_diff, &mut diff_text, &mut additions, &mut deletions, &mut truncated);
+    }
+
+    Ok(DiffSummary {
+        diff_text,
+        changed_files,
+        truncated,
+        additions,
+        deletions,
+    })
+}
+
 /// Collect the working tree diff (staged + unstaged + untracked).
 ///
 /// Merges `diff_tree_to_index` (staged changes) with `diff_index_to_workdir`
@@ -221,6 +283,51 @@ mod tests {
         let summary = collect_diff(&repo).unwrap();
         assert!(!summary.changed_files.is_empty());
         assert!(summary.changed_files.iter().any(|f| f.path == "new.txt" && f.status == FileStatus::Added));
+    }
+
+    #[test]
+    fn test_collect_diff_for_paths_filters_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        // Create initial commit
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+
+        // Create 3 files
+        std::fs::write(dir.path().join("a.txt"), "file a\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "file b\n").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "file c\n").unwrap();
+
+        // Request diff for only 2 of them
+        let paths = vec!["a.txt".to_string(), "c.txt".to_string()];
+        let summary = collect_diff_for_paths(&repo, &paths).unwrap();
+
+        assert_eq!(summary.changed_files.len(), 2);
+        let file_names: Vec<&str> = summary.changed_files.iter().map(|f| f.path.as_str()).collect();
+        assert!(file_names.contains(&"a.txt"));
+        assert!(file_names.contains(&"c.txt"));
+        assert!(!file_names.contains(&"b.txt"));
+    }
+
+    #[test]
+    fn test_collect_diff_for_paths_empty_returns_no_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+
+        // Create initial commit
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+
+        // Create a file but request diff for a non-existent path
+        std::fs::write(dir.path().join("a.txt"), "file a\n").unwrap();
+        let paths = vec!["nonexistent.txt".to_string()];
+        let result = collect_diff_for_paths(&repo, &paths);
+        assert!(matches!(result, Err(CommitError::NoChanges)));
     }
 
     #[test]
