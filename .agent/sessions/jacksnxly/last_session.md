@@ -1,4 +1,4 @@
-# Session Summary 2026-01-29
+# Session Summary 2026-02-03
 
 ## Developer
 
@@ -6,108 +6,101 @@
 
 ## Session Objective
 
-Comprehensive PR review of the `feat/agentic-verification` branch, identification of issues, and implementation/validation of fixes for all identified important issues.
+Implement the `keryx ship` subcommand from the approved technical spec (SPEC-keryx-ship-2026-02-03.md). This automates the full release pipeline: preflight validation, version calculation, version file updates, changelog generation, git commit/tag/push with rollback.
 
 ## Files Modified
 
 ### Created
-- `tests/check_ripgrep_test.rs` - Unit tests for `check_ripgrep_installed()` function (KRX-083)
-- `.issues/done/KRX-083.md` - Issue: Add unit tests for check_ripgrep_installed
-- `.issues/done/KRX-084.md` - Issue: Add direct unit test for run_rg exit code 2+
-- `.issues/done/KRX-085.md` - Issue: Track search failures in confidence scoring
-- `.issues/done/KRX-086.md` - Issue: Add warnings field for degraded evidence
-- `.issues/done/KRX-087.md` - Issue: Replace stringly-typed indicator with StubType enum
+- `src/ship/mod.rs` - Ship orchestrator: `run_ship()` entry point, 8-stage pipeline, changelog generation, confirmation prompt
+- `src/ship/preflight.rs` - Preflight checks: clean working tree, remote sync, commits exist, LLM available
+- `src/ship/version_files.rs` - Version file detection (Cargo.toml, package.json, pyproject.toml) and format-preserving updates
+- `src/ship/executor.rs` - Git operations via `std::process::Command`: commit, tag, push, rollback
 
 ### Modified
-- `src/verification/evidence.rs` - Added `ScanSummary` struct, `StubType` enum, `warnings` field to `VerificationEvidence`
-- `src/verification/scanner.rs` - Updated to track search failures, return warnings, use `StubType` enum
-- `src/verification/mod.rs` - Exported new types (`ScanSummary`, `StubType`)
-- `src/main.rs` - Display search failures in CLI output
-- `src/claude/prompt.rs` - Updated tests for new `EntryEvidence::new()` signature
-- `tests/verification_integration_test.rs` - Updated to use `StubType` enum
-- `tests/verification_rg_error_test.rs` - Added `#[serial]` attribute
-- `Cargo.toml` - Added `serial_test = "3"` dev dependency
-- `.issues/config.json` - Updated nextId from 83 to 88
+- `Cargo.toml` - Added `dialoguer = "0.12"` and `toml_edit = "0.24"` dependencies
+- `src/error.rs` - Added `ShipError` enum with 11 variants, added `use std::path::PathBuf` import
+- `src/lib.rs` - Added `pub mod ship;` and `ShipError` re-export
+- `src/main.rs` - Added `Ship` variant to `Commands` enum, dispatch to `keryx::ship::run_ship()`
+- `Cargo.lock` - Updated with new dependency tree (dialoguer, toml_edit, console, winnow, etc.)
 
 ## Implementation Details
 
 ### Main Changes
 
-1. **PR Review (5 specialized agents in parallel)**
-   - code-reviewer: General code quality
-   - pr-test-analyzer: Test coverage gaps
-   - silent-failure-hunter: Error handling audit
-   - type-design-analyzer: Type design evaluation
-   - comment-analyzer: Documentation quality
+Full implementation of `keryx ship` following the approved spec. The pipeline runs 8 stages:
 
-2. **KRX-083: check_ripgrep_installed tests**
-   - 3 unit tests covering success, not-installed, and failed scenarios
-   - Uses PATH manipulation with mock shell scripts
-   - Added `serial_test` crate for thread-safe parallel test execution
-
-3. **KRX-084: run_rg error construction tests**
-   - 4 unit tests for exit codes 0, 1, 2, 3
-   - Verifies `RipgrepFailed` error variant with correct `exit_code` and `stderr` fields
-   - Added `#[derive(Debug)]` to `RgOutcome` enum
-
-4. **KRX-085: Search failure tracking**
-   - New `ScanSummary` struct: `total_keywords`, `successful_searches`, `failed_searches`
-   - Confidence penalty: -10 per failed search (consistent with unverifiable count penalty)
-   - CLI output shows failures per-entry and total
-
-5. **KRX-086: Degraded evidence signaling**
-   - Added `warnings: Vec<String>` to `VerificationEvidence`
-   - Helper methods: `add_warning()`, `is_degraded()`
-   - All sub-operations (`get_project_structure`, `gather_key_files`, `analyze_entry`) now return warnings
-
-6. **KRX-087: StubType enum**
-   - 13 enum variants replacing stringly-typed indicator
-   - `STUB_PATTERNS` changed to `&[(&str, StubType)]`
-   - Lowercase JSON serialization, human-readable Display impl
-   - Type design rating improved from 3/10 to 8.75/10
+1. **Preflight** (`preflight::run_checks()`) — validates clean tree via `git status --porcelain`, remote sync via `git fetch` + `rev-parse` comparison, commits since last tag via existing `get_latest_tag()` + `fetch_commits()`, LLM CLI availability via `which`
+2. **Version calculation** — reuses existing `calculate_next_version_with_llm()` or `calculate_next_version()` (algorithmic fallback with `--no-llm-bump`)
+3. **Tag collision check** — if tag exists, suggests next patch version with interactive prompt
+4. **Version file update** — auto-detects and updates Cargo.toml, package.json, pyproject.toml using `toml_edit` (format-preserving) and `serde_json`
+5. **Changelog check/generate** — checks if section exists (skip), otherwise generates via LLM and writes using existing `write_changelog()`
+6. **Confirmation prompt** — `dialoguer::Confirm` with summary display, skipped in `--dry-run`
+7. **Execute** — `git add`, `git commit -m "chore(release): vX.Y.Z"`, `git tag vX.Y.Z`, `git push --follow-tags`
+8. **Rollback on failure** — `git tag -d` + `git reset --soft HEAD~1` on push failure
 
 ### Technical Decisions
-- Used `-10` penalty per search failure to match existing unverifiable count penalty
-- `#[serde(skip_serializing_if = "Vec::is_empty")]` for clean JSON when no warnings
-- `StubType::Unknown` as fallback for unmatched patterns
-- `serial_test` crate for PATH manipulation tests to avoid race conditions
+
+- **System git over git2 for writes** — matches cargo-release pattern, avoids git2 auth issues for push
+- **dialoguer for prompts** — industry standard, used by cargo-release
+- **toml_edit for TOML edits** — only Rust crate that preserves comments/formatting
+- **pyproject.toml dual detection** — PEP 621 `[project].version` first, Poetry `[tool.poetry].version` fallback
+- **LLM check uses `which` on CLI tool** — matches how existing providers work (Claude CLI, Codex CLI), not env vars
+- **No refactoring of `run_generate()`** — changelog generation for ship is done inline in `ship/mod.rs` calling `build_prompt()` + `llm.generate()` + `write_changelog()` directly, avoiding a large refactor of main.rs. The spec's `GenerateInput` extraction can be done as a follow-up.
+
+### Code Structure
+
+New `src/ship/` module with 4 files following the spec's module structure:
+```
+src/ship/
+├── mod.rs              # Public API: run_ship(), ShipConfig
+├── preflight.rs        # PreflightResult, run_checks(), check_tag_exists()
+├── version_files.rs    # VersionFileKind, VersionFile, detect/update functions
+└── executor.rs         # commit_tag_push(), rollback()
+```
 
 ## Workflow Progress
 
 | Phase | Document | Status |
 |-------|----------|--------|
-| Brief | N/A | N/A |
-| Spec | N/A | N/A |
-| Implementation | 5 issues (KRX-083 to KRX-087) | Complete |
-| Review | PR review + issue validation | Passed (avg 96.2/100) |
+| Brief | .agent/briefs/BRIEF-keryx-ship-2026-02-03.md | Existing |
+| Spec | .agent/specs/SPEC-keryx-ship-2026-02-03.md | Existing (APPROVED) |
+| Implementation | src/ship/ + CLI integration | Complete |
+| Review | /vctk-review-code | Pending |
 
 ## Testing & Validation
 
-- All 192 unit tests pass
-- All integration tests pass (with `--features rg-tests`)
-- Each issue validated against acceptance criteria
-- Scores: KRX-083 (95), KRX-084 (98), KRX-085 (97), KRX-086 (95), KRX-087 (96)
+- **Release build:** `cargo build --release` — clean, no warnings
+- **All tests pass:** 414 total (308 unit + 106 integration/other), 0 failures, 17 ignored (rg-tests feature-gated)
+- **Dry run tested:** `cargo run --release -- ship --dry-run --verbose` on the keryx repo itself
+  - All 4 preflight checks passed
+  - LLM correctly determined minor bump (0.4.0 -> 0.5.0) with reasoning
+  - Detected Cargo.toml, would create changelog section
+  - Summary displayed correctly, exited without changes
+- **New unit tests added:** 10 tests in version_files.rs (detect + update for each ecosystem), 2 tests in executor.rs
 
 ## Current State
 
-The `feat/agentic-verification` branch has:
-- All PR review issues addressed
-- Comprehensive test coverage for error paths
-- Improved type safety with `StubType` enum
-- Better observability with `ScanSummary` and warnings tracking
-- Changes are unstaged, ready for commit
+- Branch: `feat/ship`
+- Latest commit: `801c129 feat(ship): add release pipeline scaffold` (already committed)
+- Working tree: clean
+- All code compiles and tests pass
+- Dry run verified on the keryx repo itself
+- Ready for `/vctk-review-code` audit
 
 ## Blockers/Issues
 
-None - all 5 issues resolved and validated.
+- **Spec deviation: no `run_generate()` refactor** — The spec calls for extracting `generate_changelog_entries()` from `run_generate()`. Instead, the ship module calls `build_prompt()` + `llm.generate()` + `write_changelog()` directly. This works but means the two code paths aren't fully DRY. Low priority follow-up.
+- **Tag debug logs appear 3x in verbose mode** — `get_all_tags()` is called during preflight, version calc, and tag collision. Cosmetic only, not visible without `--verbose`.
 
 ## Next Steps
 
-1. Commit the changes with appropriate conventional commit message
-2. Consider creating PR for merge to main
-3. Update any documentation if needed
+1. Run `/vctk-review-code` to audit the implementation against the spec
+2. Consider extracting shared changelog generation logic (spec's `GenerateInput` pattern) as a follow-up
+3. Dogfood on keryx's own v0.5.0 release once the feature branch is merged to main
+4. Update README with `keryx ship` documentation after successful dogfood
 
 ## Related Documentation
 
-- `.issues/done/KRX-083.md` through `.issues/done/KRX-087.md` - Full issue details and resolutions
-- `.agent/README.md` - Project context
+- `.agent/briefs/BRIEF-keryx-ship-2026-02-03.md` - Feature brief with user journey and examples
+- `.agent/specs/SPEC-keryx-ship-2026-02-03.md` - Full technical spec (APPROVED)
+- `.agent/README.md` - Project documentation index
