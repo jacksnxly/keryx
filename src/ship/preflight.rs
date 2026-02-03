@@ -55,8 +55,19 @@ pub fn run_checks(
     let range = resolve_range(repo, None, Some("HEAD"), false)
         .map_err(|e| ShipError::GitFailed(e.to_string()))?;
 
-    let commits = fetch_commits(repo, range.from, range.to, false)
+    let mut commits = fetch_commits(repo, range.from, range.to, false)
         .map_err(|e| ShipError::GitFailed(e.to_string()))?;
+
+    // Special-case initial repos with a single commit and no tags.
+    // When `from == to`, the revwalk hides the only commit, producing an empty list.
+    if commits.is_empty() && latest_tag.is_none() && range.from == range.to {
+        let commit = repo
+            .find_commit(range.to)
+            .map_err(|e| ShipError::GitFailed(e.to_string()))?;
+        let parsed = ParsedCommit::from_git2_commit(&commit, false)
+            .map_err(|e| ShipError::GitFailed(e.to_string()))?;
+        commits = vec![parsed];
+    }
 
     let tag_ref = latest_tag
         .as_ref()

@@ -115,7 +115,7 @@ pub async fn run_ship(config: ShipConfig) -> Result<(), ShipError> {
     // ── Stage 3: Tag collision check ──
     let tag_name = format!("v{}", next_version);
     if check_tag_exists(&repo, &tag_name)? {
-        let suggested = suggest_next_version(&next_version);
+        let suggested = find_next_available_version(&repo, &next_version)?;
         let suggested_tag = format!("v{}", suggested);
 
         println!();
@@ -172,9 +172,9 @@ async fn run_ship_with_version(
         output_path.clone()
     };
 
-    let changelog_exists_for_version = read_changelog(&changelog_path)
-        .ok()
-        .flatten()
+    let parsed_changelog = read_changelog(&changelog_path)?;
+    let changelog_exists_for_version = parsed_changelog
+        .as_ref()
         .map(|parsed| parsed.has_version(&next_version))
         .unwrap_or(false);
 
@@ -195,7 +195,7 @@ async fn run_ship_with_version(
         changelog_generated = true;
     }
 
-    if changelog_generated && !preflight.llm_available {
+    if changelog_generated && !preflight.llm_available && !config.dry_run {
         let provider = config.provider_selection.primary;
         return Err(ShipError::LlmUnavailable(format!(
             "{} CLI not available. Install/configure the provider or add the changelog section manually.",
@@ -463,4 +463,23 @@ fn get_repo_name(repo: &Repository) -> String {
 /// Suggest the next patch version when a tag collision is detected.
 fn suggest_next_version(version: &Version) -> Version {
     Version::new(version.major, version.minor, version.patch + 1)
+}
+
+/// Find the next available patch version by skipping existing tags.
+fn find_next_available_version(
+    repo: &Repository,
+    version: &Version,
+) -> Result<Version, ShipError> {
+    let mut candidate = suggest_next_version(version);
+    for _ in 0..1000 {
+        let tag_name = format!("v{}", candidate);
+        if !check_tag_exists(repo, &tag_name)? {
+            return Ok(candidate);
+        }
+        candidate = suggest_next_version(&candidate);
+    }
+
+    Err(ShipError::GitFailed(
+        "Failed to find an available tag after 1000 attempts".into(),
+    ))
 }
