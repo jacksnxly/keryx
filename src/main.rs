@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 
@@ -11,6 +12,7 @@ use git2::Repository;
 use semver::Version;
 use tracing::{debug, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+use tokio::process::Command;
 
 use keryx::changelog::{parser::read_changelog, write_changelog, writer::generate_summary};
 use keryx::commit::{
@@ -221,6 +223,17 @@ enum Commands {
         #[arg(long)]
         no_split: bool,
     },
+
+    /// Generate a commit message and push the commit to the remote
+    Push {
+        /// Print the generated message to stdout without committing
+        #[arg(long)]
+        message_only: bool,
+
+        /// Skip split analysis, always create a single commit
+        #[arg(long)]
+        no_split: bool,
+    },
 }
 
 /// Configuration for the commit command.
@@ -231,6 +244,14 @@ struct CommitConfig {
     dry_run: bool,
     /// Enable verbose/debug logging.
     verbose: bool,
+}
+
+/// Result of running the commit flow.
+enum CommitOutcome {
+    /// No commit was created (message-only or dry run).
+    NoCommit,
+    /// One or more commits were created.
+    Committed(Vec<git2::Oid>),
 }
 
 /// Configuration for init commands, avoiding too_many_arguments clippy warning.
@@ -305,7 +326,15 @@ async fn main() -> Result<()> {
                 dry_run: cli.dry_run,
                 verbose: cli.verbose,
             };
-            run_commit(&config, no_split, cli.provider).await
+            run_commit(&config, no_split, cli.provider).await.map(|_| ())
+        }
+        Some(Commands::Push { message_only, no_split }) => {
+            let config = CommitConfig {
+                message_only,
+                dry_run: cli.dry_run,
+                verbose: cli.verbose,
+            };
+            run_push(&config, no_split, cli.provider).await
         }
         None => run_generate(cli).await,
     };
@@ -768,7 +797,7 @@ async fn run_commit(
     config: &CommitConfig,
     no_split: bool,
     provider_flag: Option<ProviderFlag>,
-) -> Result<()> {
+) -> Result<CommitOutcome> {
     let provider_selection = provider_flag
         .map(Provider::from)
         .map(ProviderSelection::from_primary)
@@ -858,6 +887,61 @@ async fn run_commit(
     }
 }
 
+/// Run the commit flow and push the resulting commit(s) to the remote.
+async fn run_push(
+    config: &CommitConfig,
+    no_split: bool,
+    provider_flag: Option<ProviderFlag>,
+) -> Result<()> {
+    let outcome = run_commit(config, no_split, provider_flag).await?;
+
+    let commit_count = match outcome {
+        CommitOutcome::NoCommit => return Ok(()),
+        CommitOutcome::Committed(oids) => oids.len(),
+    };
+
+    if commit_count == 0 {
+        return Ok(());
+    }
+
+    println!(
+        "Pushing {} commit{} to remote...",
+        commit_count,
+        if commit_count == 1 { "" } else { "s" }
+    );
+
+    push_to_remote(config.verbose).await?;
+
+    println!(
+        "\x1b[32m\u{2713} Pushed {} commit{} to remote\x1b[0m",
+        commit_count,
+        if commit_count == 1 { "" } else { "s" }
+    );
+
+    Ok(())
+}
+
+/// Push the current branch to its remote.
+async fn push_to_remote(verbose: bool) -> Result<()> {
+    if verbose {
+        debug!("Running git push");
+    }
+
+    let status = Command::new("git")
+        .arg("push")
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .context("Failed to run `git push`")?;
+
+    if !status.success() {
+        bail!("git push failed with status {}", status);
+    }
+
+    Ok(())
+}
+
 /// Run a single commit for all changes (original behavior).
 async fn run_single_commit(
     repo: &Repository,
@@ -865,7 +949,7 @@ async fn run_single_commit(
     branch_name: &str,
     llm: &mut LlmRouter,
     config: &CommitConfig,
-) -> Result<()> {
+) -> Result<CommitOutcome> {
     println!(
         "Generating commit message with {} (fallback: {})...",
         llm.primary(),
@@ -884,7 +968,7 @@ async fn run_single_commit(
         if config.message_only {
             print!("{}", message.format());
         }
-        return Ok(());
+        return Ok(CommitOutcome::NoCommit);
     }
 
     let formatted = message.format();
@@ -896,7 +980,7 @@ async fn run_single_commit(
         &oid.to_string()[..7]
     );
 
-    Ok(())
+    Ok(CommitOutcome::Committed(vec![oid]))
 }
 
 /// Run split commits: one per commit group from the analysis.
@@ -907,7 +991,7 @@ async fn run_split_commits(
     branch_name: &str,
     llm: &mut LlmRouter,
     config: &CommitConfig,
-) -> Result<()> {
+) -> Result<CommitOutcome> {
     println!();
     println!(
         "\x1b[1mProposed split into {} commits:\x1b[0m",
@@ -988,6 +1072,7 @@ async fn run_split_commits(
 
     if config.message_only {
         print!("{}", all_messages.join("\n---\n"));
+        return Ok(CommitOutcome::NoCommit);
     } else if !config.dry_run && !commit_oids.is_empty() {
         println!();
         println!(
@@ -999,7 +1084,13 @@ async fn run_split_commits(
         }
     }
 
-    Ok(())
+    if config.dry_run || commit_oids.is_empty() {
+        Ok(CommitOutcome::NoCommit)
+    } else {
+        Ok(CommitOutcome::Committed(
+            commit_oids.into_iter().map(|(_, oid)| oid).collect(),
+        ))
+    }
 }
 
 /// Display a commit message to the user.
