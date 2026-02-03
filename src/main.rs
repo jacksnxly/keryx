@@ -251,6 +251,9 @@ enum Commands {
         #[arg(long)]
         no_split: bool,
     },
+
+    /// Create a release: bump version, update changelog, tag, and push
+    Ship,
 }
 
 /// Configuration for the commit command.
@@ -367,6 +370,27 @@ async fn main() -> Result<()> {
                 verbose: cli.verbose,
             };
             run_push(&config, no_split, cli.provider).await
+        }
+        Some(Commands::Ship) => {
+            let provider_selection = cli.provider
+                .clone()
+                .map(Provider::from)
+                .map(ProviderSelection::from_primary)
+                .unwrap_or_default();
+
+            let ship_config = keryx::ship::ShipConfig {
+                set_version: cli.set_version.clone(),
+                dry_run: cli.dry_run,
+                no_llm_bump: cli.no_llm_bump,
+                no_prs: cli.no_prs,
+                verbose: cli.verbose,
+                no_verify: cli.no_verify,
+                output: cli.output.clone(),
+                provider_selection,
+            };
+            keryx::ship::run_ship(ship_config)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
         }
         None => run_generate(cli).await,
     };

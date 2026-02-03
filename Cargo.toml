@@ -58,6 +58,12 @@ axoupdater = { version = "0.9", default-features = false, features = ["github_re
 # Atomic file writes
 tempfile = "3"
 
+# Interactive CLI prompts (for ship confirmation)
+dialoguer = "0.12"
+
+# Format-preserving TOML editing (for version file updates)
+toml_edit = "0.24"
+
 [features]
 rg-tests = []  # Enable integration tests that require ripgrep (rg) in PATH
 

@@ -1,5 +1,6 @@
 //! Error types for keryx modules using thiserror.
 
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Errors from git operations.
@@ -188,4 +189,44 @@ pub enum VerificationError {
 
     #[error("I/O error during scan: {0}")]
     ScannerIoError(#[source] std::io::Error),
+}
+
+/// Errors from the ship (release) pipeline.
+#[derive(Error, Debug)]
+pub enum ShipError {
+    #[error("Working tree has uncommitted changes")]
+    DirtyWorkingTree,
+
+    #[error("Local branch is behind remote. Run 'git pull' first.")]
+    BehindRemote,
+
+    #[error("No commits since {0}. Nothing to ship.")]
+    NoCommitsSinceTag(String),
+
+    #[error("No version files found (Cargo.toml, package.json, or pyproject.toml)")]
+    NoVersionFiles,
+
+    #[error("Tag {0} already exists")]
+    TagAlreadyExists(String),
+
+    #[error("LLM provider unavailable: {0}")]
+    LlmUnavailable(String),
+
+    #[error("Failed to update version file {path}: {reason}")]
+    VersionFileUpdateFailed { path: PathBuf, reason: String },
+
+    #[error("Git operation failed: {0}")]
+    GitFailed(String),
+
+    #[error("Push failed: {0}")]
+    PushFailed(String),
+
+    #[error("Rollback failed: {0}")]
+    RollbackFailed(String),
+
+    #[error("Changelog error: {0}")]
+    Changelog(#[from] ChangelogError),
+
+    #[error("User cancelled")]
+    Cancelled,
 }

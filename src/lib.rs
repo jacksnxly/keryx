@@ -14,14 +14,15 @@ pub mod error;
 pub mod git;
 pub mod github;
 pub mod llm;
+pub mod ship;
 pub mod verification;
 pub mod version;
 
 // Re-export commonly used types
 pub use changelog::{ChangelogCategory, ChangelogEntry, ChangelogOutput};
 pub use error::{
-    ChangelogError, ClaudeError, CodexError, CommitError, GitError, GitHubError, VerificationError,
-    VersionError,
+    ChangelogError, ClaudeError, CodexError, CommitError, GitError, GitHubError, ShipError,
+    VerificationError, VersionError,
 };
 pub use git::{CommitType, ParsedCommit};
 pub use github::PullRequest;

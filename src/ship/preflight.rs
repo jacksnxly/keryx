@@ -1,0 +1,213 @@
+//! Preflight checks for the ship pipeline.
+//!
+//! Validates working tree state, remote sync, commits, and LLM availability
+//! before starting the release process.
+
+use std::process::Command;
+
+use git2::Repository;
+use semver::Version;
+
+use crate::error::ShipError;
+use crate::git::commits::fetch_commits;
+use crate::git::range::resolve_range;
+use crate::git::tags::{get_all_tags, get_latest_tag, TagInfo};
+use crate::git::ParsedCommit;
+use crate::llm::Provider;
+
+/// Result of all preflight checks.
+pub struct PreflightResult {
+    pub current_branch: String,
+    pub remote_name: String,
+    pub latest_tag: Option<TagInfo>,
+    pub commits_since_tag: Vec<ParsedCommit>,
+    pub llm_available: bool,
+    pub base_version: Option<Version>,
+}
+
+/// Run all preflight checks.
+///
+/// Checks (in order):
+/// 1. Clean working tree
+/// 2. Up to date with remote
+/// 3. Commits exist since last tag
+/// 4. LLM available (if needed)
+pub fn run_checks(
+    repo: &Repository,
+    no_llm_bump: bool,
+    primary_provider: Provider,
+    verbose: bool,
+) -> Result<PreflightResult, ShipError> {
+    // 1. Clean working tree
+    check_clean_working_tree(verbose)?;
+
+    // Get branch info
+    let current_branch = get_current_branch(repo)?;
+    let remote_name = get_remote_name(repo);
+
+    // 2. Up to date with remote
+    check_remote_sync(&remote_name, &current_branch, verbose)?;
+
+    // 3. Commits exist
+    let latest_tag = get_latest_tag(repo).map_err(|e| ShipError::GitFailed(e.to_string()))?;
+    let base_version = latest_tag.as_ref().and_then(|t| t.version.clone());
+
+    let range = resolve_range(repo, None, Some("HEAD"), false)
+        .map_err(|e| ShipError::GitFailed(e.to_string()))?;
+
+    let commits = fetch_commits(repo, range.from, range.to, false)
+        .map_err(|e| ShipError::GitFailed(e.to_string()))?;
+
+    let tag_ref = latest_tag
+        .as_ref()
+        .map(|t| t.name.as_str())
+        .unwrap_or("(initial)");
+
+    if commits.is_empty() {
+        return Err(ShipError::NoCommitsSinceTag(tag_ref.to_string()));
+    }
+
+    // 4. LLM available (if not --no-llm-bump)
+    let llm_available = if no_llm_bump {
+        false
+    } else {
+        check_llm_available(primary_provider, verbose)
+    };
+
+    Ok(PreflightResult {
+        current_branch,
+        remote_name,
+        latest_tag,
+        commits_since_tag: commits,
+        llm_available,
+        base_version,
+    })
+}
+
+/// Check that the working tree is clean (no uncommitted changes).
+fn check_clean_working_tree(verbose: bool) -> Result<(), ShipError> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .map_err(|e| ShipError::GitFailed(format!("Failed to run git status: {}", e)))?;
+
+    if !output.status.success() {
+        return Err(ShipError::GitFailed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        if verbose {
+            eprintln!("Uncommitted changes:\n{}", stdout);
+        }
+        return Err(ShipError::DirtyWorkingTree);
+    }
+
+    Ok(())
+}
+
+/// Get the current branch name.
+fn get_current_branch(repo: &Repository) -> Result<String, ShipError> {
+    repo.head()
+        .ok()
+        .and_then(|h| h.shorthand().map(String::from))
+        .ok_or_else(|| ShipError::GitFailed("Could not determine current branch".into()))
+}
+
+/// Get the remote name (defaults to "origin").
+fn get_remote_name(repo: &Repository) -> String {
+    repo.find_remote("origin")
+        .map(|_| "origin".to_string())
+        .unwrap_or_else(|_| {
+            // Try first remote
+            repo.remotes()
+                .ok()
+                .and_then(|remotes| remotes.get(0).map(|s| s.to_string()))
+                .unwrap_or_else(|| "origin".to_string())
+        })
+}
+
+/// Check that local branch is not behind the remote.
+fn check_remote_sync(remote: &str, branch: &str, verbose: bool) -> Result<(), ShipError> {
+    // Fetch from remote first
+    let fetch_output = Command::new("git")
+        .args(["fetch", remote])
+        .output()
+        .map_err(|e| ShipError::GitFailed(format!("Failed to run git fetch: {}", e)))?;
+
+    if verbose && !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        eprintln!("git fetch warning: {}", stderr);
+    }
+
+    // Compare local HEAD with upstream
+    let local = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| ShipError::GitFailed(format!("Failed to run git rev-parse HEAD: {}", e)))?;
+
+    let upstream_ref = format!("{}/{}", remote, branch);
+    let upstream = Command::new("git")
+        .args(["rev-parse", &upstream_ref])
+        .output();
+
+    // If upstream doesn't exist (new branch), that's fine
+    let upstream = match upstream {
+        Ok(o) if o.status.success() => o,
+        _ => return Ok(()),
+    };
+
+    let local_sha = String::from_utf8_lossy(&local.stdout).trim().to_string();
+    let upstream_sha = String::from_utf8_lossy(&upstream.stdout).trim().to_string();
+
+    if local_sha == upstream_sha {
+        return Ok(());
+    }
+
+    // Check if local is behind
+    let merge_base = Command::new("git")
+        .args(["merge-base", &local_sha, &upstream_sha])
+        .output()
+        .map_err(|e| ShipError::GitFailed(format!("Failed to run git merge-base: {}", e)))?;
+
+    let base_sha = String::from_utf8_lossy(&merge_base.stdout)
+        .trim()
+        .to_string();
+
+    if base_sha == local_sha && base_sha != upstream_sha {
+        return Err(ShipError::BehindRemote);
+    }
+
+    Ok(())
+}
+
+/// Check if the LLM CLI tool is available.
+fn check_llm_available(provider: Provider, verbose: bool) -> bool {
+    let tool_name = match provider {
+        Provider::Claude => "claude",
+        Provider::Codex => "codex",
+    };
+
+    match which::which(tool_name) {
+        Ok(_) => {
+            if verbose {
+                eprintln!("  LLM provider {} CLI found", provider);
+            }
+            true
+        }
+        Err(_) => {
+            if verbose {
+                eprintln!("  LLM provider {} CLI not found", provider);
+            }
+            false
+        }
+    }
+}
+
+/// Check if a tag already exists.
+pub fn check_tag_exists(repo: &Repository, tag_name: &str) -> Result<bool, ShipError> {
+    let tags = get_all_tags(repo).map_err(|e| ShipError::GitFailed(e.to_string()))?;
+    Ok(tags.iter().any(|t| t.name == tag_name))
+}
