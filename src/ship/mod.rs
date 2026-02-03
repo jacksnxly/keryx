@@ -40,12 +40,15 @@ pub async fn run_ship(config: ShipConfig) -> Result<(), ShipError> {
     let repo = Repository::open(".")
         .map_err(|e| ShipError::GitFailed(format!("Not a git repository: {}", e)))?;
 
-    let primary_provider = config.provider_selection.primary;
-
     // ── Stage 1: Preflight checks ──
     println!("Preflight checks:");
 
-    let preflight = run_checks(&repo, config.no_llm_bump, primary_provider, config.verbose)?;
+    let preflight = run_checks(
+        &repo,
+        config.no_llm_bump,
+        config.provider_selection,
+        config.verbose,
+    )?;
 
     let tag_display = preflight
         .latest_tag
@@ -302,7 +305,12 @@ async fn run_ship_with_version(
             );
         }
         Err(e) => {
-            // ── Stage 8: Rollback on failure ──
+            if !matches!(&e, ShipError::PushFailed(_)) {
+                eprintln!("  [FAIL] {}", e);
+                return Err(e);
+            }
+
+            // ── Stage 8: Rollback on push failure ──
             eprintln!("  [FAIL] {}", e);
             eprintln!();
             eprintln!("Rolling back...");

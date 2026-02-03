@@ -13,7 +13,7 @@ use crate::git::commits::fetch_commits;
 use crate::git::range::resolve_range;
 use crate::git::tags::{get_all_tags, get_latest_tag, TagInfo};
 use crate::git::ParsedCommit;
-use crate::llm::Provider;
+use crate::llm::{Provider, ProviderSelection};
 
 /// Result of all preflight checks.
 pub struct PreflightResult {
@@ -35,7 +35,7 @@ pub struct PreflightResult {
 pub fn run_checks(
     repo: &Repository,
     _no_llm_bump: bool,
-    primary_provider: Provider,
+    provider_selection: ProviderSelection,
     verbose: bool,
 ) -> Result<PreflightResult, ShipError> {
     // 1. Clean working tree
@@ -68,7 +68,7 @@ pub fn run_checks(
     }
 
     // 4. LLM available (used for changelog generation)
-    let llm_available = check_llm_available(primary_provider, verbose);
+    let llm_available = check_llm_available(provider_selection, verbose);
 
     Ok(PreflightResult {
         current_branch,
@@ -189,7 +189,13 @@ fn check_remote_sync(remote: &str, branch: &str, verbose: bool) -> Result<(), Sh
 }
 
 /// Check if the LLM CLI tool is available.
-fn check_llm_available(provider: Provider, verbose: bool) -> bool {
+fn check_llm_available(selection: ProviderSelection, verbose: bool) -> bool {
+    let primary_ok = check_provider_available(selection.primary, verbose);
+    let fallback_ok = check_provider_available(selection.fallback, verbose);
+    primary_ok || fallback_ok
+}
+
+fn check_provider_available(provider: Provider, verbose: bool) -> bool {
     let tool_name = match provider {
         Provider::Claude => "claude",
         Provider::Codex => "codex",

@@ -13,7 +13,7 @@ use crate::error::ShipError;
 /// Steps:
 /// 1. `git add <files>` - stage only modified version/changelog files
 /// 2. `git commit -m "chore(release): vX.Y.Z"` - create release commit
-/// 3. `git tag vX.Y.Z` - create lightweight tag
+/// 3. `git tag -a vX.Y.Z -m "Release vX.Y.Z"` - create annotated tag
 /// 4. `git push <remote> <branch> --follow-tags` - push commit + tag
 pub fn commit_tag_push(
     message: &str,
@@ -36,8 +36,12 @@ pub fn commit_tag_push(
     // 2. Create commit
     run_git(&["commit", "-m", message], "create commit")?;
 
-    // 3. Create tag
-    run_git(&["tag", tag_name], "create tag")?;
+    // 3. Create annotated tag so --follow-tags will push it
+    let tag_message = format!("Release {}", tag_name);
+    run_git(
+        &["tag", "-a", tag_name, "-m", &tag_message],
+        "create tag",
+    )?;
 
     // 4. Push with tags
     match run_git(&["push", remote, branch, "--follow-tags"], "push") {
