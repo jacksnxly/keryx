@@ -7,7 +7,7 @@ pub mod executor;
 pub mod preflight;
 pub mod version_files;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use dialoguer::Confirm;
 use git2::Repository;
@@ -162,16 +162,18 @@ async fn run_ship_with_version(
     }
 
     // ── Stage 5: Changelog check/generation ──
-    let changelog_path = detect_changelog_path(workdir);
-    let changelog_exists_for_version = if let Some(ref path) = changelog_path {
-        read_changelog(path)
-            .ok()
-            .flatten()
-            .map(|parsed| parsed.has_version(&next_version))
-            .unwrap_or(false)
+    let output_path = resolve_changelog_path(workdir, &config.output);
+    let changelog_path = if is_default_changelog_output(&config.output) {
+        detect_changelog_path(workdir).unwrap_or_else(|| output_path.clone())
     } else {
-        false
+        output_path.clone()
     };
+
+    let changelog_exists_for_version = read_changelog(&changelog_path)
+        .ok()
+        .flatten()
+        .map(|parsed| parsed.has_version(&next_version))
+        .unwrap_or(false);
 
     let changelog_generated;
     if changelog_exists_for_version {
@@ -190,10 +192,16 @@ async fn run_ship_with_version(
         changelog_generated = true;
     }
 
+    if changelog_generated && !preflight.llm_available {
+        let provider = config.provider_selection.primary;
+        return Err(ShipError::LlmUnavailable(format!(
+            "{} CLI not available. Install/configure the provider or add the changelog section manually.",
+            provider
+        )));
+    }
+
     // ── Stage 6: Confirmation prompt ──
-    let effective_changelog_path = changelog_path
-        .clone()
-        .unwrap_or_else(|| workdir.join("CHANGELOG.md"));
+    let effective_changelog_path = changelog_path.clone();
 
     println!();
     println!("Summary:");
@@ -385,7 +393,7 @@ async fn generate_and_write_changelog(
 
     if changelog_output.entries.is_empty() {
         debug!("No changelog entries generated");
-        return Ok(());
+        return Err(ShipError::Changelog(crate::error::ChangelogError::EmptyOutput));
     }
 
     write_changelog(output_path, &changelog_output, version)?;
@@ -418,6 +426,18 @@ fn detect_changelog_path(root: &std::path::Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn resolve_changelog_path(root: &Path, output: &Path) -> PathBuf {
+    if output.is_absolute() {
+        output.to_path_buf()
+    } else {
+        root.join(output)
+    }
+}
+
+fn is_default_changelog_output(output: &Path) -> bool {
+    output == Path::new("CHANGELOG.md")
 }
 
 /// Get the repository name from the remote URL.

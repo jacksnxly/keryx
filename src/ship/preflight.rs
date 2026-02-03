@@ -34,7 +34,7 @@ pub struct PreflightResult {
 /// 4. LLM available (if needed)
 pub fn run_checks(
     repo: &Repository,
-    no_llm_bump: bool,
+    _no_llm_bump: bool,
     primary_provider: Provider,
     verbose: bool,
 ) -> Result<PreflightResult, ShipError> {
@@ -67,12 +67,8 @@ pub fn run_checks(
         return Err(ShipError::NoCommitsSinceTag(tag_ref.to_string()));
     }
 
-    // 4. LLM available (if not --no-llm-bump)
-    let llm_available = if no_llm_bump {
-        false
-    } else {
-        check_llm_available(primary_provider, verbose)
-    };
+    // 4. LLM available (used for changelog generation)
+    let llm_available = check_llm_available(primary_provider, verbose);
 
     Ok(PreflightResult {
         current_branch,
@@ -137,9 +133,20 @@ fn check_remote_sync(remote: &str, branch: &str, verbose: bool) -> Result<(), Sh
         .output()
         .map_err(|e| ShipError::GitFailed(format!("Failed to run git fetch: {}", e)))?;
 
-    if verbose && !fetch_output.status.success() {
+    if !fetch_output.status.success() {
         let stderr = String::from_utf8_lossy(&fetch_output.stderr);
-        eprintln!("git fetch warning: {}", stderr);
+        return Err(ShipError::GitFailed(format!(
+            "git fetch {} failed: {}",
+            remote,
+            stderr.trim()
+        )));
+    }
+
+    if verbose {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        if !stderr.trim().is_empty() {
+            eprintln!("git fetch output: {}", stderr.trim());
+        }
     }
 
     // Compare local HEAD with upstream
@@ -162,25 +169,23 @@ fn check_remote_sync(remote: &str, branch: &str, verbose: bool) -> Result<(), Sh
     let local_sha = String::from_utf8_lossy(&local.stdout).trim().to_string();
     let upstream_sha = String::from_utf8_lossy(&upstream.stdout).trim().to_string();
 
-    if local_sha == upstream_sha {
-        return Ok(());
-    }
-
-    // Check if local is behind
-    let merge_base = Command::new("git")
-        .args(["merge-base", &local_sha, &upstream_sha])
+    // Ensure local is a descendant of upstream (fast-forward or equal).
+    let ancestor_check = Command::new("git")
+        .args(["merge-base", "--is-ancestor", &upstream_sha, &local_sha])
         .output()
         .map_err(|e| ShipError::GitFailed(format!("Failed to run git merge-base: {}", e)))?;
 
-    let base_sha = String::from_utf8_lossy(&merge_base.stdout)
-        .trim()
-        .to_string();
-
-    if base_sha == local_sha && base_sha != upstream_sha {
-        return Err(ShipError::BehindRemote);
+    match ancestor_check.status.code() {
+        Some(0) => Ok(()),
+        Some(1) => Err(ShipError::BehindRemote),
+        _ => {
+            let stderr = String::from_utf8_lossy(&ancestor_check.stderr);
+            Err(ShipError::GitFailed(format!(
+                "git merge-base --is-ancestor failed: {}",
+                stderr.trim()
+            )))
+        }
     }
-
-    Ok(())
 }
 
 /// Check if the LLM CLI tool is available.

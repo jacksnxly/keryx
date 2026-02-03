@@ -121,6 +121,9 @@ pub enum ChangelogError {
     #[error("Failed to parse changelog: {0}")]
     ParseFailed(String),
 
+    #[error("Changelog generation produced no entries")]
+    EmptyOutput,
+
     #[error("Failed to create backup: {0}")]
     BackupFailed(#[source] std::io::Error),
 
