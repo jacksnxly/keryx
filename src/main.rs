@@ -1585,6 +1585,10 @@ fn get_cli_features() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::env;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn test_get_cli_features_includes_all_flags() {
@@ -1661,5 +1665,86 @@ mod tests {
 
         let result = truncate_description("hello", 3);
         assert_eq!(result, "...");
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: String) -> Self {
+            let original = env::var(key).ok();
+            // Safety: tests run in a single-threaded process scope with serial guard.
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe {
+                    env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_push_to_remote_success() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let git_path = temp_dir.path().join("git");
+        let script = r#"#!/bin/sh
+if [ "$1" != "push" ]; then
+  echo "unexpected args: $@" >&2
+  exit 2
+fi
+exit 0
+"#;
+        std::fs::write(&git_path, script).unwrap();
+        let mut perms = std::fs::metadata(&git_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&git_path, perms).unwrap();
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", temp_dir.path().display(), original_path);
+        let _guard = EnvVarGuard::set("PATH", new_path);
+
+        let result = push_to_remote(false).await;
+        assert!(result.is_ok(), "Expected git push to succeed");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_push_to_remote_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let git_path = temp_dir.path().join("git");
+        let script = r#"#!/bin/sh
+exit 1
+"#;
+        std::fs::write(&git_path, script).unwrap();
+        let mut perms = std::fs::metadata(&git_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&git_path, perms).unwrap();
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", temp_dir.path().display(), original_path);
+        let _guard = EnvVarGuard::set("PATH", new_path);
+
+        let result = push_to_remote(false).await;
+        let err = result.expect_err("Expected git push to fail");
+        assert!(
+            err.to_string().contains("git push failed"),
+            "Expected error message to mention git push failure, got: {err}"
+        );
     }
 }
