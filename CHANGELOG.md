@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-02-04
+
+### Added
+
+- New `keryx commit` command that generates conventional commit messages from staged changes using AI
+- Automatic splitting of large changesets into multiple focused commits (use `--no-split` to disable)
+- New `keryx push` command with actionable error messages and support for various `push.default` configurations
+- LLM-based semantic version bumping that intelligently determines the next version number based on changes
+- `--no-llm-bump` flag to skip LLM version inference and use manual versioning
+
+### Fixed
+
+- Claude Code integration now works in headless and automated environments
+- Push command now respects user's `push.default` git configuration instead of requiring an upstream branch
+
+
 ## [0.4.0] - 2026-02-02
 
 ### Added
