@@ -230,6 +230,12 @@ pub enum ShipError {
     #[error("Changelog error: {0}")]
     Changelog(#[from] ChangelogError),
 
+    #[error("Verification error: {0}")]
+    Verification(#[from] VerificationError),
+
+    #[error("Verification failed: {0}")]
+    VerificationFailed(String),
+
     #[error("User cancelled")]
     Cancelled,
 }

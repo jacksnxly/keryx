@@ -17,7 +17,14 @@ use tracing::debug;
 use crate::changelog::parser::read_changelog;
 use crate::changelog::write_changelog;
 use crate::error::ShipError;
-use crate::llm::{build_prompt, ChangelogInput, LlmRouter, ProviderSelection};
+use crate::llm::{
+    build_prompt,
+    build_verification_prompt,
+    ChangelogInput,
+    LlmRouter,
+    ProviderSelection,
+};
+use crate::verification::{check_ripgrep_installed, gather_verification_evidence};
 use crate::version::{calculate_next_version, calculate_next_version_with_llm, VersionBumpInput};
 
 use self::preflight::{check_tag_exists, run_checks};
@@ -348,7 +355,7 @@ async fn generate_and_write_changelog(
     base_version: Option<&Version>,
     output_path: &std::path::Path,
     no_prs: bool,
-    _no_verify: bool,
+    no_verify: bool,
     verbose: bool,
 ) -> Result<(), ShipError> {
     // Fetch PRs if not disabled
@@ -397,11 +404,43 @@ async fn generate_and_write_changelog(
         )))
     })?;
 
-    let changelog_output = completion.output;
+    let mut changelog_output = completion.output;
 
     if changelog_output.entries.is_empty() {
         debug!("No changelog entries generated");
         return Err(ShipError::Changelog(crate::error::ChangelogError::EmptyOutput));
+    }
+
+    if !no_verify {
+        let repo_path = repo.workdir().ok_or_else(|| {
+            ShipError::GitFailed(
+                "Cannot verify in a bare repository. Use --no-verify to skip verification."
+                    .into(),
+            )
+        })?;
+
+        check_ripgrep_installed()?;
+
+        println!("  Verifying changelog entries...");
+
+        let evidence = gather_verification_evidence(&changelog_output.entries, repo_path);
+        let draft_json = serde_json::to_string_pretty(&changelog_output).map_err(|e| {
+            ShipError::VerificationFailed(format!("Failed to serialize draft entries: {}", e))
+        })?;
+        let verification_prompt = build_verification_prompt(&draft_json, &evidence).map_err(|e| {
+            ShipError::VerificationFailed(format!("Failed to build verification prompt: {}", e))
+        })?;
+
+        let verified_completion = llm.generate(&verification_prompt).await.map_err(|e| {
+            ShipError::VerificationFailed(format!("LLM verification failed: {}", e.summary()))
+        })?;
+
+        changelog_output = verified_completion.output;
+
+        if changelog_output.entries.is_empty() {
+            debug!("No changelog entries remained after verification");
+            return Err(ShipError::Changelog(crate::error::ChangelogError::EmptyOutput));
+        }
     }
 
     write_changelog(output_path, &changelog_output, version)?;
