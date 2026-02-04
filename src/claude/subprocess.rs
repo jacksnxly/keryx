@@ -80,13 +80,31 @@ pub async fn run_claude(prompt: &str) -> Result<String, ClaudeError> {
     let timeout_duration = get_timeout();
     let timeout_secs = timeout_duration.as_secs();
 
+    // Write prompt to a temp file to avoid shell escaping issues
+    // The prompt may contain diffs with special shell characters
+    let temp_dir = std::env::temp_dir();
+    let prompt_file = temp_dir.join(format!("keryx-prompt-{}.txt", std::process::id()));
+    std::fs::write(&prompt_file, prompt).map_err(|e| ClaudeError::SpawnFailed(e))?;
+
+    // Build command that reads prompt from file
+    let claude_cmd = format!(
+        "claude -p \"$(cat {})\" --output-format json --dangerously-skip-permissions",
+        prompt_file.display()
+    );
+
+    // Use `script` to provide a pseudo-TTY for Claude Code
+    // This works around Claude Code's TTY requirement bug (GitHub #9026)
+    // Linux: script -q -c "command" /dev/null
+    // macOS: script -q /dev/null command
+    #[cfg(target_os = "macos")]
     let output = timeout(
         timeout_duration,
-        Command::new("claude")
-            .arg("-p")
-            .arg(prompt)
-            .arg("--output-format")
-            .arg("json")
+        Command::new("script")
+            .arg("-q")
+            .arg("/dev/null")
+            .arg("sh")
+            .arg("-c")
+            .arg(&claude_cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output(),
@@ -95,6 +113,25 @@ pub async fn run_claude(prompt: &str) -> Result<String, ClaudeError> {
     .map_err(|_| ClaudeError::Timeout(timeout_secs))?
     .map_err(ClaudeError::SpawnFailed)?;
 
+    #[cfg(not(target_os = "macos"))]
+    let output = timeout(
+        timeout_duration,
+        Command::new("script")
+            .arg("-q")
+            .arg("-c")
+            .arg(&claude_cmd)
+            .arg("/dev/null")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| ClaudeError::Timeout(timeout_secs))?
+    .map_err(ClaudeError::SpawnFailed)?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&prompt_file);
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let code = output.status.code().unwrap_or(-1);
@@ -102,7 +139,83 @@ pub async fn run_claude(prompt: &str) -> Result<String, ClaudeError> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    
+    // Strip ANSI escape codes added by the script TTY wrapper
+    let stdout = strip_ansi_codes(&stdout);
     Ok(stdout)
+}
+
+/// Strip ANSI escape codes from a string.
+/// The `script` command adds terminal control sequences that we need to remove.
+fn strip_ansi_codes(s: &str) -> String {
+    // Use regex-like state machine to strip all ANSI sequences
+    // Patterns: ESC [ ... letter, ESC ] ... BEL, ESC [ ? ... letter
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            // ESC character - start of escape sequence
+            i += 1;
+            if i >= bytes.len() {
+                break;
+            }
+            
+            match bytes[i] {
+                b'[' => {
+                    // CSI sequence: ESC [ (params) (letter)
+                    i += 1;
+                    // Skip until we hit a letter (0x40-0x7E)
+                    while i < bytes.len() {
+                        let b = bytes[i];
+                        i += 1;
+                        if (0x40..=0x7E).contains(&b) {
+                            break;
+                        }
+                    }
+                }
+                b']' => {
+                    // OSC sequence: ESC ] ... BEL or ESC ] ... ESC \
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == 0x07 {
+                            // BEL terminates OSC
+                            i += 1;
+                            break;
+                        } else if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                            // ST (ESC \) terminates OSC
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                b'<' => {
+                    // Private sequence ESC < ... - skip to end
+                    i += 1;
+                    while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                    if i < bytes.len() {
+                        i += 1; // skip terminating letter
+                    }
+                }
+                _ => {
+                    // Other ESC sequences - skip next char
+                    i += 1;
+                }
+            }
+        } else if bytes[i] == b'\r' {
+            // Skip carriage returns
+            i += 1;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    
+    result
 }
 
 #[cfg(test)]
@@ -312,10 +425,10 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_subprocess_non_utf8_stdout_handled() {
-        // printf outputs raw bytes - \xFF is invalid UTF-8
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg("printf 'valid\\xFFtext'")
+        // Use /usr/bin/printf to ensure we get raw bytes (not shell built-in)
+        // \xFF is invalid UTF-8 (it's a continuation byte without a start byte)
+        let output = Command::new("/usr/bin/printf")
+            .arg("valid\\xFFtext")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -332,8 +445,14 @@ mod tests {
 
         // from_utf8_lossy should handle it gracefully (replaces invalid bytes)
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("valid"), "Should contain valid text before invalid byte");
-        assert!(stdout.contains("text"), "Should contain valid text after invalid byte");
+        assert!(
+            stdout.contains("valid"),
+            "Should contain valid text before invalid byte"
+        );
+        assert!(
+            stdout.contains("text"),
+            "Should contain valid text after invalid byte"
+        );
         assert!(
             stdout.contains('\u{FFFD}'),
             "Should contain Unicode replacement character for invalid bytes"
@@ -345,9 +464,11 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_subprocess_non_utf8_stderr_handled() {
+        // Use /usr/bin/printf to ensure we get raw bytes
+        // Redirect to stderr and exit with error code
         let output = Command::new("sh")
             .arg("-c")
-            .arg("printf 'error\\xFE\\xFFmsg' >&2; exit 1")
+            .arg("/usr/bin/printf 'error\\xFE\\xFFmsg' >&2; exit 1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -358,8 +479,14 @@ mod tests {
 
         // from_utf8_lossy should handle invalid UTF-8 gracefully
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("error"), "Should contain text before invalid bytes");
-        assert!(stderr.contains("msg"), "Should contain text after invalid bytes");
+        assert!(
+            stderr.contains("error"),
+            "Should contain text before invalid bytes"
+        );
+        assert!(
+            stderr.contains("msg"),
+            "Should contain text after invalid bytes"
+        );
 
         // Error should be constructable with lossy string
         let error = ClaudeError::NonZeroExit {
@@ -378,7 +505,10 @@ mod tests {
         // Test the pattern: if a command's --version returns non-zero, it should be treated as not installed
         // We use 'false' as a stand-in since it always returns non-zero
 
-        let version_check = Command::new("false").output().await.expect("failed to run false");
+        let version_check = Command::new("false")
+            .output()
+            .await
+            .expect("failed to run false");
 
         assert!(!version_check.status.success());
 
@@ -428,5 +558,100 @@ mod tests {
 
         assert!(stdout.contains("stdout content"));
         assert!(stderr.contains("stderr content"));
+    }
+
+    // ============================================
+    // ANSI Escape Code Stripping Tests
+    // ============================================
+
+    /// Test that plain text without ANSI codes passes through unchanged.
+    #[test]
+    fn test_strip_ansi_plain_text() {
+        let input = "Hello, World!";
+        assert_eq!(strip_ansi_codes(input), "Hello, World!");
+    }
+
+    /// Test that simple CSI color codes are removed.
+    #[test]
+    fn test_strip_ansi_color_codes() {
+        // Red text: ESC[31m ... ESC[0m
+        let input = "\x1b[31mRed text\x1b[0m";
+        assert_eq!(strip_ansi_codes(input), "Red text");
+    }
+
+    /// Test that multiple ANSI codes in sequence are all removed.
+    #[test]
+    fn test_strip_ansi_multiple_codes() {
+        // Bold + Red + text + Reset
+        let input = "\x1b[1m\x1b[31mBold Red\x1b[0m normal";
+        assert_eq!(strip_ansi_codes(input), "Bold Red normal");
+    }
+
+    /// Test that cursor movement codes are removed.
+    #[test]
+    fn test_strip_ansi_cursor_codes() {
+        // Cursor up 2 lines: ESC[2A
+        let input = "line1\x1b[2Aline2";
+        assert_eq!(strip_ansi_codes(input), "line1line2");
+    }
+
+    /// Test that private mode sequences (ESC[?...) are removed.
+    #[test]
+    fn test_strip_ansi_private_modes() {
+        // Enable/disable cursor: ESC[?25h ESC[?25l
+        let input = "\x1b[?25hvisible\x1b[?25l";
+        assert_eq!(strip_ansi_codes(input), "visible");
+    }
+
+    /// Test that OSC sequences (ESC]...) with BEL terminator are removed.
+    #[test]
+    fn test_strip_ansi_osc_bel() {
+        // Set window title: ESC]0;title BEL
+        let input = "\x1b]0;Window Title\x07content";
+        assert_eq!(strip_ansi_codes(input), "content");
+    }
+
+    /// Test that carriage returns are removed.
+    #[test]
+    fn test_strip_ansi_carriage_return() {
+        let input = "line1\r\nline2\rline3";
+        assert_eq!(strip_ansi_codes(input), "line1\nline2line3");
+    }
+
+    /// Test real-world Claude Code output pattern.
+    #[test]
+    fn test_strip_ansi_claude_output() {
+        // Simulates the escape sequences added by script TTY wrapper
+        let input = "{\"result\":\"test\"}\x1b[?1004l\x1b[?2004l\x1b[?25h\x1b]9;4;0;\x07\x1b[?25h";
+        assert_eq!(strip_ansi_codes(input), "{\"result\":\"test\"}");
+    }
+
+    /// Test that JSON content is preserved while ANSI codes are stripped.
+    #[test]
+    fn test_strip_ansi_preserves_json() {
+        let json = r#"{"subject": "test", "body": "content with\nnewlines"}"#;
+        let input = format!("\x1b[32m{}\x1b[0m\r\n", json);
+        assert_eq!(strip_ansi_codes(&input), format!("{}\n", json));
+    }
+
+    /// Test ESC < sequences (less common but seen in some terminals).
+    #[test]
+    fn test_strip_ansi_esc_less_than() {
+        let input = "\x1b<utext\x1b<v";
+        // ESC < followed by letter should be stripped
+        assert_eq!(strip_ansi_codes(input), "text");
+    }
+
+    /// Test empty string.
+    #[test]
+    fn test_strip_ansi_empty() {
+        assert_eq!(strip_ansi_codes(""), "");
+    }
+
+    /// Test string with only ANSI codes.
+    #[test]
+    fn test_strip_ansi_only_codes() {
+        let input = "\x1b[31m\x1b[0m\x1b[?25h";
+        assert_eq!(strip_ansi_codes(input), "");
     }
 }

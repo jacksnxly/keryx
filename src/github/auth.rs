@@ -99,11 +99,7 @@ async fn get_token_from_gh_cli() -> Option<String> {
 /// Returns the token if the output is valid, None otherwise.
 pub fn parse_gh_auth_token_output(output: &str) -> Option<String> {
     let token = output.trim().to_string();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
+    if token.is_empty() { None } else { Some(token) }
 }
 
 #[cfg(test)]
@@ -143,10 +139,7 @@ mod tests {
     #[test]
     fn test_fallback_to_gh_token_when_github_token_unset() {
         temp_env::with_vars(
-            [
-                ("GITHUB_TOKEN", None),
-                ("GH_TOKEN", Some("gh_token_value")),
-            ],
+            [("GITHUB_TOKEN", None), ("GH_TOKEN", Some("gh_token_value"))],
             || {
                 let result = get_token_from_env();
                 assert!(result.is_ok());
@@ -157,22 +150,16 @@ mod tests {
 
     #[test]
     fn test_empty_string_tokens_are_rejected() {
-        temp_env::with_vars(
-            [("GITHUB_TOKEN", Some("")), ("GH_TOKEN", Some(""))],
-            || {
-                let result = get_token_from_env();
-                assert!(result.is_err());
-            },
-        );
+        temp_env::with_vars([("GITHUB_TOKEN", Some("")), ("GH_TOKEN", Some(""))], || {
+            let result = get_token_from_env();
+            assert!(result.is_err());
+        });
     }
 
     #[test]
     fn test_error_when_no_tokens_available() {
         temp_env::with_vars(
-            [
-                ("GITHUB_TOKEN", None::<&str>),
-                ("GH_TOKEN", None::<&str>),
-            ],
+            [("GITHUB_TOKEN", None::<&str>), ("GH_TOKEN", None::<&str>)],
             || {
                 let result = get_token_from_env();
                 assert!(result.is_err());

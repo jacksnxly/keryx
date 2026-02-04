@@ -99,7 +99,7 @@ impl EntryEvidence {
         // Penalty for count mismatches or unverifiable counts
         for check in &self.count_checks {
             match check.matches() {
-                Some(true) => {} // Verified match - no penalty
+                Some(true) => {}            // Verified match - no penalty
                 Some(false) => score -= 20, // Verified mismatch - significant penalty
                 None => score -= 10, // Could not verify - smaller penalty (suspicious but not proven wrong)
             }
@@ -399,7 +399,9 @@ impl VerificationEvidence {
 
     /// Check if any entries have low confidence.
     pub fn has_low_confidence_entries(&self) -> bool {
-        self.entries.iter().any(|e| e.confidence() == Confidence::Low)
+        self.entries
+            .iter()
+            .any(|e| e.confidence() == Confidence::Low)
     }
 
     /// Get entries with low confidence.
@@ -420,15 +422,13 @@ mod tests {
         EntryEvidence::new(
             description.to_string(),
             ChangelogCategory::Added,
-            vec![
-                KeywordMatch {
-                    keyword: "test".to_string(),
-                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
-                    occurrence_count: Some(10),
-                    sample_lines: Some(vec![]),
-                    appears_complete: true,
-                },
-            ],
+            vec![KeywordMatch {
+                keyword: "test".to_string(),
+                files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                occurrence_count: Some(10),
+                sample_lines: Some(vec![]),
+                appears_complete: true,
+            }],
             vec![],
             vec![],
             ScanSummary::default(),
@@ -440,15 +440,13 @@ mod tests {
         EntryEvidence::new(
             description.to_string(),
             ChangelogCategory::Added,
-            vec![
-                KeywordMatch {
-                    keyword: "test".to_string(),
-                    files_found: vec!["a.rs".to_string()],
-                    occurrence_count: Some(1),
-                    sample_lines: Some(vec![]),
-                    appears_complete: false,
-                },
-            ],
+            vec![KeywordMatch {
+                keyword: "test".to_string(),
+                files_found: vec!["a.rs".to_string()],
+                occurrence_count: Some(1),
+                sample_lines: Some(vec![]),
+                appears_complete: false,
+            }],
             vec![],
             vec![],
             ScanSummary::default(),
@@ -460,16 +458,14 @@ mod tests {
         EntryEvidence::new(
             description.to_string(),
             ChangelogCategory::Added,
-            vec![],  // No keyword matches
+            vec![], // No keyword matches
             vec![],
-            vec![
-                StubIndicator {
-                    file: "a.rs".to_string(),
-                    line: 10,
-                    indicator: StubType::Todo,
-                    context: "// TODO".to_string(),
-                },
-            ],
+            vec![StubIndicator {
+                file: "a.rs".to_string(),
+                line: 10,
+                indicator: StubType::Todo,
+                context: "// TODO".to_string(),
+            }],
             ScanSummary::default(),
         )
     }
@@ -535,8 +531,12 @@ mod tests {
     #[test]
     fn test_has_low_confidence_entries_false_when_all_high() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_high_confidence_entry("Feature A"));
-        evidence.entries.push(create_high_confidence_entry("Feature B"));
+        evidence
+            .entries
+            .push(create_high_confidence_entry("Feature A"));
+        evidence
+            .entries
+            .push(create_high_confidence_entry("Feature B"));
 
         assert!(!evidence.has_low_confidence_entries());
     }
@@ -544,8 +544,12 @@ mod tests {
     #[test]
     fn test_has_low_confidence_entries_false_when_all_medium() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_medium_confidence_entry("Feature A"));
-        evidence.entries.push(create_medium_confidence_entry("Feature B"));
+        evidence
+            .entries
+            .push(create_medium_confidence_entry("Feature A"));
+        evidence
+            .entries
+            .push(create_medium_confidence_entry("Feature B"));
 
         assert!(!evidence.has_low_confidence_entries());
     }
@@ -553,8 +557,12 @@ mod tests {
     #[test]
     fn test_has_low_confidence_entries_true_when_has_low() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_high_confidence_entry("Feature A"));
-        evidence.entries.push(create_low_confidence_entry("Feature B"));
+        evidence
+            .entries
+            .push(create_high_confidence_entry("Feature A"));
+        evidence
+            .entries
+            .push(create_low_confidence_entry("Feature B"));
 
         assert!(evidence.has_low_confidence_entries());
     }
@@ -562,8 +570,12 @@ mod tests {
     #[test]
     fn test_has_low_confidence_entries_true_when_all_low() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_low_confidence_entry("Feature A"));
-        evidence.entries.push(create_low_confidence_entry("Feature B"));
+        evidence
+            .entries
+            .push(create_low_confidence_entry("Feature A"));
+        evidence
+            .entries
+            .push(create_low_confidence_entry("Feature B"));
 
         assert!(evidence.has_low_confidence_entries());
     }
@@ -571,8 +583,12 @@ mod tests {
     #[test]
     fn test_low_confidence_entries_empty_when_none() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_high_confidence_entry("Feature A"));
-        evidence.entries.push(create_medium_confidence_entry("Feature B"));
+        evidence
+            .entries
+            .push(create_high_confidence_entry("Feature A"));
+        evidence
+            .entries
+            .push(create_medium_confidence_entry("Feature B"));
 
         let low_entries = evidence.low_confidence_entries();
         assert!(low_entries.is_empty());
@@ -581,10 +597,18 @@ mod tests {
     #[test]
     fn test_low_confidence_entries_returns_correct_entries() {
         let mut evidence = VerificationEvidence::empty();
-        evidence.entries.push(create_high_confidence_entry("High confidence"));
-        evidence.entries.push(create_low_confidence_entry("Low confidence A"));
-        evidence.entries.push(create_medium_confidence_entry("Medium confidence"));
-        evidence.entries.push(create_low_confidence_entry("Low confidence B"));
+        evidence
+            .entries
+            .push(create_high_confidence_entry("High confidence"));
+        evidence
+            .entries
+            .push(create_low_confidence_entry("Low confidence A"));
+        evidence
+            .entries
+            .push(create_medium_confidence_entry("Medium confidence"));
+        evidence
+            .entries
+            .push(create_low_confidence_entry("Low confidence B"));
 
         let low_entries = evidence.low_confidence_entries();
         assert_eq!(low_entries.len(), 2);
@@ -612,7 +636,11 @@ mod tests {
             actual_count: Some(5),
             source_location: None,
         };
-        assert_eq!(check.matches(), Some(true), "Equal counts should return Some(true)");
+        assert_eq!(
+            check.matches(),
+            Some(true),
+            "Equal counts should return Some(true)"
+        );
     }
 
     #[test]
@@ -623,7 +651,11 @@ mod tests {
             actual_count: Some(5),
             source_location: None,
         };
-        assert_eq!(check.matches(), Some(false), "Different counts should return Some(false)");
+        assert_eq!(
+            check.matches(),
+            Some(false),
+            "Different counts should return Some(false)"
+        );
     }
 
     #[test]
@@ -634,7 +666,11 @@ mod tests {
             actual_count: None,
             source_location: None,
         };
-        assert_eq!(check.matches(), None, "Unknown actual count should return None (could not verify)");
+        assert_eq!(
+            check.matches(),
+            None,
+            "Unknown actual count should return None (could not verify)"
+        );
     }
 
     #[test]
@@ -645,7 +681,11 @@ mod tests {
             actual_count: Some(3),
             source_location: None,
         };
-        assert_eq!(check.matches(), None, "Unknown claimed count should return None (could not verify)");
+        assert_eq!(
+            check.matches(),
+            None,
+            "Unknown claimed count should return None (could not verify)"
+        );
     }
 
     #[test]
@@ -656,7 +696,11 @@ mod tests {
             actual_count: None,
             source_location: None,
         };
-        assert_eq!(check.matches(), None, "Both unknown should return None (could not verify)");
+        assert_eq!(
+            check.matches(),
+            None,
+            "Both unknown should return None (could not verify)"
+        );
     }
 
     #[test]
@@ -673,7 +717,8 @@ mod tests {
         // matches should be false (3 != 5) - verified mismatch
         assert!(
             json.contains(r#""matches":false"#),
-            "JSON should include computed matches field as false: {}", json
+            "JSON should include computed matches field as false: {}",
+            json
         );
         assert!(json.contains(r#""claimed_text":"3 items""#));
     }
@@ -692,7 +737,8 @@ mod tests {
         // matches should be true (5 == 5) - verified match
         assert!(
             json.contains(r#""matches":true"#),
-            "JSON should include computed matches field as true: {}", json
+            "JSON should include computed matches field as true: {}",
+            json
         );
     }
 
@@ -710,7 +756,8 @@ mod tests {
         // matches should be null (could not verify)
         assert!(
             json.contains(r#""matches":null"#),
-            "JSON should include matches as null when unverifiable: {}", json
+            "JSON should include matches as null when unverifiable: {}",
+            json
         );
     }
 
@@ -805,15 +852,13 @@ mod tests {
         let entry_with_none = EntryEvidence::new(
             "Feature with failed count".to_string(),
             ChangelogCategory::Added,
-            vec![
-                KeywordMatch {
-                    keyword: "test".to_string(),
-                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
-                    occurrence_count: None, // Counting failed
-                    sample_lines: Some(vec![]),
-                    appears_complete: false,
-                },
-            ],
+            vec![KeywordMatch {
+                keyword: "test".to_string(),
+                files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                occurrence_count: None, // Counting failed
+                sample_lines: Some(vec![]),
+                appears_complete: false,
+            }],
             vec![],
             vec![],
             ScanSummary::default(),
@@ -823,15 +868,13 @@ mod tests {
         let entry_with_count = EntryEvidence::new(
             "Feature with count".to_string(),
             ChangelogCategory::Added,
-            vec![
-                KeywordMatch {
-                    keyword: "test".to_string(),
-                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
-                    occurrence_count: Some(5), // Counted 5 occurrences
-                    sample_lines: Some(vec![]),
-                    appears_complete: false,
-                },
-            ],
+            vec![KeywordMatch {
+                keyword: "test".to_string(),
+                files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                occurrence_count: Some(5), // Counted 5 occurrences
+                sample_lines: Some(vec![]),
+                appears_complete: false,
+            }],
             vec![],
             vec![],
             ScanSummary::default(),
@@ -846,8 +889,16 @@ mod tests {
         let conf_count = entry_with_count.confidence();
 
         // Both should be Medium in this case, but entry_with_count has higher score
-        assert_eq!(conf_none, Confidence::Medium, "None count should be Medium (55)");
-        assert_eq!(conf_count, Confidence::Medium, "Some(5) count should be Medium (65)");
+        assert_eq!(
+            conf_none,
+            Confidence::Medium,
+            "None count should be Medium (55)"
+        );
+        assert_eq!(
+            conf_count,
+            Confidence::Medium,
+            "Some(5) count should be Medium (65)"
+        );
     }
 
     #[test]
@@ -856,15 +907,13 @@ mod tests {
         let entry = EntryEvidence::new(
             "Feature with zero count".to_string(),
             ChangelogCategory::Added,
-            vec![
-                KeywordMatch {
-                    keyword: "test".to_string(),
-                    files_found: vec!["a.rs".to_string()],
-                    occurrence_count: Some(0), // Counted zero occurrences
-                    sample_lines: Some(vec![]),
-                    appears_complete: true,
-                },
-            ],
+            vec![KeywordMatch {
+                keyword: "test".to_string(),
+                files_found: vec!["a.rs".to_string()],
+                occurrence_count: Some(0), // Counted zero occurrences
+                sample_lines: Some(vec![]),
+                appears_complete: true,
+            }],
             vec![],
             vec![],
             ScanSummary::default(),
@@ -938,15 +987,13 @@ mod tests {
         let entry_no_failures = EntryEvidence::new(
             "Test feature".to_string(),
             ChangelogCategory::Added,
-            vec![
-                KeywordMatch {
-                    keyword: "test".to_string(),
-                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
-                    occurrence_count: Some(10),
-                    sample_lines: Some(vec![]),
-                    appears_complete: true,
-                },
-            ],
+            vec![KeywordMatch {
+                keyword: "test".to_string(),
+                files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                occurrence_count: Some(10),
+                sample_lines: Some(vec![]),
+                appears_complete: true,
+            }],
             vec![],
             vec![],
             ScanSummary::default(),
@@ -966,15 +1013,13 @@ mod tests {
         let entry_with_failures = EntryEvidence::new(
             "Test feature".to_string(),
             ChangelogCategory::Added,
-            vec![
-                KeywordMatch {
-                    keyword: "test".to_string(),
-                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
-                    occurrence_count: Some(10),
-                    sample_lines: Some(vec![]),
-                    appears_complete: true,
-                },
-            ],
+            vec![KeywordMatch {
+                keyword: "test".to_string(),
+                files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                occurrence_count: Some(10),
+                sample_lines: Some(vec![]),
+                appears_complete: true,
+            }],
             vec![],
             vec![],
             summary_with_failures,
@@ -998,7 +1043,7 @@ mod tests {
         let entry = EntryEvidence::new(
             "Test feature".to_string(),
             ChangelogCategory::Added,
-            vec![],  // No keyword matches (all failed)
+            vec![], // No keyword matches (all failed)
             vec![],
             vec![],
             summary,
@@ -1052,10 +1097,7 @@ mod tests {
 
     #[test]
     fn test_stub_type_serialization() {
-        assert_eq!(
-            serde_json::to_string(&StubType::Todo).unwrap(),
-            "\"todo\""
-        );
+        assert_eq!(serde_json::to_string(&StubType::Todo).unwrap(), "\"todo\"");
         assert_eq!(
             serde_json::to_string(&StubType::Fixme).unwrap(),
             "\"fixme\""

@@ -2,37 +2,39 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use git2::Repository;
 use semver::Version;
-use tracing::{debug, warn, Level};
+use tokio::process::Command;
+use tracing::{Level, debug, warn};
 use tracing_subscriber::FmtSubscriber;
 
+use keryx::changelog::format::CHANGELOG_HEADER;
 use keryx::changelog::{parser::read_changelog, write_changelog, writer::generate_summary};
 use keryx::commit::{
-    analyze_split, collect_diff, collect_diff_for_paths, generate_commit_message,
-    stage_and_commit, stage_paths_and_commit, ChangedFile, DiffSummary, SPLIT_ANALYSIS_THRESHOLD,
+    ChangedFile, DiffSummary, SPLIT_ANALYSIS_THRESHOLD, analyze_split, collect_diff,
+    collect_diff_for_paths, generate_commit_message, stage_and_commit, stage_paths_and_commit,
+};
+use keryx::git::{
+    commits::fetch_commits,
+    range::{find_root_commit, resolve_range},
+    tags::{get_all_tags, get_latest_tag},
+};
+use keryx::github::{
+    auth::get_github_token,
+    prs::{fetch_merged_prs, parse_github_remote},
 };
 use keryx::llm::{
-    build_prompt,
-    build_verification_prompt,
-    ChangelogInput,
-    LlmCompletion,
-    LlmError,
-    LlmProviderError,
-    LlmRouter,
-    Provider,
-    ProviderSelection,
+    ChangelogInput, LlmCompletion, LlmError, LlmProviderError, LlmRouter, Provider,
+    ProviderSelection, build_prompt, build_verification_prompt,
 };
-use keryx::changelog::format::CHANGELOG_HEADER;
-use keryx::git::{commits::fetch_commits, range::{find_root_commit, resolve_range}, tags::{get_all_tags, get_latest_tag}};
-use keryx::github::{auth::get_github_token, prs::{fetch_merged_prs, parse_github_remote}};
 use keryx::verification::{check_ripgrep_installed, gather_verification_evidence};
-use keryx::version::{calculate_next_version, calculate_next_version_with_llm, VersionBumpInput};
+use keryx::version::{VersionBumpInput, calculate_next_version, calculate_next_version_with_llm};
 
 /// Result from the background update check.
 struct UpdateResult {
@@ -67,17 +69,34 @@ impl UpdateChecker {
                     if verbose {
                         // Provide actionable error messages based on error content
                         let error_str = e.to_string().to_lowercase();
-                        if error_str.contains("network") || error_str.contains("connection") || error_str.contains("dns") {
-                            warn!("Update check failed (network error): {}. Check your internet connection.", e);
+                        if error_str.contains("network")
+                            || error_str.contains("connection")
+                            || error_str.contains("dns")
+                        {
+                            warn!(
+                                "Update check failed (network error): {}. Check your internet connection.",
+                                e
+                            );
                         } else if error_str.contains("parse") || error_str.contains("version") {
-                            warn!("Update check failed (version parse error): {}. This may indicate a corrupted install.", e);
+                            warn!(
+                                "Update check failed (version parse error): {}. This may indicate a corrupted install.",
+                                e
+                            );
                         } else if error_str.contains("not found") || error_str.contains("404") {
-                            warn!("Update check failed (release not found): {}. No releases may be available yet.", e);
+                            warn!(
+                                "Update check failed (release not found): {}. No releases may be available yet.",
+                                e
+                            );
                         } else {
-                            warn!("Update check failed: {}. Run with --verbose for more details.", e);
+                            warn!(
+                                "Update check failed: {}. Run with --verbose for more details.",
+                                e
+                            );
                         }
                     }
-                    UpdateResult { update_available: false }
+                    UpdateResult {
+                        update_available: false,
+                    }
                 }
             };
 
@@ -221,6 +240,17 @@ enum Commands {
         #[arg(long)]
         no_split: bool,
     },
+
+    /// Generate a commit message and push the commit to the remote
+    Push {
+        /// Print the generated message to stdout without committing
+        #[arg(long)]
+        message_only: bool,
+
+        /// Skip split analysis, always create a single commit
+        #[arg(long)]
+        no_split: bool,
+    },
 }
 
 /// Configuration for the commit command.
@@ -231,6 +261,14 @@ struct CommitConfig {
     dry_run: bool,
     /// Enable verbose/debug logging.
     verbose: bool,
+}
+
+/// Result of running the commit flow.
+enum CommitOutcome {
+    /// No commit was created (message-only or dry run).
+    NoCommit,
+    /// One or more commits were created.
+    Committed(Vec<git2::Oid>),
 }
 
 /// Configuration for init commands, avoiding too_many_arguments clippy warning.
@@ -256,7 +294,8 @@ struct InitConfig {
 impl InitConfig {
     /// Create an `InitConfig` from the CLI arguments.
     fn from_cli(cli: &Cli) -> Self {
-        let provider_selection = cli.provider
+        let provider_selection = cli
+            .provider
             .clone()
             .map(Provider::from)
             .map(ProviderSelection::from_primary)
@@ -280,14 +319,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize tracing subscriber for logging
-    let log_level = if cli.verbose { Level::DEBUG } else { Level::WARN };
+    let log_level = if cli.verbose {
+        Level::DEBUG
+    } else {
+        Level::WARN
+    };
     let subscriber = FmtSubscriber::builder()
         .with_max_level(log_level)
         .with_writer(std::io::stderr)
         .without_time()
         .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set tracing subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     // Start background update check (non-blocking)
     let update_checker = UpdateChecker::start(cli.verbose);
@@ -295,17 +337,36 @@ async fn main() -> Result<()> {
     // Run the requested command
     let result = match cli.command {
         Some(Commands::Update) => run_update().await,
-        Some(Commands::Init { unreleased, from_history }) => {
+        Some(Commands::Init {
+            unreleased,
+            from_history,
+        }) => {
             let config = InitConfig::from_cli(&cli);
             run_init(&config, unreleased, from_history).await
         }
-        Some(Commands::Commit { message_only, no_split }) => {
+        Some(Commands::Commit {
+            message_only,
+            no_split,
+        }) => {
             let config = CommitConfig {
                 message_only,
                 dry_run: cli.dry_run,
                 verbose: cli.verbose,
             };
-            run_commit(&config, no_split, cli.provider).await
+            run_commit(&config, no_split, cli.provider)
+                .await
+                .map(|_| ())
+        }
+        Some(Commands::Push {
+            message_only,
+            no_split,
+        }) => {
+            let config = CommitConfig {
+                message_only,
+                dry_run: cli.dry_run,
+                verbose: cli.verbose,
+            };
+            run_push(&config, no_split, cli.provider).await
         }
         None => run_generate(cli).await,
     };
@@ -336,7 +397,9 @@ fn print_update_notification() {
     eprintln!();
     eprintln!("\x1b[33m╭───────────────────────────────────────────────╮\x1b[0m");
     eprintln!("\x1b[33m│\x1b[0m  A new version of keryx is available!        \x1b[33m│\x1b[0m");
-    eprintln!("\x1b[33m│\x1b[0m  Run \x1b[36mkeryx update\x1b[0m to upgrade                 \x1b[33m│\x1b[0m");
+    eprintln!(
+        "\x1b[33m│\x1b[0m  Run \x1b[36mkeryx update\x1b[0m to upgrade                 \x1b[33m│\x1b[0m"
+    );
     eprintln!("\x1b[33m╰───────────────────────────────────────────────╯\x1b[0m");
     eprintln!();
 }
@@ -347,7 +410,8 @@ async fn run_update() -> Result<()> {
 
     println!("Checking for updates...");
 
-    let current_version: Version = env!("CARGO_PKG_VERSION").parse()
+    let current_version: Version = env!("CARGO_PKG_VERSION")
+        .parse()
         .context("Failed to parse current version")?;
 
     let mut updater = AxoUpdater::new_for("keryx");
@@ -359,15 +423,23 @@ async fn run_update() -> Result<()> {
     // Use async version since we're in a tokio runtime
     match updater.run().await {
         Ok(Some(result)) => {
-            println!("\n\x1b[32m✓ Successfully updated keryx to v{}\x1b[0m", result.new_version);
+            println!(
+                "\n\x1b[32m✓ Successfully updated keryx to v{}\x1b[0m",
+                result.new_version
+            );
         }
         Ok(None) => {
-            println!("keryx is already up to date (v{})", env!("CARGO_PKG_VERSION"));
+            println!(
+                "keryx is already up to date (v{})",
+                env!("CARGO_PKG_VERSION")
+            );
         }
         Err(e) => {
             eprintln!("\x1b[31mFailed to update: {}\x1b[0m", e);
             eprintln!("\nYou can manually update by running:");
-            eprintln!("  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jacksnxly/keryx/releases/latest/download/keryx-installer.sh | sh");
+            eprintln!(
+                "  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jacksnxly/keryx/releases/latest/download/keryx-installer.sh | sh"
+            );
             return Err(e.into());
         }
     }
@@ -426,17 +498,13 @@ async fn run_init(config: &InitConfig, unreleased: bool, from_history: bool) -> 
 
 /// Create a basic empty changelog with headers.
 fn run_init_basic(output: &PathBuf, dry_run: bool) -> Result<()> {
-    let content = format!(
-        "{}## [Unreleased]\n",
-        CHANGELOG_HEADER
-    );
+    let content = format!("{}## [Unreleased]\n", CHANGELOG_HEADER);
 
     if dry_run {
         println!("--- Dry Run Output ---\n");
         println!("{}", content);
     } else {
-        std::fs::write(output, &content)
-            .context("Failed to write changelog")?;
+        std::fs::write(output, &content).context("Failed to write changelog")?;
         println!("✓ Created {} with [Unreleased] section", output.display());
     }
 
@@ -444,12 +512,15 @@ fn run_init_basic(output: &PathBuf, dry_run: bool) -> Result<()> {
 }
 
 /// Create changelog with all commits in [Unreleased] section.
-async fn run_init_unreleased(repo: &Repository, config: &InitConfig, llm: &mut LlmRouter) -> Result<()> {
+async fn run_init_unreleased(
+    repo: &Repository,
+    config: &InitConfig,
+    llm: &mut LlmRouter,
+) -> Result<()> {
     println!("Analyzing all commits for [Unreleased] section...");
 
     // Get all commits from root to HEAD (bypassing tag-based resolution)
-    let root_oid = find_root_commit(repo, config.strict)
-        .context("Failed to find root commit")?;
+    let root_oid = find_root_commit(repo, config.strict).context("Failed to find root commit")?;
     let head_oid = repo.head()?.peel_to_commit()?.id();
 
     let commits = fetch_commits(repo, root_oid, head_oid, config.strict)
@@ -493,7 +564,9 @@ async fn run_init_unreleased(repo: &Repository, config: &InitConfig, llm: &mut L
         llm.primary(),
         llm.fallback()
     );
-    let draft_completion = llm.generate(&prompt).await
+    let draft_completion = llm
+        .generate(&prompt)
+        .await
         .map_err(|e| handle_llm_error(e, config.verbose))?;
     report_llm_fallback_if_any(&draft_completion, config.verbose);
     let draft_output = draft_completion.output;
@@ -503,9 +576,9 @@ async fn run_init_unreleased(repo: &Repository, config: &InitConfig, llm: &mut L
         debug!("Skipping verification (--no-verify flag)");
         draft_output
     } else {
-        let repo_path = repo.workdir().context(
-            "Cannot verify in a bare repository. Use --no-verify to skip verification."
-        )?;
+        let repo_path = repo
+            .workdir()
+            .context("Cannot verify in a bare repository. Use --no-verify to skip verification.")?;
         verify_changelog_entries(&draft_output, repo_path, config.verbose, llm).await?
     };
 
@@ -532,8 +605,7 @@ async fn run_init_unreleased(repo: &Repository, config: &InitConfig, llm: &mut L
         println!("\n--- Dry Run Output ---\n");
         println!("{}", content);
     } else {
-        std::fs::write(&config.output, &content)
-            .context("Failed to write changelog")?;
+        std::fs::write(&config.output, &content).context("Failed to write changelog")?;
         println!(
             "✓ Created {} with {} entries in [Unreleased]",
             config.output.display(),
@@ -548,7 +620,11 @@ async fn run_init_unreleased(repo: &Repository, config: &InitConfig, llm: &mut L
 ///
 /// Note: Verification is not yet implemented for this path as it processes
 /// multiple versions. The regular `keryx` command includes verification.
-async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut LlmRouter) -> Result<()> {
+async fn run_init_from_history(
+    repo: &Repository,
+    config: &InitConfig,
+    llm: &mut LlmRouter,
+) -> Result<()> {
     if !config.no_verify {
         eprintln!(
             "\x1b[33m⚠ Note: Verification is not yet supported for --from-history.\n  \
@@ -571,9 +647,13 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut
         return run_init_basic(&config.output, config.dry_run);
     }
 
-    println!("Found {} version tags: {}",
+    println!(
+        "Found {} version tags: {}",
         tags.len(),
-        tags.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(", ")
+        tags.iter()
+            .map(|t| t.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     // Fetch PRs once if not disabled
@@ -606,7 +686,10 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut
                     if config.strict {
                         bail!("Failed to fetch commits for tag {}: {}", tag.name, e);
                     }
-                    warn!("Failed to fetch commits for tag {}: {}. Section may be incomplete.", tag.name, e);
+                    warn!(
+                        "Failed to fetch commits for tag {}: {}. Section may be incomplete.",
+                        tag.name, e
+                    );
                     Vec::new()
                 }
             }
@@ -618,7 +701,10 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut
                     if config.strict {
                         bail!("Failed to find root commit for tag {}: {}", tag.name, e);
                     }
-                    warn!("Failed to find root commit for tag {}: {}. Using tag commit as fallback.", tag.name, e);
+                    warn!(
+                        "Failed to find root commit for tag {}: {}. Using tag commit as fallback.",
+                        tag.name, e
+                    );
                     tag.oid
                 }
             };
@@ -628,7 +714,10 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut
                     if config.strict {
                         bail!("Failed to fetch commits for tag {}: {}", tag.name, e);
                     }
-                    warn!("Failed to fetch commits for tag {}: {}. Section may be incomplete.", tag.name, e);
+                    warn!(
+                        "Failed to fetch commits for tag {}: {}. Section may be incomplete.",
+                        tag.name, e
+                    );
                     Vec::new()
                 }
             }
@@ -651,18 +740,25 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut
                     .and_then(|t| t.version.clone())
             }),
             repository_name: repo_name.clone(),
-            project_description: if prev_oid.is_none() { read_cargo_description() } else { None },
+            project_description: if prev_oid.is_none() {
+                read_cargo_description()
+            } else {
+                None
+            },
             cli_features: None,
         };
 
         let prompt = build_prompt(&input).context("Failed to build prompt")?;
-        let draft_completion = llm.generate(&prompt).await
+        let draft_completion = llm
+            .generate(&prompt)
+            .await
             .map_err(|e| handle_llm_error(e, config.verbose))?;
         report_llm_fallback_if_any(&draft_completion, config.verbose);
         let changelog_output = draft_completion.output;
 
         // Get tag date from commit
-        let tag_date = repo.find_commit(tag.oid)
+        let tag_date = repo
+            .find_commit(tag.oid)
             .map(|c| {
                 let time = c.time();
                 chrono::DateTime::from_timestamp(time.seconds(), 0)
@@ -700,14 +796,20 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut
             if config.strict {
                 bail!("Failed to fetch unreleased commits: {}", e);
             }
-            warn!("Failed to fetch unreleased commits: {}. Unreleased section may be incomplete.", e);
+            warn!(
+                "Failed to fetch unreleased commits: {}. Unreleased section may be incomplete.",
+                e
+            );
             Vec::new()
         }
     };
 
     let mut unreleased_section = String::new();
     if !unreleased_commits.is_empty() {
-        println!("Processing {} unreleased commits...", unreleased_commits.len());
+        println!(
+            "Processing {} unreleased commits...",
+            unreleased_commits.len()
+        );
 
         let input = ChangelogInput {
             commits: unreleased_commits,
@@ -719,7 +821,9 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut
         };
 
         let prompt = build_prompt(&input)?;
-        let draft_completion = llm.generate(&prompt).await
+        let draft_completion = llm
+            .generate(&prompt)
+            .await
             .map_err(|e| handle_llm_error(e, config.verbose))?;
         report_llm_fallback_if_any(&draft_completion, config.verbose);
         let changelog_output = draft_completion.output;
@@ -751,9 +855,12 @@ async fn run_init_from_history(repo: &Repository, config: &InitConfig, llm: &mut
         println!("\n--- Dry Run Output ---\n");
         println!("{}", content);
     } else {
-        std::fs::write(&config.output, &content)
-            .context("Failed to write changelog")?;
-        println!("✓ Created {} with {} version(s)", config.output.display(), tags.len());
+        std::fs::write(&config.output, &content).context("Failed to write changelog")?;
+        println!(
+            "✓ Created {} with {} version(s)",
+            config.output.display(),
+            tags.len()
+        );
     }
 
     Ok(())
@@ -768,7 +875,7 @@ async fn run_commit(
     config: &CommitConfig,
     no_split: bool,
     provider_flag: Option<ProviderFlag>,
-) -> Result<()> {
+) -> Result<CommitOutcome> {
     let provider_selection = provider_flag
         .map(Provider::from)
         .map(ProviderSelection::from_primary)
@@ -798,7 +905,11 @@ async fn run_commit(
     println!(
         "Analyzing {} changed file{}...",
         diff.changed_files.len(),
-        if diff.changed_files.len() == 1 { "" } else { "s" }
+        if diff.changed_files.len() == 1 {
+            ""
+        } else {
+            "s"
+        }
     );
 
     let branch_name = repo
@@ -829,9 +940,7 @@ async fn run_commit(
             }
             Err(e) => {
                 warn!("Split analysis failed: {}", e.summary());
-                eprintln!(
-                    "\x1b[33m⚠ Split analysis failed, falling back to single commit\x1b[0m"
-                );
+                eprintln!("\x1b[33m⚠ Split analysis failed, falling back to single commit\x1b[0m");
                 if config.verbose {
                     eprintln!("  Details: {}", e.detailed());
                 }
@@ -852,10 +961,122 @@ async fn run_commit(
         Some(analysis) => {
             run_split_commits(&repo, &diff, &analysis, &branch_name, &mut llm, config).await
         }
-        None => {
-            run_single_commit(&repo, &diff, &branch_name, &mut llm, config).await
-        }
+        None => run_single_commit(&repo, &diff, &branch_name, &mut llm, config).await,
     }
+}
+
+/// Run the commit flow and push the resulting commit(s) to the remote.
+async fn run_push(
+    config: &CommitConfig,
+    no_split: bool,
+    provider_flag: Option<ProviderFlag>,
+) -> Result<()> {
+    let outcome = run_commit(config, no_split, provider_flag).await?;
+
+    let commit_count = match outcome {
+        CommitOutcome::NoCommit => return Ok(()),
+        CommitOutcome::Committed(oids) => oids.len(),
+    };
+
+    if commit_count == 0 {
+        return Ok(());
+    }
+
+    println!(
+        "Pushing {} commit{} to remote...",
+        commit_count,
+        if commit_count == 1 { "" } else { "s" }
+    );
+
+    push_to_remote(config.verbose).await?;
+
+    println!(
+        "\x1b[32m\u{2713} Pushed {} commit{} to remote\x1b[0m",
+        commit_count,
+        if commit_count == 1 { "" } else { "s" }
+    );
+
+    Ok(())
+}
+
+/// Push the current branch to its remote.
+///
+/// Following CLI best practices (clig.dev), this function:
+/// - Lets git push run first (respects push.default, push.autoSetupRemote)
+/// - Provides actionable error messages with fix commands on failure
+/// - Uses verbose mode for detailed debugging output
+async fn push_to_remote(verbose: bool) -> Result<()> {
+    // Get current branch name for actionable error messages
+    let branch_output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .await
+        .context("Failed to determine current branch")?;
+
+    if !branch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&branch_output.stderr);
+        bail!(
+            "Failed to determine current branch: {}",
+            stderr.trim().lines().next().unwrap_or("unknown error")
+        );
+    }
+
+    let branch_name = String::from_utf8_lossy(&branch_output.stdout)
+        .trim()
+        .to_string();
+
+    if verbose {
+        debug!("Current branch: {}", branch_name);
+        debug!("Running git push (respecting user's push.default config)");
+    }
+
+    // Let git push run - it respects push.default (simple, current, matching, etc.)
+    // and push.autoSetupRemote settings. Only provide guidance on failure.
+    let output = Command::new("git")
+        .arg("push")
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .context("Failed to run `git push`")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Provide actionable hints based on common failure patterns
+        let hint = if stderr.contains("no upstream branch")
+            || stderr.contains("has no upstream")
+            || stderr.contains("--set-upstream")
+        {
+            // No upstream configured and push.default requires it
+            format!(
+                "\n\nHint: No upstream branch configured for '{}'.\n  \
+                 To push and set upstream: git push -u origin {}\n  \
+                 Or enable auto-setup: git config --global push.autoSetupRemote true",
+                branch_name, branch_name
+            )
+        } else if stderr.contains("rejected") && stderr.contains("non-fast-forward") {
+            "\n\nHint: Remote has changes you don't have locally.\n  \
+             Pull first: git pull --rebase\n  \
+             Or force push: git push --force-with-lease"
+                .to_string()
+        } else if stderr.contains("Permission denied") || stderr.contains("403") {
+            "\n\nHint: Check your Git credentials or repository permissions.".to_string()
+        } else if stderr.contains("Could not resolve host") {
+            "\n\nHint: Check your network connection.".to_string()
+        } else {
+            String::new()
+        };
+
+        bail!(
+            "git push failed (exit {}){}\n\n{}",
+            output.status.code().unwrap_or(-1),
+            hint,
+            stderr.trim()
+        );
+    }
+
+    Ok(())
 }
 
 /// Run a single commit for all changes (original behavior).
@@ -865,7 +1086,7 @@ async fn run_single_commit(
     branch_name: &str,
     llm: &mut LlmRouter,
     config: &CommitConfig,
-) -> Result<()> {
+) -> Result<CommitOutcome> {
     println!(
         "Generating commit message with {} (fallback: {})...",
         llm.primary(),
@@ -884,19 +1105,18 @@ async fn run_single_commit(
         if config.message_only {
             print!("{}", message.format());
         }
-        return Ok(());
+        return Ok(CommitOutcome::NoCommit);
     }
 
     let formatted = message.format();
-    let oid = stage_and_commit(repo, &formatted)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let oid = stage_and_commit(repo, &formatted).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     println!(
         "\x1b[32m\u{2713} Created commit {}\x1b[0m",
         &oid.to_string()[..7]
     );
 
-    Ok(())
+    Ok(CommitOutcome::Committed(vec![oid]))
 }
 
 /// Run split commits: one per commit group from the analysis.
@@ -907,7 +1127,7 @@ async fn run_split_commits(
     branch_name: &str,
     llm: &mut LlmRouter,
     config: &CommitConfig,
-) -> Result<()> {
+) -> Result<CommitOutcome> {
     println!();
     println!(
         "\x1b[1mProposed split into {} commits:\x1b[0m",
@@ -941,8 +1161,9 @@ async fn run_split_commits(
         .groups
         .iter()
         .map(|group| {
-            collect_diff_for_paths(repo, &group.files)
-                .map_err(|e| anyhow::anyhow!("Failed to collect diff for group '{}': {}", group.label, e))
+            collect_diff_for_paths(repo, &group.files).map_err(|e| {
+                anyhow::anyhow!("Failed to collect diff for group '{}': {}", group.label, e)
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -963,9 +1184,10 @@ async fn run_split_commits(
             llm.fallback()
         );
 
-        let (message, completion) = generate_commit_message(&group_diff, branch_name, llm, config.verbose)
-            .await
-            .map_err(|e| handle_llm_error(e, config.verbose))?;
+        let (message, completion) =
+            generate_commit_message(&group_diff, branch_name, llm, config.verbose)
+                .await
+                .map_err(|e| handle_llm_error(e, config.verbose))?;
 
         report_llm_fallback_if_any(&completion, config.verbose);
 
@@ -988,6 +1210,7 @@ async fn run_split_commits(
 
     if config.message_only {
         print!("{}", all_messages.join("\n---\n"));
+        return Ok(CommitOutcome::NoCommit);
     } else if !config.dry_run && !commit_oids.is_empty() {
         println!();
         println!(
@@ -999,7 +1222,13 @@ async fn run_split_commits(
         }
     }
 
-    Ok(())
+    if config.dry_run || commit_oids.is_empty() {
+        Ok(CommitOutcome::NoCommit)
+    } else {
+        Ok(CommitOutcome::Committed(
+            commit_oids.into_iter().map(|(_, oid)| oid).collect(),
+        ))
+    }
 }
 
 /// Display a commit message to the user.
@@ -1017,10 +1246,18 @@ fn display_commit_message(message: &keryx::commit::CommitMessage, verbose: bool)
         println!("\x1b[33m⚠ BREAKING CHANGE\x1b[0m");
     }
 
-    match message.changelog_category.as_ref().zip(message.changelog_description.as_ref()) {
+    match message
+        .changelog_category
+        .as_ref()
+        .zip(message.changelog_description.as_ref())
+    {
         Some((cat, desc)) => {
             println!();
-            println!("\x1b[36mChangelog ({}):\x1b[0m {}", cat.as_str().to_lowercase(), desc);
+            println!(
+                "\x1b[36mChangelog ({}):\x1b[0m {}",
+                cat.as_str().to_lowercase(),
+                desc
+            );
         }
         None if verbose => {
             println!();
@@ -1034,7 +1271,8 @@ fn display_commit_message(message: &keryx::commit::CommitMessage, verbose: bool)
 
 /// Run the changelog generation command.
 async fn run_generate(cli: Cli) -> Result<()> {
-    let provider_selection = cli.provider
+    let provider_selection = cli
+        .provider
         .clone()
         .map(Provider::from)
         .map(ProviderSelection::from_primary)
@@ -1059,10 +1297,7 @@ async fn run_generate(cli: Cli) -> Result<()> {
         .context("Failed to fetch commits")?;
 
     if commits.is_empty() {
-        println!(
-            "No changes found since {}. Nothing to add.",
-            range.from_ref
-        );
+        println!("No changes found since {}. Nothing to add.", range.from_ref);
         return Ok(());
     }
 
@@ -1088,7 +1323,10 @@ async fn run_generate(cli: Cli) -> Result<()> {
     let (next_version, bump_reasoning) = if let Some(explicit) = cli.set_version.clone() {
         (explicit, None)
     } else if cli.no_llm_bump {
-        (calculate_next_version(base_version.as_ref(), &commits), None)
+        (
+            calculate_next_version(base_version.as_ref(), &commits),
+            None,
+        )
     } else {
         let bump_input = VersionBumpInput {
             commits: &commits,
@@ -1099,8 +1337,12 @@ async fn run_generate(cli: Cli) -> Result<()> {
         calculate_next_version_with_llm(&bump_input, &mut llm, cli.verbose).await
     };
 
-    println!("Version: {} -> {}",
-        base_version.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "none".to_string()),
+    println!(
+        "Version: {} -> {}",
+        base_version
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
         next_version
     );
 
@@ -1111,8 +1353,8 @@ async fn run_generate(cli: Cli) -> Result<()> {
     }
 
     // Step 6b: Check if version already exists in changelog
-    if let Some(parsed) = read_changelog(&cli.output)
-        .context("Failed to read existing changelog")?
+    if let Some(parsed) =
+        read_changelog(&cli.output).context("Failed to read existing changelog")?
         && parsed.has_version(&next_version)
     {
         if cli.force {
@@ -1135,10 +1377,7 @@ async fn run_generate(cli: Cli) -> Result<()> {
 
     // For initial releases, gather extra context
     let (project_description, cli_features) = if is_initial_release {
-        (
-            read_cargo_description(),
-            Some(get_cli_features()),
-        )
+        (read_cargo_description(), Some(get_cli_features()))
     } else {
         (None, None)
     };
@@ -1160,7 +1399,9 @@ async fn run_generate(cli: Cli) -> Result<()> {
         llm.fallback()
     );
 
-    let draft_completion = llm.generate(&prompt).await
+    let draft_completion = llm
+        .generate(&prompt)
+        .await
         .map_err(|e| handle_llm_error(e, cli.verbose))?;
     report_llm_fallback_if_any(&draft_completion, cli.verbose);
     let draft_output = draft_completion.output;
@@ -1175,9 +1416,9 @@ async fn run_generate(cli: Cli) -> Result<()> {
         debug!("Skipping verification (--no-verify flag)");
         draft_output
     } else {
-        let repo_path = repo.workdir().context(
-            "Cannot verify in a bare repository. Use --no-verify to skip verification."
-        )?;
+        let repo_path = repo
+            .workdir()
+            .context("Cannot verify in a bare repository. Use --no-verify to skip verification.")?;
         verify_changelog_entries(&draft_output, repo_path, cli.verbose, &mut llm).await?
     };
 
@@ -1214,8 +1455,7 @@ async fn verify_changelog_entries(
     llm: &mut LlmRouter,
 ) -> Result<keryx::ChangelogOutput> {
     // Check prerequisites
-    check_ripgrep_installed()
-        .context("Verification requires ripgrep")?;
+    check_ripgrep_installed().context("Verification requires ripgrep")?;
 
     println!("Verifying entries against codebase...");
 
@@ -1226,11 +1466,20 @@ async fn verify_changelog_entries(
     let low_confidence: Vec<_> = evidence.low_confidence_entries();
     if !low_confidence.is_empty() {
         eprintln!();
-        eprintln!("\x1b[33m⚠ Found {} entries with low confidence:\x1b[0m", low_confidence.len());
+        eprintln!(
+            "\x1b[33m⚠ Found {} entries with low confidence:\x1b[0m",
+            low_confidence.len()
+        );
         for entry in &low_confidence {
-            eprintln!("  • {}", truncate_description(&entry.original_description, 60));
+            eprintln!(
+                "  • {}",
+                truncate_description(&entry.original_description, 60)
+            );
             if !entry.stub_indicators.is_empty() {
-                eprintln!("    └─ Found {} stub/TODO indicators", entry.stub_indicators.len());
+                eprintln!(
+                    "    └─ Found {} stub/TODO indicators",
+                    entry.stub_indicators.len()
+                );
             }
             if entry.scan_summary.has_failures() {
                 eprintln!(
@@ -1245,14 +1494,14 @@ async fn verify_changelog_entries(
                         eprintln!(
                             "    └─ Count mismatch: claimed {}, found {}",
                             check.claimed_text,
-                            check.actual_count.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string())
+                            check
+                                .actual_count
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "unknown".to_string())
                         );
                     }
                     None => {
-                        eprintln!(
-                            "    └─ Could not verify: {}",
-                            check.claimed_text,
-                        );
+                        eprintln!("    └─ Could not verify: {}", check.claimed_text,);
                     }
                     Some(true) => {} // Verified match - no warning needed
                 }
@@ -1262,7 +1511,9 @@ async fn verify_changelog_entries(
     }
 
     // Summary of search failures across all entries
-    let total_failures: usize = evidence.entries.iter()
+    let total_failures: usize = evidence
+        .entries
+        .iter()
         .map(|e| e.scan_summary.failed_searches)
         .sum();
     if total_failures > 0 {
@@ -1287,8 +1538,8 @@ async fn verify_changelog_entries(
     }
 
     // Serialize draft entries for verification prompt
-    let draft_json = serde_json::to_string_pretty(&draft)
-        .context("Failed to serialize draft entries")?;
+    let draft_json =
+        serde_json::to_string_pretty(&draft).context("Failed to serialize draft entries")?;
 
     // Build verification prompt
     let verification_prompt = build_verification_prompt(&draft_json, &evidence)
@@ -1301,7 +1552,9 @@ async fn verify_changelog_entries(
     );
 
     // Run verification pass
-    let verified_completion = llm.generate(&verification_prompt).await
+    let verified_completion = llm
+        .generate(&verification_prompt)
+        .await
         .map_err(|e| handle_llm_error(e, verbose))?;
     report_llm_fallback_if_any(&verified_completion, verbose);
     let verified_output = verified_completion.output;
@@ -1340,7 +1593,11 @@ fn report_llm_fallback_if_any<T>(completion: &LlmCompletion<T>, verbose: bool) {
 }
 
 fn handle_llm_error(err: LlmError, verbose: bool) -> anyhow::Error {
-    let message = if verbose { err.detailed() } else { err.summary() };
+    let message = if verbose {
+        err.detailed()
+    } else {
+        err.summary()
+    };
     let hint = llm_error_hint(&err);
 
     let full_message = if let Some(hint) = hint {
@@ -1399,20 +1656,24 @@ fn truncate_description(desc: &str, max_len: usize) -> String {
 }
 
 /// Fetch PRs for the current repository.
-async fn fetch_prs_for_repo(repo: &Repository, limit: Option<usize>) -> Result<Vec<keryx::PullRequest>> {
+async fn fetch_prs_for_repo(
+    repo: &Repository,
+    limit: Option<usize>,
+) -> Result<Vec<keryx::PullRequest>> {
     // Get GitHub token
-    let token = get_github_token().await
+    let token = get_github_token()
+        .await
         .context("GitHub authentication required for PR fetching")?;
 
     // Get remote URL
-    let remote = repo.find_remote("origin")
+    let remote = repo
+        .find_remote("origin")
         .context("No 'origin' remote found")?;
 
-    let url = remote.url()
-        .context("Remote has no URL")?;
+    let url = remote.url().context("Remote has no URL")?;
 
-    let (owner, repo_name) = parse_github_remote(url)
-        .context("Could not parse GitHub remote URL")?;
+    let (owner, repo_name) =
+        parse_github_remote(url).context("Could not parse GitHub remote URL")?;
 
     // Fetch PRs (no date filter for now, we'll filter by commits later)
     let prs = fetch_merged_prs(&token, &owner, &repo_name, None, None, limit).await?;
@@ -1477,7 +1738,10 @@ fn get_cli_features() -> Vec<String> {
         .filter_map(|arg| {
             let id = arg.get_id().as_str();
             let help = arg.get_help().map(|h| h.to_string())?;
-            let short = arg.get_short().map(|s| format!("-{}, ", s)).unwrap_or_default();
+            let short = arg
+                .get_short()
+                .map(|s| format!("-{}, ", s))
+                .unwrap_or_default();
             let long = format!("--{}", id.replace('_', "-"));
             Some(format!("{}{}: {}", short, long, help))
         })
@@ -1494,6 +1758,10 @@ fn get_cli_features() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::env;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn test_get_cli_features_includes_all_flags() {
@@ -1504,21 +1772,39 @@ mod tests {
         assert!(features_str.contains("--strict"), "Missing --strict flag");
         assert!(features_str.contains("--force"), "Missing --force flag");
         assert!(features_str.contains("--verbose"), "Missing --verbose flag");
-        assert!(features_str.contains("--no-verify"), "Missing --no-verify flag");
+        assert!(
+            features_str.contains("--no-verify"),
+            "Missing --no-verify flag"
+        );
 
         // Original flags should still be present
-        assert!(features_str.contains("--set-version"), "Missing --set-version flag");
+        assert!(
+            features_str.contains("--set-version"),
+            "Missing --set-version flag"
+        );
         assert!(features_str.contains("--dry-run"), "Missing --dry-run flag");
         assert!(features_str.contains("--no-prs"), "Missing --no-prs flag");
         assert!(features_str.contains("--from"), "Missing --from flag");
         assert!(features_str.contains("--to"), "Missing --to flag");
         assert!(features_str.contains("--output"), "Missing --output flag");
-        assert!(features_str.contains("--pr-limit"), "Missing --pr-limit flag");
+        assert!(
+            features_str.contains("--pr-limit"),
+            "Missing --pr-limit flag"
+        );
 
         // Non-flag features should be present
-        assert!(features_str.contains("GitHub auth"), "Missing GitHub auth feature");
-        assert!(features_str.contains("Automatic backup"), "Missing backup feature");
-        assert!(features_str.contains("[Unreleased]"), "Missing Unreleased feature");
+        assert!(
+            features_str.contains("GitHub auth"),
+            "Missing GitHub auth feature"
+        );
+        assert!(
+            features_str.contains("Automatic backup"),
+            "Missing backup feature"
+        );
+        assert!(
+            features_str.contains("[Unreleased]"),
+            "Missing Unreleased feature"
+        );
     }
 
     #[test]
@@ -1570,5 +1856,168 @@ mod tests {
 
         let result = truncate_description("hello", 3);
         assert_eq!(result, "...");
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: String) -> Self {
+            let original = env::var(key).ok();
+            // SAFETY: `std::env::set_var` is unsafe since Rust 1.80 because modifying
+            // environment variables is not thread-safe. We use `#[serial]` from
+            // serial_test to ensure these tests run sequentially, preventing data races.
+            // This is the standard pattern for env var manipulation in Rust tests.
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe {
+                    env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_push_to_remote_success() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let git_path = temp_dir.path().join("git");
+        // Mock git that handles: rev-parse --abbrev-ref HEAD, push
+        // No upstream check - we let git push handle it based on push.default
+        let script = r#"#!/bin/sh
+case "$1 $2" in
+  "rev-parse --abbrev-ref")
+    if [ "$3" = "HEAD" ]; then
+      echo "main"
+      exit 0
+    fi
+    ;;
+  "push ")
+    exit 0
+    ;;
+esac
+echo "unexpected args: $@" >&2
+exit 2
+"#;
+        std::fs::write(&git_path, script).unwrap();
+        let mut perms = std::fs::metadata(&git_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&git_path, perms).unwrap();
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", temp_dir.path().display(), original_path);
+        let _guard = EnvVarGuard::set("PATH", new_path);
+
+        let result = push_to_remote(false).await;
+        assert!(result.is_ok(), "Expected git push to succeed: {:?}", result);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_push_to_remote_no_upstream() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let git_path = temp_dir.path().join("git");
+        // Mock git where push fails due to no upstream (git reports the error)
+        let script = r#"#!/bin/sh
+case "$1 $2" in
+  "rev-parse --abbrev-ref")
+    if [ "$3" = "HEAD" ]; then
+      echo "feature-branch"
+      exit 0
+    fi
+    ;;
+  "push ")
+    echo "fatal: The current branch feature-branch has no upstream branch." >&2
+    echo "To push the current branch and set the remote as upstream, use" >&2
+    echo "    git push --set-upstream origin feature-branch" >&2
+    exit 128
+    ;;
+esac
+echo "unexpected args: $@" >&2
+exit 2
+"#;
+        std::fs::write(&git_path, script).unwrap();
+        let mut perms = std::fs::metadata(&git_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&git_path, perms).unwrap();
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", temp_dir.path().display(), original_path);
+        let _guard = EnvVarGuard::set("PATH", new_path);
+
+        let result = push_to_remote(false).await;
+        let err = result.expect_err("Expected push to fail without upstream");
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("No upstream branch configured")
+                || err_msg.contains("has no upstream"),
+            "Expected actionable error about upstream, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("git push -u origin") || err_msg.contains("autoSetupRemote"),
+            "Expected fix command in error, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_push_to_remote_rejected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let git_path = temp_dir.path().join("git");
+        // Mock git where push is rejected (non-fast-forward)
+        let script = r#"#!/bin/sh
+case "$1 $2" in
+  "rev-parse --abbrev-ref")
+    if [ "$3" = "HEAD" ]; then
+      echo "main"
+      exit 0
+    fi
+    ;;
+  "push ")
+    echo "error: failed to push some refs" >&2
+    echo "hint: Updates were rejected because the remote contains work" >&2
+    echo "hint: that you do not have locally. non-fast-forward" >&2
+    exit 1
+    ;;
+esac
+echo "unexpected args: $@" >&2
+exit 2
+"#;
+        std::fs::write(&git_path, script).unwrap();
+        let mut perms = std::fs::metadata(&git_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&git_path, perms).unwrap();
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", temp_dir.path().display(), original_path);
+        let _guard = EnvVarGuard::set("PATH", new_path);
+
+        let result = push_to_remote(false).await;
+        let err = result.expect_err("Expected git push to fail");
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("git push failed"),
+            "Expected error message to mention git push failure, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("pull --rebase") || err_msg.contains("force-with-lease"),
+            "Expected actionable hint for rejected push, got: {err_msg}"
+        );
     }
 }

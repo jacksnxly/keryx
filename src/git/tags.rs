@@ -61,10 +61,7 @@ pub fn get_all_tags(repo: &Repository) -> Result<Vec<TagInfo>, GitError> {
                 version,
             });
         } else {
-            warn!(
-                "Skipping tag with OID {} - name is not valid UTF-8",
-                oid
-            );
+            warn!("Skipping tag with OID {} - name is not valid UTF-8", oid);
         }
         true // Continue iteration
     })

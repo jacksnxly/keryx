@@ -98,17 +98,16 @@ pub async fn generate_commit_message(
     let completion = llm.generate_raw(&prompt).await?;
 
     let json_str = extract_json(&completion.output);
-    let message: CommitMessage = serde_json::from_str(&json_str)
-        .map_err(|e| {
-            debug!("Failed to parse LLM response as CommitMessage: {}", e);
-            debug!("Raw response: {}", &completion.output);
+    let message: CommitMessage = serde_json::from_str(&json_str).map_err(|e| {
+        debug!("Failed to parse LLM response as CommitMessage: {}", e);
+        debug!("Raw response: {}", &completion.output);
 
-            LlmError::ResponseParseFailed {
-                provider: completion.provider,
-                raw_output: completion.output.clone(),
-                parse_error: format!("Could not parse commit message JSON: {}", e),
-            }
-        })?;
+        LlmError::ResponseParseFailed {
+            provider: completion.provider,
+            raw_output: completion.output.clone(),
+            parse_error: format!("Could not parse commit message JSON: {}", e),
+        }
+    })?;
 
     Ok((message, completion))
 }
@@ -130,9 +129,7 @@ pub fn stage_and_commit(repo: &Repository, message: &str) -> Result<Oid, CommitE
     let tree = repo.find_tree(tree_id).map_err(CommitError::CommitFailed)?;
 
     // Get the signature from git config
-    let sig = repo
-        .signature()
-        .map_err(CommitError::ConfigError)?;
+    let sig = repo.signature().map_err(CommitError::ConfigError)?;
 
     let parent = resolve_parent_commit(repo)?;
     let mut parents = Vec::new();
@@ -229,7 +226,9 @@ fn reset_index_to_head(repo: &Repository, index: &mut git2::Index) -> Result<(),
 
 fn resolve_parent_commit(repo: &Repository) -> Result<Option<git2::Commit<'_>>, CommitError> {
     match repo.head() {
-        Ok(head) => Ok(Some(head.peel_to_commit().map_err(CommitError::CommitFailed)?)),
+        Ok(head) => Ok(Some(
+            head.peel_to_commit().map_err(CommitError::CommitFailed)?,
+        )),
         Err(e) if e.code() == ErrorCode::UnbornBranch || e.code() == ErrorCode::NotFound => {
             Ok(None)
         }
@@ -377,7 +376,10 @@ mod tests {
     fn test_commit_message_deserialize_invalid_category_fails() {
         let json = r#"{"subject": "feat: thing", "changelog_category": "enhanced", "changelog_description": "Something"}"#;
         let result = serde_json::from_str::<CommitMessage>(json);
-        assert!(result.is_err(), "Invalid changelog category should fail deserialization");
+        assert!(
+            result.is_err(),
+            "Invalid changelog category should fail deserialization"
+        );
     }
 
     #[test]
@@ -477,22 +479,12 @@ mod tests {
         );
 
         // First commit: a.txt
-        let oid1 = stage_paths_and_commit(
-            &repo,
-            &["a.txt".to_string()],
-            &statuses,
-            "feat: add a",
-        )
-        .unwrap();
+        let oid1 = stage_paths_and_commit(&repo, &["a.txt".to_string()], &statuses, "feat: add a")
+            .unwrap();
 
         // Second commit: b.txt — HEAD should have advanced
-        let oid2 = stage_paths_and_commit(
-            &repo,
-            &["b.txt".to_string()],
-            &statuses,
-            "feat: add b",
-        )
-        .unwrap();
+        let oid2 = stage_paths_and_commit(&repo, &["b.txt".to_string()], &statuses, "feat: add b")
+            .unwrap();
 
         assert_ne!(oid1, oid2);
 

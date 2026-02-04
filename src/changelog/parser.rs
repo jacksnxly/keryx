@@ -31,11 +31,11 @@ pub fn read_changelog(path: &Path) -> Result<Option<ParsedChangelog>, ChangelogE
 
     let content = std::fs::read_to_string(path).map_err(ChangelogError::ReadFailed)?;
 
-    let changelog = parse_changelog::parse(&content)
-        .map_err(|e| ChangelogError::ParseFailed(e.to_string()))?;
+    let changelog =
+        parse_changelog::parse(&content).map_err(|e| ChangelogError::ParseFailed(e.to_string()))?;
 
-    let has_unreleased = changelog.get("Unreleased").is_some()
-        || changelog.get("unreleased").is_some();
+    let has_unreleased =
+        changelog.get("Unreleased").is_some() || changelog.get("unreleased").is_some();
 
     // Collect all versions from the changelog
     let versions: Vec<Version> = changelog
@@ -165,7 +165,8 @@ mod tests {
 
     #[test]
     fn test_find_insertion_point_with_unreleased() {
-        let content = "# Changelog\n\n## [Unreleased]\n\n- Some change\n\n## [1.0.0] - 2024-01-01\n";
+        let content =
+            "# Changelog\n\n## [Unreleased]\n\n- Some change\n\n## [1.0.0] - 2024-01-01\n";
         let pos = find_insertion_point(content);
         assert!(pos > 0);
         assert!(content[pos..].starts_with("## [1.0.0]"));
@@ -193,8 +194,7 @@ mod tests {
     #[test]
     fn test_find_insertion_point_crlf_with_unreleased() {
         // Same content as LF test but with CRLF line endings
-        let content =
-            "# Changelog\r\n\r\n## [Unreleased]\r\n\r\n- Some change\r\n\r\n## [1.0.0] - 2024-01-01\r\n";
+        let content = "# Changelog\r\n\r\n## [Unreleased]\r\n\r\n- Some change\r\n\r\n## [1.0.0] - 2024-01-01\r\n";
         let pos = find_insertion_point(content);
 
         // The position should point to where "## [1.0.0]" starts in normalized content

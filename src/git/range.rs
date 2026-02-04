@@ -80,12 +80,12 @@ pub fn find_root_commit(repo: &Repository, strict: bool) -> Result<Oid, GitError
         .head()
         .map_err(|e| GitError::ReferenceNotFound("HEAD".to_string(), e))?;
 
-    let head_commit = head
-        .peel_to_commit()
-        .map_err(GitError::ParseCommit)?;
+    let head_commit = head.peel_to_commit().map_err(GitError::ParseCommit)?;
 
     let mut revwalk = repo.revwalk().map_err(GitError::RevwalkError)?;
-    revwalk.push(head_commit.id()).map_err(GitError::RevwalkError)?;
+    revwalk
+        .push(head_commit.id())
+        .map_err(GitError::RevwalkError)?;
 
     let mut root_oid = head_commit.id();
     let mut traversal_errors = Vec::new();

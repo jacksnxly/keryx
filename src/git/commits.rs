@@ -130,7 +130,8 @@ pub fn parse_commit_message(message: &str) -> (Option<CommitType>, Option<String
     let first_line = message.lines().next().unwrap_or("");
 
     // Check for BREAKING CHANGE in footer
-    let breaking_in_footer = message.contains("BREAKING CHANGE:") || message.contains("BREAKING-CHANGE:");
+    let breaking_in_footer =
+        message.contains("BREAKING CHANGE:") || message.contains("BREAKING-CHANGE:");
 
     // Pattern: type(scope)!: description or type!: description or type(scope): description or type: description
     if let Some(caps) = COMMIT_REGEX.captures(first_line) {

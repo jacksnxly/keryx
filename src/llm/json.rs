@@ -146,7 +146,12 @@ mod tests {
         let response = r#"{"entries": [{"description": "Added \"new\" feature"}]}"#;
         let json = extract_json(response);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(parsed["entries"][0]["description"].as_str().unwrap().contains("\"new\""));
+        assert!(
+            parsed["entries"][0]["description"]
+                .as_str()
+                .unwrap()
+                .contains("\"new\"")
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Integration tests for conventional commit parsing.
 
-use keryx::git::{parse_commit_message, CommitType};
+use keryx::git::{CommitType, parse_commit_message};
 
 #[test]
 fn test_parse_all_commit_types() {

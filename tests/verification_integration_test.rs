@@ -8,7 +8,7 @@ mod common;
 use std::fs;
 
 use keryx::changelog::{ChangelogCategory, ChangelogEntry};
-use keryx::verification::{gather_verification_evidence, Confidence, StubType};
+use keryx::verification::{Confidence, StubType, gather_verification_evidence};
 
 /// Create a test project with known code patterns.
 fn create_test_project() -> tempfile::TempDir {
@@ -151,7 +151,6 @@ tokio = "1.0"
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_keyword_search_finds_websocket() {
-
     let project = create_test_project();
 
     let entries = vec![ChangelogEntry {
@@ -193,7 +192,6 @@ fn test_keyword_search_finds_websocket() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_keyword_search_finds_database() {
-
     let project = create_test_project();
 
     // Use a description that will extract "postgres" as a keyword
@@ -216,7 +214,11 @@ fn test_keyword_search_finds_database() {
     assert!(
         pg_match.is_some(),
         "Should find 'postgres' keyword in codebase. Keywords found: {:?}",
-        entry_ev.keyword_matches.iter().map(|k| &k.keyword).collect::<Vec<_>>()
+        entry_ev
+            .keyword_matches
+            .iter()
+            .map(|k| &k.keyword)
+            .collect::<Vec<_>>()
     );
 
     // Verify it found the file
@@ -230,7 +232,6 @@ fn test_keyword_search_finds_database() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_keyword_search_no_match_for_missing_feature() {
-
     let project = create_test_project();
 
     let entries = vec![ChangelogEntry {
@@ -268,7 +269,6 @@ fn test_keyword_search_no_match_for_missing_feature() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_stub_indicators_detected_for_incomplete_code() {
-
     let project = create_test_project();
 
     let entries = vec![ChangelogEntry {
@@ -310,7 +310,6 @@ fn test_stub_indicators_detected_for_incomplete_code() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_no_stub_indicators_for_complete_code() {
-
     let project = create_test_project();
 
     // Only query for WebSocket which has complete implementation
@@ -343,7 +342,6 @@ fn test_no_stub_indicators_for_complete_code() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_confidence_high_for_complete_implementation() {
-
     let project = create_test_project();
 
     let entries = vec![ChangelogEntry {
@@ -367,7 +365,6 @@ fn test_confidence_high_for_complete_implementation() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_confidence_low_for_incomplete_implementation() {
-
     let project = create_test_project();
 
     let entries = vec![ChangelogEntry {
@@ -391,7 +388,6 @@ fn test_confidence_low_for_incomplete_implementation() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_confidence_low_for_nonexistent_feature() {
-
     let project = create_test_project();
 
     let entries = vec![ChangelogEntry {
@@ -411,8 +407,11 @@ fn test_confidence_low_for_nonexistent_feature() {
         "Nonexistent feature should have low confidence"
     );
     assert!(
-        entry_ev.keyword_matches.is_empty() ||
-        entry_ev.keyword_matches.iter().all(|k| k.occurrence_count == Some(0) || k.occurrence_count.is_none()),
+        entry_ev.keyword_matches.is_empty()
+            || entry_ev
+                .keyword_matches
+                .iter()
+                .all(|k| k.occurrence_count == Some(0) || k.occurrence_count.is_none()),
         "Should have no keyword matches for nonexistent feature"
     );
 }
@@ -422,7 +421,6 @@ fn test_confidence_low_for_nonexistent_feature() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_key_files_gathered() {
-
     let project = create_test_project();
 
     let entries = vec![ChangelogEntry {
@@ -433,20 +431,11 @@ fn test_key_files_gathered() {
     let evidence = gather_verification_evidence(&entries, project.path());
 
     // Should gather key files
-    assert!(
-        !evidence.key_files.is_empty(),
-        "Should gather key files"
-    );
+    assert!(!evidence.key_files.is_empty(), "Should gather key files");
 
     // Should find Cargo.toml
-    let cargo_file = evidence
-        .key_files
-        .iter()
-        .find(|f| f.path == "Cargo.toml");
-    assert!(
-        cargo_file.is_some(),
-        "Should find Cargo.toml as a key file"
-    );
+    let cargo_file = evidence.key_files.iter().find(|f| f.path == "Cargo.toml");
+    assert!(cargo_file.is_some(), "Should find Cargo.toml as a key file");
 
     // Content should be present
     let cargo = cargo_file.unwrap();
@@ -461,7 +450,6 @@ fn test_key_files_gathered() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_multiple_entries_analyzed() {
-
     let project = create_test_project();
 
     let entries = vec![
@@ -504,7 +492,6 @@ fn test_multiple_entries_analyzed() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_has_low_confidence_entries_detection() {
-
     let project = create_test_project();
 
     // Mix of complete and incomplete features
@@ -549,7 +536,6 @@ fn test_has_low_confidence_entries_detection() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_empty_entries() {
-
     let project = create_test_project();
     let entries: Vec<ChangelogEntry> = vec![];
 
@@ -562,7 +548,6 @@ fn test_empty_entries() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_entry_with_no_extractable_keywords() {
-
     let project = create_test_project();
 
     let entries = vec![ChangelogEntry {
@@ -581,7 +566,6 @@ fn test_entry_with_no_extractable_keywords() {
 #[test]
 #[cfg_attr(not(feature = "rg-tests"), ignore = "requires ripgrep")]
 fn test_project_structure_gathered() {
-
     let project = create_test_project();
 
     let entries = vec![ChangelogEntry {

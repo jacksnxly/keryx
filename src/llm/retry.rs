@@ -3,8 +3,8 @@
 use std::future::Future;
 use std::time::Duration;
 
-use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
+use backoff::backoff::Backoff;
 
 /// Configuration: 3 total attempts, base 1s, max 30s.
 pub const MAX_ATTEMPTS: u32 = 3;
@@ -19,10 +19,7 @@ const MAX_INTERVAL_SECS: u64 = 30;
 ///
 /// `wrap_exhausted` converts the last error into the appropriate
 /// `RetriesExhausted` variant for the caller's error type.
-pub async fn retry_with_backoff<T, E, Fut, F, W>(
-    mut attempt: F,
-    wrap_exhausted: W,
-) -> Result<T, E>
+pub async fn retry_with_backoff<T, E, Fut, F, W>(mut attempt: F, wrap_exhausted: W) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
@@ -63,8 +60,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[derive(Debug, PartialEq)]
     enum TestError {
@@ -74,9 +71,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_retry_succeeds_on_first_attempt() {
-        let result: Result<&str, TestError> =
-            retry_with_backoff(|| async { Ok("ok") }, |e| TestError::RetriesExhausted(Box::new(e)))
-                .await;
+        let result: Result<&str, TestError> = retry_with_backoff(
+            || async { Ok("ok") },
+            |e| TestError::RetriesExhausted(Box::new(e)),
+        )
+        .await;
         assert_eq!(result.unwrap(), "ok");
     }
 

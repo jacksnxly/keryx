@@ -136,10 +136,11 @@ impl LlmError {
                 fallback,
                 fallback_error.summary()
             ),
-            LlmError::ResponseParseFailed { provider, parse_error, .. } => format!(
-                "{} returned unparseable output: {}",
-                provider, parse_error
-            ),
+            LlmError::ResponseParseFailed {
+                provider,
+                parse_error,
+                ..
+            } => format!("{} returned unparseable output: {}", provider, parse_error),
         }
     }
 
@@ -157,7 +158,11 @@ impl LlmError {
                 fallback,
                 fallback_error.detail()
             ),
-            LlmError::ResponseParseFailed { provider, raw_output, parse_error } => {
+            LlmError::ResponseParseFailed {
+                provider,
+                raw_output,
+                parse_error,
+            } => {
                 let truncated: String = raw_output.chars().take(500).collect();
                 format!(
                     "{} returned unparseable output. Parse error: {}. Response: {}",
@@ -202,7 +207,11 @@ pub type LlmRawCompletion = LlmCompletion<String>;
 
 #[async_trait]
 trait ProviderRunner {
-    async fn run(&self, provider: Provider, prompt: &str) -> Result<ChangelogOutput, LlmProviderError>;
+    async fn run(
+        &self,
+        provider: Provider,
+        prompt: &str,
+    ) -> Result<ChangelogOutput, LlmProviderError>;
     async fn run_raw(&self, provider: Provider, prompt: &str) -> Result<String, LlmProviderError>;
 }
 
@@ -210,17 +219,29 @@ struct DefaultRunner;
 
 #[async_trait]
 impl ProviderRunner for DefaultRunner {
-    async fn run(&self, provider: Provider, prompt: &str) -> Result<ChangelogOutput, LlmProviderError> {
+    async fn run(
+        &self,
+        provider: Provider,
+        prompt: &str,
+    ) -> Result<ChangelogOutput, LlmProviderError> {
         match provider {
-            Provider::Claude => claude::generate_with_retry(prompt).await.map_err(LlmProviderError::from),
-            Provider::Codex => codex::generate_with_retry(prompt).await.map_err(LlmProviderError::from),
+            Provider::Claude => claude::generate_with_retry(prompt)
+                .await
+                .map_err(LlmProviderError::from),
+            Provider::Codex => codex::generate_with_retry(prompt)
+                .await
+                .map_err(LlmProviderError::from),
         }
     }
 
     async fn run_raw(&self, provider: Provider, prompt: &str) -> Result<String, LlmProviderError> {
         match provider {
-            Provider::Claude => claude::generate_raw_with_retry(prompt).await.map_err(LlmProviderError::from),
-            Provider::Codex => codex::generate_raw_with_retry(prompt).await.map_err(LlmProviderError::from),
+            Provider::Claude => claude::generate_raw_with_retry(prompt)
+                .await
+                .map_err(LlmProviderError::from),
+            Provider::Codex => codex::generate_raw_with_retry(prompt)
+                .await
+                .map_err(LlmProviderError::from),
         }
     }
 }
@@ -266,7 +287,13 @@ impl LlmRouter {
         runner: &R,
     ) -> Result<LlmCompletion<T>, LlmError>
     where
-        F: for<'a> Fn(&'a R, Provider, &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, LlmProviderError>> + Send + 'a>>,
+        F: for<'a> Fn(
+            &'a R,
+            Provider,
+            &'a str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, LlmProviderError>> + Send + 'a>,
+        >,
     {
         let primary = self.primary;
         let fallback = self.fallback;
@@ -356,19 +383,35 @@ mod tests {
 
     #[async_trait]
     impl ProviderRunner for FakeRunner {
-        async fn run(&self, provider: Provider, _prompt: &str) -> Result<ChangelogOutput, LlmProviderError> {
+        async fn run(
+            &self,
+            provider: Provider,
+            _prompt: &str,
+        ) -> Result<ChangelogOutput, LlmProviderError> {
             match provider {
-                Provider::Claude if self.claude_ok => Ok(ChangelogOutput { entries: Vec::new() }),
-                Provider::Codex if self.codex_ok => Ok(ChangelogOutput { entries: Vec::new() }),
+                Provider::Claude if self.claude_ok => Ok(ChangelogOutput {
+                    entries: Vec::new(),
+                }),
+                Provider::Codex if self.codex_ok => Ok(ChangelogOutput {
+                    entries: Vec::new(),
+                }),
                 Provider::Claude => Err(LlmProviderError::Claude(ClaudeError::NotInstalled)),
                 Provider::Codex => Err(LlmProviderError::Codex(CodexError::NotInstalled)),
             }
         }
 
-        async fn run_raw(&self, provider: Provider, _prompt: &str) -> Result<String, LlmProviderError> {
+        async fn run_raw(
+            &self,
+            provider: Provider,
+            _prompt: &str,
+        ) -> Result<String, LlmProviderError> {
             match provider {
-                Provider::Claude if self.claude_ok => Ok(r#"{"bump_type": "minor", "reasoning": "test"}"#.to_string()),
-                Provider::Codex if self.codex_ok => Ok(r#"{"bump_type": "minor", "reasoning": "test"}"#.to_string()),
+                Provider::Claude if self.claude_ok => {
+                    Ok(r#"{"bump_type": "minor", "reasoning": "test"}"#.to_string())
+                }
+                Provider::Codex if self.codex_ok => {
+                    Ok(r#"{"bump_type": "minor", "reasoning": "test"}"#.to_string())
+                }
                 Provider::Claude => Err(LlmProviderError::Claude(ClaudeError::NotInstalled)),
                 Provider::Codex => Err(LlmProviderError::Codex(CodexError::NotInstalled)),
             }

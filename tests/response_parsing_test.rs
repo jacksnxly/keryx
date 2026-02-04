@@ -80,9 +80,11 @@ fn test_parse_success_with_entries() {
     assert_eq!(output.entries.len(), 3);
 
     assert_eq!(output.entries[0].category, "Added");
-    assert!(output.entries[0]
-        .description
-        .contains("authentication system"));
+    assert!(
+        output.entries[0]
+            .description
+            .contains("authentication system")
+    );
 
     assert_eq!(output.entries[1].category, "Fixed");
     assert!(output.entries[1].description.contains("Memory leak"));

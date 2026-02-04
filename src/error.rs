@@ -20,14 +20,21 @@ pub enum GitError {
     #[error("Commit {hash} has invalid timestamp (seconds={seconds})")]
     InvalidTimestamp { hash: String, seconds: i64 },
 
-    #[error("Commit traversal incomplete: {error_count} error(s) occurred. Root commit {partial_root} may not be the actual repository root. This can happen with shallow clones, missing objects, or permission issues.")]
-    TraversalIncomplete { partial_root: String, error_count: usize },
+    #[error(
+        "Commit traversal incomplete: {error_count} error(s) occurred. Root commit {partial_root} may not be the actual repository root. This can happen with shallow clones, missing objects, or permission issues."
+    )]
+    TraversalIncomplete {
+        partial_root: String,
+        error_count: usize,
+    },
 }
 
 /// Errors from GitHub API operations.
 #[derive(Error, Debug)]
 pub enum GitHubError {
-    #[error("GitHub authentication failed: no valid auth found. Run 'gh auth login' or set GITHUB_TOKEN environment variable")]
+    #[error(
+        "GitHub authentication failed: no valid auth found. Run 'gh auth login' or set GITHUB_TOKEN environment variable"
+    )]
     AuthenticationFailed,
 
     #[error("Failed to fetch PRs: {0}")]
@@ -74,7 +81,9 @@ pub enum ClaudeError {
 /// Errors from Codex CLI operations.
 #[derive(Error, Debug)]
 pub enum CodexError {
-    #[error("Codex CLI not found. Install with: npm install -g @openai/codex (then run `codex` or set CODEX_API_KEY)")]
+    #[error(
+        "Codex CLI not found. Install with: npm install -g @openai/codex (then run `codex` or set CODEX_API_KEY)"
+    )]
     NotInstalled,
 
     #[error("Codex CLI failed to execute: {0}")]
@@ -150,12 +159,14 @@ pub enum CommitError {
 /// Errors from verification and scanning operations.
 #[derive(Error, Debug)]
 pub enum VerificationError {
-    #[error("ripgrep (rg) is required for verification but was not found.\n\n\
+    #[error(
+        "ripgrep (rg) is required for verification but was not found.\n\n\
              Install with one of:\n  \
              cargo install ripgrep\n  \
              brew install ripgrep     (macOS)\n  \
              apt install ripgrep      (Debian/Ubuntu)\n\n\
-             Or skip verification with: --no-verify")]
+             Or skip verification with: --no-verify"
+    )]
     RipgrepNotInstalled,
 
     #[error("ripgrep (rg) was found but exited with {}: {stderr}\n\n\
@@ -167,10 +178,12 @@ pub enum VerificationError {
         stderr: String,
     },
 
-    #[error("ripgrep (rg) could not be executed: {0}\n\n\
+    #[error(
+        "ripgrep (rg) could not be executed: {0}\n\n\
              This may be a permission issue or a problem with the ripgrep binary.\n\
              Check file permissions or reinstall ripgrep.\n\
-             Or skip verification with: --no-verify")]
+             Or skip verification with: --no-verify"
+    )]
     RipgrepExecutionFailed(String),
 
     #[error("I/O error during scan: {0}")]
