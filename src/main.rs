@@ -1002,8 +1002,8 @@ async fn run_push(
 /// Push the current branch to its remote.
 ///
 /// Following CLI best practices (clig.dev), this function:
-/// - Checks for upstream tracking before attempting push
-/// - Provides actionable error messages with fix commands
+/// - Lets git push run first (respects push.default, push.autoSetupRemote)
+/// - Provides actionable error messages with fix commands on failure
 /// - Uses verbose mode for detailed debugging output
 async fn push_to_remote(verbose: bool) -> Result<()> {
     // Get current branch name for actionable error messages
@@ -1019,34 +1019,11 @@ async fn push_to_remote(verbose: bool) -> Result<()> {
 
     if verbose {
         debug!("Current branch: {}", branch_name);
+        debug!("Running git push (respecting user's push.default config)");
     }
 
-    // Check if upstream tracking branch is configured
-    // This prevents confusing errors when push fails due to no upstream
-    let upstream_check = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "@{u}"])
-        .output()
-        .await;
-
-    let has_upstream = upstream_check
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !has_upstream {
-        bail!(
-            "No upstream branch configured for '{}'\n\n\
-             To push and set upstream in one command, run:\n  \
-             git push -u origin {}\n\n\
-             Or configure keryx to auto-set upstream (coming soon).",
-            branch_name,
-            branch_name
-        );
-    }
-
-    if verbose {
-        debug!("Upstream configured, running git push");
-    }
-
+    // Let git push run - it respects push.default (simple, current, matching, etc.)
+    // and push.autoSetupRemote settings. Only provide guidance on failure.
     let output = Command::new("git")
         .arg("push")
         .stdout(Stdio::inherit())
@@ -1059,16 +1036,28 @@ async fn push_to_remote(verbose: bool) -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         // Provide actionable hints based on common failure patterns
-        let hint = if stderr.contains("rejected") && stderr.contains("non-fast-forward") {
+        let hint = if stderr.contains("no upstream branch")
+            || stderr.contains("has no upstream")
+            || stderr.contains("--set-upstream")
+        {
+            // No upstream configured and push.default requires it
+            format!(
+                "\n\nHint: No upstream branch configured for '{}'.\n  \
+                 To push and set upstream: git push -u origin {}\n  \
+                 Or enable auto-setup: git config --global push.autoSetupRemote true",
+                branch_name, branch_name
+            )
+        } else if stderr.contains("rejected") && stderr.contains("non-fast-forward") {
             "\n\nHint: Remote has changes you don't have locally.\n  \
              Pull first: git pull --rebase\n  \
              Or force push: git push --force-with-lease"
+                .to_string()
         } else if stderr.contains("Permission denied") || stderr.contains("403") {
-            "\n\nHint: Check your Git credentials or repository permissions."
+            "\n\nHint: Check your Git credentials or repository permissions.".to_string()
         } else if stderr.contains("Could not resolve host") {
-            "\n\nHint: Check your network connection."
+            "\n\nHint: Check your network connection.".to_string()
         } else {
-            ""
+            String::new()
         };
 
         bail!(
@@ -1899,15 +1888,13 @@ mod tests {
     async fn test_push_to_remote_success() {
         let temp_dir = tempfile::tempdir().unwrap();
         let git_path = temp_dir.path().join("git");
-        // Mock git that handles: rev-parse --abbrev-ref HEAD, rev-parse --abbrev-ref @{u}, push
+        // Mock git that handles: rev-parse --abbrev-ref HEAD, push
+        // No upstream check - we let git push handle it based on push.default
         let script = r#"#!/bin/sh
 case "$1 $2" in
   "rev-parse --abbrev-ref")
     if [ "$3" = "HEAD" ]; then
       echo "main"
-      exit 0
-    elif [ "$3" = "@{u}" ]; then
-      echo "origin/main"
       exit 0
     fi
     ;;
@@ -1937,17 +1924,20 @@ exit 2
     async fn test_push_to_remote_no_upstream() {
         let temp_dir = tempfile::tempdir().unwrap();
         let git_path = temp_dir.path().join("git");
-        // Mock git where upstream check fails (no tracking branch)
+        // Mock git where push fails due to no upstream (git reports the error)
         let script = r#"#!/bin/sh
 case "$1 $2" in
   "rev-parse --abbrev-ref")
     if [ "$3" = "HEAD" ]; then
       echo "feature-branch"
       exit 0
-    elif [ "$3" = "@{u}" ]; then
-      echo "fatal: no upstream configured for branch 'feature-branch'" >&2
-      exit 128
     fi
+    ;;
+  "push ")
+    echo "fatal: The current branch feature-branch has no upstream branch." >&2
+    echo "To push the current branch and set the remote as upstream, use" >&2
+    echo "    git push --set-upstream origin feature-branch" >&2
+    exit 128
     ;;
 esac
 echo "unexpected args: $@" >&2
@@ -1966,11 +1956,12 @@ exit 2
         let err = result.expect_err("Expected push to fail without upstream");
         let err_msg = err.to_string();
         assert!(
-            err_msg.contains("No upstream branch configured"),
+            err_msg.contains("No upstream branch configured")
+                || err_msg.contains("has no upstream"),
             "Expected actionable error about upstream, got: {err_msg}"
         );
         assert!(
-            err_msg.contains("git push -u origin"),
+            err_msg.contains("git push -u origin") || err_msg.contains("autoSetupRemote"),
             "Expected fix command in error, got: {err_msg}"
         );
     }
@@ -1987,9 +1978,6 @@ case "$1 $2" in
   "rev-parse --abbrev-ref")
     if [ "$3" = "HEAD" ]; then
       echo "main"
-      exit 0
-    elif [ "$3" = "@{u}" ]; then
-      echo "origin/main"
       exit 0
     fi
     ;;
