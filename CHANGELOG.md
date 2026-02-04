@@ -9,15 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- New `keryx commit` command that generates conventional commit messages from staged changes using AI
-- Automatic splitting of large changesets into multiple focused commits (use `--no-split` to disable)
-- New `keryx push` command with actionable error messages and support for various `push.default` configurations
-- LLM-based semantic version bumping that intelligently determines the next version number based on changes
-- `--no-llm-bump` flag to skip LLM version inference and use manual versioning
+- New `keryx push` command that commits and pushes in one step, with actionable error messages for common failures
 
 ### Fixed
 
-- Claude Code integration now works in headless and automated environments
+- Claude Code integration now works in headless and automated environments (CI/CD pipelines)
 - Push command now respects user's `push.default` git configuration instead of requiring an upstream branch
 
 
