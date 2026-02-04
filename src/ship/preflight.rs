@@ -11,7 +11,7 @@ use semver::Version;
 use crate::error::ShipError;
 use crate::git::commits::fetch_commits;
 use crate::git::range::resolve_range;
-use crate::git::tags::{get_all_tags, get_latest_tag, TagInfo};
+use crate::git::tags::{get_all_tags, get_latest_reachable_tag, TagInfo};
 use crate::git::ParsedCommit;
 use crate::llm::{Provider, ProviderSelection};
 
@@ -48,8 +48,11 @@ pub fn run_checks(
     // 2. Up to date with remote
     check_remote_sync(&remote_name, &current_branch, verbose)?;
 
-    // 3. Commits exist
-    let latest_tag = get_latest_tag(repo).map_err(|e| ShipError::GitFailed(e.to_string()))?;
+    // 3. Commits exist since last reachable tag
+    // Uses git describe to find tags reachable from HEAD, correctly handling
+    // multi-branch workflows (maintenance branches, backports, etc.)
+    let latest_tag =
+        get_latest_reachable_tag(repo).map_err(|e| ShipError::GitFailed(e.to_string()))?;
     let base_version = latest_tag.as_ref().and_then(|t| t.version.clone());
 
     let range = resolve_range(repo, None, Some("HEAD"), false)

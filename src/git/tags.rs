@@ -1,5 +1,7 @@
 //! Tag enumeration and version detection.
 
+use std::process::Command;
+
 use git2::Repository;
 use semver::Version;
 use tracing::{debug, warn};
@@ -14,7 +16,52 @@ pub struct TagInfo {
     pub version: Option<Version>,
 }
 
-/// Get the latest semver tag from the repository.
+/// Get the latest semver tag reachable from HEAD.
+///
+/// Uses `git describe --tags --abbrev=0` which is the industry standard approach
+/// used by semantic-release, cargo-release, and other release automation tools.
+/// This correctly handles multi-branch scenarios (maintenance branches, backports)
+/// by only considering tags in the commit history of the current branch.
+pub fn get_latest_reachable_tag(repo: &Repository) -> Result<Option<TagInfo>, GitError> {
+    // Use git describe to find the most recent tag reachable from HEAD
+    let output = Command::new("git")
+        .args(["describe", "--tags", "--abbrev=0"])
+        .output()
+        .map_err(|e| GitError::CommandFailed(format!("Failed to run git describe: {}", e)))?;
+
+    if !output.status.success() {
+        // Exit code 128 means no tags found - this is normal for new repos
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("No names found") || stderr.contains("No tags can describe") {
+            debug!("No tags reachable from HEAD");
+            return Ok(None);
+        }
+        // Other errors should be reported
+        return Err(GitError::CommandFailed(format!(
+            "git describe failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    let tag_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if tag_name.is_empty() {
+        return Ok(None);
+    }
+
+    debug!(tag = %tag_name, "Found latest reachable tag via git describe");
+
+    // Look up the tag in the repository to get OID and version info
+    let all_tags = get_all_tags(repo)?;
+    let tag_info = all_tags.into_iter().find(|t| t.name == tag_name);
+
+    Ok(tag_info)
+}
+
+/// Get the latest semver tag from the repository (highest version globally).
+///
+/// **Warning**: This finds the highest semver tag across ALL branches, not just
+/// tags reachable from HEAD. For release automation, use [`get_latest_reachable_tag`]
+/// instead to correctly handle multi-branch workflows.
 pub fn get_latest_tag(repo: &Repository) -> Result<Option<TagInfo>, GitError> {
     let tags = get_all_tags(repo)?;
 

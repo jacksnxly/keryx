@@ -28,6 +28,9 @@ pub enum GitError {
         partial_root: String,
         error_count: usize,
     },
+
+    #[error("Git command failed: {0}")]
+    CommandFailed(String),
 }
 
 /// Errors from GitHub API operations.
