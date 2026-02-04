@@ -425,10 +425,10 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_subprocess_non_utf8_stdout_handled() {
-        // printf outputs raw bytes - \xFF is invalid UTF-8
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg("printf 'valid\\xFFtext'")
+        // Use /usr/bin/printf to ensure we get raw bytes (not shell built-in)
+        // \xFF is invalid UTF-8 (it's a continuation byte without a start byte)
+        let output = Command::new("/usr/bin/printf")
+            .arg("valid\\xFFtext")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -464,9 +464,11 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_subprocess_non_utf8_stderr_handled() {
+        // Use /usr/bin/printf to ensure we get raw bytes
+        // Redirect to stderr and exit with error code
         let output = Command::new("sh")
             .arg("-c")
-            .arg("printf 'error\\xFE\\xFFmsg' >&2; exit 1")
+            .arg("/usr/bin/printf 'error\\xFE\\xFFmsg' >&2; exit 1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -556,5 +558,100 @@ mod tests {
 
         assert!(stdout.contains("stdout content"));
         assert!(stderr.contains("stderr content"));
+    }
+
+    // ============================================
+    // ANSI Escape Code Stripping Tests
+    // ============================================
+
+    /// Test that plain text without ANSI codes passes through unchanged.
+    #[test]
+    fn test_strip_ansi_plain_text() {
+        let input = "Hello, World!";
+        assert_eq!(strip_ansi_codes(input), "Hello, World!");
+    }
+
+    /// Test that simple CSI color codes are removed.
+    #[test]
+    fn test_strip_ansi_color_codes() {
+        // Red text: ESC[31m ... ESC[0m
+        let input = "\x1b[31mRed text\x1b[0m";
+        assert_eq!(strip_ansi_codes(input), "Red text");
+    }
+
+    /// Test that multiple ANSI codes in sequence are all removed.
+    #[test]
+    fn test_strip_ansi_multiple_codes() {
+        // Bold + Red + text + Reset
+        let input = "\x1b[1m\x1b[31mBold Red\x1b[0m normal";
+        assert_eq!(strip_ansi_codes(input), "Bold Red normal");
+    }
+
+    /// Test that cursor movement codes are removed.
+    #[test]
+    fn test_strip_ansi_cursor_codes() {
+        // Cursor up 2 lines: ESC[2A
+        let input = "line1\x1b[2Aline2";
+        assert_eq!(strip_ansi_codes(input), "line1line2");
+    }
+
+    /// Test that private mode sequences (ESC[?...) are removed.
+    #[test]
+    fn test_strip_ansi_private_modes() {
+        // Enable/disable cursor: ESC[?25h ESC[?25l
+        let input = "\x1b[?25hvisible\x1b[?25l";
+        assert_eq!(strip_ansi_codes(input), "visible");
+    }
+
+    /// Test that OSC sequences (ESC]...) with BEL terminator are removed.
+    #[test]
+    fn test_strip_ansi_osc_bel() {
+        // Set window title: ESC]0;title BEL
+        let input = "\x1b]0;Window Title\x07content";
+        assert_eq!(strip_ansi_codes(input), "content");
+    }
+
+    /// Test that carriage returns are removed.
+    #[test]
+    fn test_strip_ansi_carriage_return() {
+        let input = "line1\r\nline2\rline3";
+        assert_eq!(strip_ansi_codes(input), "line1\nline2line3");
+    }
+
+    /// Test real-world Claude Code output pattern.
+    #[test]
+    fn test_strip_ansi_claude_output() {
+        // Simulates the escape sequences added by script TTY wrapper
+        let input = "{\"result\":\"test\"}\x1b[?1004l\x1b[?2004l\x1b[?25h\x1b]9;4;0;\x07\x1b[?25h";
+        assert_eq!(strip_ansi_codes(input), "{\"result\":\"test\"}");
+    }
+
+    /// Test that JSON content is preserved while ANSI codes are stripped.
+    #[test]
+    fn test_strip_ansi_preserves_json() {
+        let json = r#"{"subject": "test", "body": "content with\nnewlines"}"#;
+        let input = format!("\x1b[32m{}\x1b[0m\r\n", json);
+        assert_eq!(strip_ansi_codes(&input), format!("{}\n", json));
+    }
+
+    /// Test ESC < sequences (less common but seen in some terminals).
+    #[test]
+    fn test_strip_ansi_esc_less_than() {
+        let input = "\x1b<utext\x1b<v";
+        // ESC < followed by letter should be stripped
+        assert_eq!(strip_ansi_codes(input), "text");
+    }
+
+    /// Test empty string.
+    #[test]
+    fn test_strip_ansi_empty() {
+        assert_eq!(strip_ansi_codes(""), "");
+    }
+
+    /// Test string with only ANSI codes.
+    #[test]
+    fn test_strip_ansi_only_codes() {
+        let input = "\x1b[31m\x1b[0m\x1b[?25h";
+        assert_eq!(strip_ansi_codes(input), "");
     }
 }
