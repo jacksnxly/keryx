@@ -14,7 +14,7 @@ use crate::error::ShipError;
 /// 1. `git add <files>` - stage only modified version/changelog files
 /// 2. `git commit -m "chore(release): vX.Y.Z"` - create release commit
 /// 3. `git tag -a vX.Y.Z -m "Release vX.Y.Z"` - create annotated tag
-/// 4. `git push <remote> <branch> --follow-tags` - push commit + tag
+/// 4. `git push <remote> <branch> --follow-tags --atomic` - push commit + tag atomically
 pub fn commit_tag_push(
     message: &str,
     tag_name: &str,
@@ -43,8 +43,8 @@ pub fn commit_tag_push(
         "create tag",
     )?;
 
-    // 4. Push with tags
-    match run_git(&["push", remote, branch, "--follow-tags"], "push") {
+    // 4. Push with tags (atomic to avoid partial updates)
+    match run_git(&["push", remote, branch, "--follow-tags", "--atomic"], "push") {
         Ok(()) => Ok(()),
         Err(e) => Err(ShipError::PushFailed(e.to_string())),
     }
