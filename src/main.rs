@@ -1013,6 +1013,14 @@ async fn push_to_remote(verbose: bool) -> Result<()> {
         .await
         .context("Failed to determine current branch")?;
 
+    if !branch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&branch_output.stderr);
+        bail!(
+            "Failed to determine current branch: {}",
+            stderr.trim().lines().next().unwrap_or("unknown error")
+        );
+    }
+
     let branch_name = String::from_utf8_lossy(&branch_output.stdout)
         .trim()
         .to_string();
