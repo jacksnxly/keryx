@@ -55,7 +55,10 @@ pub fn run_checks(
         get_latest_reachable_tag(repo).map_err(|e| ShipError::GitFailed(e.to_string()))?;
     let base_version = latest_tag.as_ref().and_then(|t| t.version.clone());
 
-    let range = resolve_range(repo, None, Some("HEAD"), false)
+    // Use the reachable tag as range start to ensure commit list matches the tag we report.
+    // This prevents including already-released commits when another branch has a newer tag.
+    let from_ref = latest_tag.as_ref().map(|t| t.name.as_str());
+    let range = resolve_range(repo, from_ref, Some("HEAD"), false)
         .map_err(|e| ShipError::GitFailed(e.to_string()))?;
 
     let mut commits = fetch_commits(repo, range.from, range.to, false)
