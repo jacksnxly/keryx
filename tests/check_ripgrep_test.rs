@@ -127,9 +127,6 @@ exit 2
                 stderr
             );
         }
-        other => panic!(
-            "Expected VerificationError::RipgrepFailed, got {:?}",
-            other
-        ),
+        other => panic!("Expected VerificationError::RipgrepFailed, got {:?}", other),
     }
 }

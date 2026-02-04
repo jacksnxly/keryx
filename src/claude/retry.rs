@@ -119,15 +119,16 @@ fn parse_claude_response(response: &str) -> Result<ChangelogOutput, ClaudeError>
     // Now extract the changelog JSON from Claude's response text
     let json_str = extract_json(&content);
 
-    serde_json::from_str(&json_str)
-        .map_err(|e| ClaudeError::InvalidJson(format!("Failed to parse: {}. Content: {}", e, content)))
+    serde_json::from_str(&json_str).map_err(|e| {
+        ClaudeError::InvalidJson(format!("Failed to parse: {}. Content: {}", e, content))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     // ============================================
     // Retry Behavior Tests (using mocked executor)
@@ -141,12 +142,10 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
 
-        mock.expect_run()
-            .times(3)
-            .returning(move |_| {
-                call_count_clone.fetch_add(1, Ordering::SeqCst);
-                Err(ClaudeError::ExecutionFailed("test error".to_string()))
-            });
+        mock.expect_run().times(3).returning(move |_| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+            Err(ClaudeError::ExecutionFailed("test error".to_string()))
+        });
 
         let result = generate_with_retry_impl("test prompt", &mock).await;
 
@@ -162,18 +161,18 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
 
-        mock.expect_run()
-            .times(3)
-            .returning(move |_| {
-                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
-                if count < 2 {
-                    Err(ClaudeError::ExecutionFailed("transient error".to_string()))
-                } else {
-                    // Return valid JSON on third attempt
-                    Ok(r#"{"entries": [{"category": "Added", "description": "Test feature"}]}"#
-                        .to_string())
-                }
-            });
+        mock.expect_run().times(3).returning(move |_| {
+            let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+            if count < 2 {
+                Err(ClaudeError::ExecutionFailed("transient error".to_string()))
+            } else {
+                // Return valid JSON on third attempt
+                Ok(
+                    r#"{"entries": [{"category": "Added", "description": "Test feature"}]}"#
+                        .to_string(),
+                )
+            }
+        });
 
         let result = generate_with_retry_impl("test prompt", &mock).await;
 
@@ -211,12 +210,10 @@ mod tests {
         let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
         let timestamps_clone = timestamps.clone();
 
-        mock.expect_run()
-            .times(3)
-            .returning(move |_| {
-                timestamps_clone.lock().unwrap().push(Instant::now());
-                Err(ClaudeError::ExecutionFailed("test".to_string()))
-            });
+        mock.expect_run().times(3).returning(move |_| {
+            timestamps_clone.lock().unwrap().push(Instant::now());
+            Err(ClaudeError::ExecutionFailed("test".to_string()))
+        });
 
         let _ = generate_with_retry_impl("test", &mock).await;
 
@@ -264,19 +261,17 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
 
-        mock.expect_run()
-            .times(3)
-            .returning(move |_| {
-                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
-                match count {
-                    0 => Err(ClaudeError::Timeout(30)),
-                    1 => Err(ClaudeError::NonZeroExit {
-                        code: 1,
-                        stderr: "error".to_string(),
-                    }),
-                    _ => Err(ClaudeError::ExecutionFailed("final error".to_string())),
-                }
-            });
+        mock.expect_run().times(3).returning(move |_| {
+            let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+            match count {
+                0 => Err(ClaudeError::Timeout(30)),
+                1 => Err(ClaudeError::NonZeroExit {
+                    code: 1,
+                    stderr: "error".to_string(),
+                }),
+                _ => Err(ClaudeError::ExecutionFailed("final error".to_string())),
+            }
+        });
 
         let result = generate_with_retry_impl("test", &mock).await;
 
@@ -297,16 +292,14 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
 
-        mock.expect_run()
-            .times(2)
-            .returning(move |_| {
-                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
-                if count == 0 {
-                    Ok("not valid json".to_string())
-                } else {
-                    Ok(r#"{"entries": []}"#.to_string())
-                }
-            });
+        mock.expect_run().times(2).returning(move |_| {
+            let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                Ok("not valid json".to_string())
+            } else {
+                Ok(r#"{"entries": []}"#.to_string())
+            }
+        });
 
         let result = generate_with_retry_impl("test", &mock).await;
 
@@ -321,16 +314,14 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
 
-        mock.expect_run()
-            .times(2)
-            .returning(move |_| {
-                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
-                if count == 0 {
-                    Err(ClaudeError::ExecutionFailed("first failure".to_string()))
-                } else {
-                    Ok(r#"{"entries": []}"#.to_string())
-                }
-            });
+        mock.expect_run().times(2).returning(move |_| {
+            let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                Err(ClaudeError::ExecutionFailed("first failure".to_string()))
+            } else {
+                Ok(r#"{"entries": []}"#.to_string())
+            }
+        });
 
         let result = generate_with_retry_impl("test", &mock).await;
 
@@ -361,8 +352,7 @@ mod tests {
     /// Test that an error envelope (is_error=true) returns Err(ExecutionFailed).
     #[test]
     fn test_unwrap_envelope_error_flag() {
-        let response =
-            r#"{"type":"result","is_error":true,"result":"Authentication failed: invalid API key"}"#;
+        let response = r#"{"type":"result","is_error":true,"result":"Authentication failed: invalid API key"}"#;
         let result = unwrap_claude_envelope(response);
         match result {
             Err(ClaudeError::ExecutionFailed(msg)) => {
@@ -392,12 +382,10 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
 
-        mock.expect_run()
-            .times(3)
-            .returning(move |_| {
-                call_count_clone.fetch_add(1, Ordering::SeqCst);
-                Err(ClaudeError::ExecutionFailed("persistent error".to_string()))
-            });
+        mock.expect_run().times(3).returning(move |_| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+            Err(ClaudeError::ExecutionFailed("persistent error".to_string()))
+        });
 
         let result = generate_raw_with_retry_impl("test prompt", &mock).await;
 
@@ -410,11 +398,9 @@ mod tests {
     async fn test_raw_success_on_first_attempt() {
         let mut mock = MockClaudeExecutor::new();
 
-        mock.expect_run()
-            .times(1)
-            .returning(|_| {
-                Ok(r#"{"type":"result","is_error":false,"result":"patch"}"#.to_string())
-            });
+        mock.expect_run().times(1).returning(|_| {
+            Ok(r#"{"type":"result","is_error":false,"result":"patch"}"#.to_string())
+        });
 
         let result = generate_raw_with_retry_impl("test prompt", &mock).await;
         assert_eq!(result.unwrap(), "patch");
@@ -428,18 +414,16 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
 
-        mock.expect_run()
-            .times(2)
-            .returning(move |_| {
-                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
-                if count == 0 {
-                    // First call: Claude returns an error envelope (subprocess succeeds, but envelope says error)
-                    Ok(r#"{"type":"result","is_error":true,"result":"rate limited"}"#.to_string())
-                } else {
-                    // Second call: valid response
-                    Ok(r#"{"type":"result","is_error":false,"result":"patch"}"#.to_string())
-                }
-            });
+        mock.expect_run().times(2).returning(move |_| {
+            let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                // First call: Claude returns an error envelope (subprocess succeeds, but envelope says error)
+                Ok(r#"{"type":"result","is_error":true,"result":"rate limited"}"#.to_string())
+            } else {
+                // Second call: valid response
+                Ok(r#"{"type":"result","is_error":false,"result":"patch"}"#.to_string())
+            }
+        });
 
         let result = generate_raw_with_retry_impl("test", &mock).await;
         assert_eq!(result.unwrap(), "patch");
@@ -449,8 +433,7 @@ mod tests {
     /// Test that parse_claude_response also rejects error envelopes (via unwrap_claude_envelope).
     #[test]
     fn test_parse_claude_response_error_envelope() {
-        let response =
-            r#"{"type":"result","is_error":true,"result":"internal server error"}"#;
+        let response = r#"{"type":"result","is_error":true,"result":"internal server error"}"#;
         let result = parse_claude_response(response);
         assert!(matches!(result, Err(ClaudeError::ExecutionFailed(_))));
     }

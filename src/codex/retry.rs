@@ -93,15 +93,16 @@ fn parse_codex_response(response: &str) -> Result<ChangelogOutput, CodexError> {
     }
 
     let json_str = extract_json(response);
-    serde_json::from_str(&json_str)
-        .map_err(|e| CodexError::InvalidJson(format!("Failed to parse: {}. Content: {}", e, response)))
+    serde_json::from_str(&json_str).map_err(|e| {
+        CodexError::InvalidJson(format!("Failed to parse: {}. Content: {}", e, response))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     // ============================================
     // Raw Retry Behavior Tests (using mocked executor)
@@ -115,12 +116,10 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
 
-        mock.expect_run()
-            .times(3)
-            .returning(move |_| {
-                call_count_clone.fetch_add(1, Ordering::SeqCst);
-                Err(CodexError::ExecutionFailed("persistent error".to_string()))
-            });
+        mock.expect_run().times(3).returning(move |_| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+            Err(CodexError::ExecutionFailed("persistent error".to_string()))
+        });
 
         let result = generate_raw_with_retry_impl("test prompt", &mock).await;
 
@@ -149,16 +148,14 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
 
-        mock.expect_run()
-            .times(2)
-            .returning(move |_| {
-                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
-                if count == 0 {
-                    Err(CodexError::ExecutionFailed("transient".to_string()))
-                } else {
-                    Ok("minor".to_string())
-                }
-            });
+        mock.expect_run().times(2).returning(move |_| {
+            let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                Err(CodexError::ExecutionFailed("transient".to_string()))
+            } else {
+                Ok("minor".to_string())
+            }
+        });
 
         let result = generate_raw_with_retry_impl("test prompt", &mock).await;
         assert_eq!(result.unwrap(), "minor");
@@ -173,19 +170,17 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
 
-        mock.expect_run()
-            .times(3)
-            .returning(move |_| {
-                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
-                match count {
-                    0 => Err(CodexError::Timeout(30)),
-                    1 => Err(CodexError::NonZeroExit {
-                        code: 1,
-                        stderr: "error".to_string(),
-                    }),
-                    _ => Err(CodexError::ExecutionFailed("final error".to_string())),
-                }
-            });
+        mock.expect_run().times(3).returning(move |_| {
+            let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+            match count {
+                0 => Err(CodexError::Timeout(30)),
+                1 => Err(CodexError::NonZeroExit {
+                    code: 1,
+                    stderr: "error".to_string(),
+                }),
+                _ => Err(CodexError::ExecutionFailed("final error".to_string())),
+            }
+        });
 
         let result = generate_raw_with_retry_impl("test", &mock).await;
 
@@ -209,12 +204,10 @@ mod tests {
         let call_count = Arc::new(AtomicU32::new(0));
         let call_count_clone = call_count.clone();
 
-        mock.expect_run()
-            .times(3)
-            .returning(move |_| {
-                call_count_clone.fetch_add(1, Ordering::SeqCst);
-                Err(CodexError::ExecutionFailed("persistent error".to_string()))
-            });
+        mock.expect_run().times(3).returning(move |_| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+            Err(CodexError::ExecutionFailed("persistent error".to_string()))
+        });
 
         let result = generate_with_retry_impl("test prompt", &mock).await;
 

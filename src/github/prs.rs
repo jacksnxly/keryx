@@ -241,7 +241,9 @@ pub async fn fetch_merged_prs_with_client(
             warn!(
                 "Reached 50-page safety limit while fetching PRs for {}/{}. \
                 {} PRs collected. Consider using date filters to narrow the range.",
-                owner, repo, all_prs.len()
+                owner,
+                repo,
+                all_prs.len()
             );
             break;
         }

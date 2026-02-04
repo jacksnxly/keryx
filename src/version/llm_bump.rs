@@ -4,16 +4,16 @@
 //! Falls back to the algorithmic approach on any failure.
 
 use semver::Version;
-use serde::de::{self, Deserializer};
 use serde::Deserialize;
+use serde::de::{self, Deserializer};
 use tracing::{debug, warn};
 
 use crate::git::ParsedCommit;
 use crate::github::PullRequest;
+use crate::llm::LlmRouter;
 use crate::llm::extract_json;
 use crate::llm::prompt::sanitize_for_prompt;
-use crate::llm::LlmRouter;
-use crate::version::bump::{apply_bump_to_version, determine_bump_type, BumpType};
+use crate::version::bump::{BumpType, apply_bump_to_version, determine_bump_type};
 
 /// Input for LLM-based version bump determination.
 pub struct VersionBumpInput<'a> {
@@ -66,7 +66,9 @@ struct VersionBumpResponse {
 }
 
 /// Build the prompt for LLM-based version bump determination.
-fn build_version_bump_prompt(input: &VersionBumpInput) -> Result<String, crate::llm::prompt::PromptError> {
+fn build_version_bump_prompt(
+    input: &VersionBumpInput,
+) -> Result<String, crate::llm::prompt::PromptError> {
     let sanitized_commits: Vec<String> = input
         .commits
         .iter()
@@ -101,7 +103,10 @@ fn build_version_bump_prompt(input: &VersionBumpInput) -> Result<String, crate::
                     sanitize_for_prompt(truncated)
                 })
                 .unwrap_or_default();
-            sanitize_for_prompt(&format!("PR #{}: {} - {}", pr.number, pr.title, body_snippet))
+            sanitize_for_prompt(&format!(
+                "PR #{}: {} - {}",
+                pr.number, pr.title, body_snippet
+            ))
         })
         .collect();
 
@@ -178,7 +183,10 @@ pub async fn determine_version_with_llm(
     let prompt = match build_version_bump_prompt(input) {
         Ok(p) => p,
         Err(e) => {
-            warn!("Failed to build version bump prompt: {}. Using algorithmic bump.", e);
+            warn!(
+                "Failed to build version bump prompt: {}. Using algorithmic bump.",
+                e
+            );
             eprintln!(
                 "\x1b[33m⚠ LLM version bump failed (prompt error), using algorithmic bump\x1b[0m"
             );
@@ -212,11 +220,12 @@ pub async fn determine_version_with_llm(
             completion.output
         }
         Err(e) => {
-            warn!("LLM version bump failed: {}. Using algorithmic bump.", e.summary());
-            eprintln!();
-            eprintln!(
-                "\x1b[33m⚠ LLM version bump failed, using algorithmic bump\x1b[0m"
+            warn!(
+                "LLM version bump failed: {}. Using algorithmic bump.",
+                e.summary()
             );
+            eprintln!();
+            eprintln!("\x1b[33m⚠ LLM version bump failed, using algorithmic bump\x1b[0m");
             eprintln!("  Reason: {}", e.summary());
             eprintln!();
             return (algorithmic_bump, None);
@@ -338,8 +347,8 @@ mod tests {
 
     #[test]
     fn test_build_prompt_with_previous_version() {
-        use chrono::Utc;
         use crate::git::CommitType;
+        use chrono::Utc;
 
         let commits = vec![ParsedCommit {
             hash: "abc123".to_string(),
@@ -444,8 +453,8 @@ mod tests {
 
     #[test]
     fn test_build_prompt_with_populated_prs() {
-        use chrono::Utc;
         use crate::git::CommitType;
+        use chrono::Utc;
 
         let commits = vec![ParsedCommit {
             hash: "abc123".to_string(),

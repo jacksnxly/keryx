@@ -7,12 +7,12 @@ use std::process::Command;
 use regex_lite::Regex;
 use tracing::{debug, warn};
 
+use super::evidence::{
+    CountCheck, EntryEvidence, KeyFileContent, KeywordMatch, ScanSummary, StubIndicator, StubType,
+    VerificationEvidence,
+};
 use crate::changelog::ChangelogEntry;
 use crate::error::VerificationError;
-use super::evidence::{
-    CountCheck, EntryEvidence, KeyFileContent, KeywordMatch,
-    ScanSummary, StubIndicator, StubType, VerificationEvidence,
-};
 
 /// Outcome of a ripgrep command execution.
 #[derive(Debug)]
@@ -31,9 +31,9 @@ enum RgOutcome {
 /// - Other exit codes or errors → `Err(VerificationError)`
 fn run_rg(cmd: &mut Command) -> Result<RgOutcome, VerificationError> {
     match cmd.output() {
-        Ok(out) if out.status.success() => {
-            Ok(RgOutcome::Success(String::from_utf8_lossy(&out.stdout).to_string()))
-        }
+        Ok(out) if out.status.success() => Ok(RgOutcome::Success(
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        )),
         Ok(out) if out.status.code() == Some(1) => {
             // Exit code 1 means no matches found - this is normal
             Ok(RgOutcome::NoMatch)
@@ -75,17 +75,24 @@ const PROJECT_STRUCTURE_MAX_LINES: usize = 50;
 
 /// Common ripgrep arguments to exclude build/dependency directories.
 const RG_EXCLUDE_PATTERNS: &[&str] = &[
-    "-g", "!target",
-    "-g", "!node_modules",
-    "-g", "!dist",
-    "-g", "!build",
-    "-g", "!.git",
+    "-g",
+    "!target",
+    "-g",
+    "!node_modules",
+    "-g",
+    "!dist",
+    "-g",
+    "!build",
+    "-g",
+    "!.git",
 ];
 
 /// Ripgrep type definition for common source code files.
 const RG_CODE_TYPE: &[&str] = &[
-    "--type-add", "code:*.{rs,ts,tsx,js,jsx,py,go,java,c,cpp,h,hpp}",
-    "--type", "code",
+    "--type-add",
+    "code:*.{rs,ts,tsx,js,jsx,py,go,java,c,cpp,h,hpp}",
+    "--type",
+    "code",
 ];
 
 /// Patterns that indicate incomplete/stub code and their corresponding types.
@@ -101,20 +108,87 @@ const STUB_PATTERNS: &[(&str, StubType)] = &[
     ("// stub", StubType::Stub),
     ("// placeholder", StubType::Placeholder),
     ("NotImplemented", StubType::NotImplemented),
-    ("raise NotImplementedError", StubType::RaiseNotImplementedError),
+    (
+        "raise NotImplementedError",
+        StubType::RaiseNotImplementedError,
+    ),
 ];
 
 /// Common words to exclude from keyword extraction.
 const STOP_WORDS: &[&str] = &[
-    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "as", "is", "was", "are", "were", "been",
-    "be", "have", "has", "had", "do", "does", "did", "will", "would",
-    "could", "should", "may", "might", "must", "shall", "can", "need",
-    "new", "add", "added", "change", "changed", "fix", "fixed", "update",
-    "updated", "remove", "removed", "improve", "improved", "support",
-    "supported", "feature", "features", "now", "using", "use", "based",
-    "all", "any", "some", "more", "less", "better", "best", "first",
-    "initial", "release", "version", "multiple", "various", "several",
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "but",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "of",
+    "with",
+    "by",
+    "from",
+    "as",
+    "is",
+    "was",
+    "are",
+    "were",
+    "been",
+    "be",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "must",
+    "shall",
+    "can",
+    "need",
+    "new",
+    "add",
+    "added",
+    "change",
+    "changed",
+    "fix",
+    "fixed",
+    "update",
+    "updated",
+    "remove",
+    "removed",
+    "improve",
+    "improved",
+    "support",
+    "supported",
+    "feature",
+    "features",
+    "now",
+    "using",
+    "use",
+    "based",
+    "all",
+    "any",
+    "some",
+    "more",
+    "less",
+    "better",
+    "best",
+    "first",
+    "initial",
+    "release",
+    "version",
+    "multiple",
+    "various",
+    "several",
 ];
 
 /// Gather verification evidence for changelog entries.
@@ -186,20 +260,20 @@ fn analyze_entry(entry: &ChangelogEntry, repo_path: &Path) -> (EntryEvidence, Ve
             Ok(Some(match_result)) => {
                 scan_summary.add_success();
                 // Check for stub indicators near the matches
-                let (stubs, stub_detection_ok) = match find_stub_indicators_near_keyword(keyword, repo_path) {
-                    Ok(s) => (s, true),
-                    Err(e) => {
-                        let msg = format!(
-                            "Stub detection failed for keyword '{}': {}",
-                            keyword, e
-                        );
-                        warn!("{}. Conservatively marking as incomplete.", msg);
-                        warnings.push(msg);
-                        (Vec::new(), false)
-                    }
-                };
+                let (stubs, stub_detection_ok) =
+                    match find_stub_indicators_near_keyword(keyword, repo_path) {
+                        Ok(s) => (s, true),
+                        Err(e) => {
+                            let msg =
+                                format!("Stub detection failed for keyword '{}': {}", keyword, e);
+                            warn!("{}. Conservatively marking as incomplete.", msg);
+                            warnings.push(msg);
+                            (Vec::new(), false)
+                        }
+                    };
                 // Mark incomplete if stubs found, occurrence counting failed, OR stub detection failed
-                let appears_complete = stub_detection_ok && stubs.is_empty() && match_result.count.is_some();
+                let appears_complete =
+                    stub_detection_ok && stubs.is_empty() && match_result.count.is_some();
 
                 all_stub_indicators.extend(stubs);
                 keyword_matches.push(KeywordMatch {
@@ -288,14 +362,16 @@ fn extract_keywords(description: &str) -> Vec<String> {
     }
 
     // Extract technology/product names (capitalized words)
-    let tech_re = Regex::new(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)?)\b")
-        .expect("Invalid regex");
+    let tech_re =
+        Regex::new(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)?)\b").expect("Invalid regex");
     for cap in tech_re.captures_iter(description) {
         if let Some(tech) = cap.get(1) {
             let term = tech.as_str();
             // Skip generic words
-            if !["Added", "Changed", "Fixed", "Removed", "Security", "The", "This", "With"]
-                .contains(&term)
+            if ![
+                "Added", "Changed", "Fixed", "Removed", "Security", "The", "This", "With",
+            ]
+            .contains(&term)
             {
                 keywords.insert(term.to_lowercase());
             }
@@ -335,15 +411,17 @@ fn build_rg_keyword_command(keyword: &str, repo_path: &Path) -> Command {
 /// - `Ok(Some(result))` - Matches found
 /// - `Ok(None)` - No matches found (normal, expected)
 /// - `Err(error)` - Error occurred during search
-fn search_keyword(keyword: &str, repo_path: &Path) -> Result<Option<SearchResult>, VerificationError> {
+fn search_keyword(
+    keyword: &str,
+    repo_path: &Path,
+) -> Result<Option<SearchResult>, VerificationError> {
     // Use ripgrep for fast searching
     // Use --fixed-strings to treat keyword as literal text, not regex
-    let files: Vec<String> = match run_rg(
-        build_rg_keyword_command(keyword, repo_path).arg("--files-with-matches"),
-    )? {
-        RgOutcome::Success(stdout) => stdout.lines().take(10).map(String::from).collect(),
-        RgOutcome::NoMatch => return Ok(None),
-    };
+    let files: Vec<String> =
+        match run_rg(build_rg_keyword_command(keyword, repo_path).arg("--files-with-matches"))? {
+            RgOutcome::Success(stdout) => stdout.lines().take(10).map(String::from).collect(),
+            RgOutcome::NoMatch => return Ok(None),
+        };
 
     if files.is_empty() {
         return Ok(None);
@@ -380,7 +458,10 @@ fn search_keyword(keyword: &str, repo_path: &Path) -> Result<Option<SearchResult
 /// Returns `Err` if ripgrep fails or is not found, so the caller can
 /// conservatively treat the feature as incomplete rather than silently
 /// marking it complete.
-fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Result<Vec<StubIndicator>, VerificationError> {
+fn find_stub_indicators_near_keyword(
+    keyword: &str,
+    repo_path: &Path,
+) -> Result<Vec<StubIndicator>, VerificationError> {
     let mut indicators = Vec::new();
 
     // First, find files containing the keyword (only in source code files)
@@ -400,7 +481,15 @@ fn find_stub_indicators_near_keyword(keyword: &str, repo_path: &Path) -> Result<
     // Using -e flag for multiple patterns reduces subprocess count by 12x
     for file in &files {
         let mut cmd = Command::new("rg");
-        cmd.args(["--fixed-strings", "--line-number", "--max-count", "36", "--json", "-C", "1"]);
+        cmd.args([
+            "--fixed-strings",
+            "--line-number",
+            "--max-count",
+            "36",
+            "--json",
+            "-C",
+            "1",
+        ]);
 
         // Add each pattern with -e flag
         for (pattern, _stub_type) in STUB_PATTERNS {
@@ -459,14 +548,29 @@ fn verify_numeric_claims(description: &str, repo_path: &Path) -> Vec<CountCheck>
 
     // Regex to find numeric claims like "8 templates", "6 languages", etc.
     // Anchors on start/whitespace to avoid matching hyphenated tokens like "UTF-8 handling".
-    let num_re = Regex::new(r"(?:^|\s)(\d+)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)?)")
-        .expect("Invalid regex");
+    let num_re =
+        Regex::new(r"(?:^|\s)(\d+)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+)?)").expect("Invalid regex");
 
     // Subjects that are not countable things (false positives)
     let non_countable = [
-        "handling", "panic", "error", "errors", "issue", "issues",
-        "byte", "bytes", "bit", "bits", "character", "characters",
-        "pass", "mode", "way", "ways", "time", "times",
+        "handling",
+        "panic",
+        "error",
+        "errors",
+        "issue",
+        "issues",
+        "byte",
+        "bytes",
+        "bit",
+        "bits",
+        "character",
+        "characters",
+        "pass",
+        "mode",
+        "way",
+        "ways",
+        "time",
+        "times",
     ];
 
     for cap in num_re.captures_iter(description) {
@@ -507,7 +611,7 @@ fn try_verify_count(subject: &str, repo_path: &Path) -> (Option<usize>, Option<S
         // (subject keyword, file pattern, count pattern)
         ("template", "*.rs", r"(TEMPLATES|templates)\s*[=:]\s*\["),
         ("template", "*.ts", r"(TEMPLATES|templates)\s*[=:]\s*\["),
-        ("language", "messages", ""),  // Count directories/files
+        ("language", "messages", ""), // Count directories/files
         ("exchange", "*.rs", r"enum.*Exchange|Exchange\s*\{"),
         ("preset", "*.ts", r"(PRESETS|presets)\s*[=:]\s*\["),
         ("widget", "*.tsx", r"Widget|widget"),
@@ -539,9 +643,12 @@ fn count_files_matching(repo_path: &Path, glob: &str, keyword: &str) -> Option<u
     let output = Command::new("find")
         .args([
             ".",
-            "-type", "f",
-            "-name", glob,
-            "-path", &format!("*{}*", keyword),
+            "-type",
+            "f",
+            "-name",
+            glob,
+            "-path",
+            &format!("*{}*", keyword),
         ])
         .current_dir(repo_path)
         .output();
@@ -552,11 +659,7 @@ fn count_files_matching(repo_path: &Path, glob: &str, keyword: &str) -> Option<u
                 .lines()
                 .filter(|l| !l.is_empty())
                 .count();
-            if count > 0 {
-                Some(count)
-            } else {
-                None
-            }
+            if count > 0 { Some(count) } else { None }
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -712,8 +815,10 @@ fn count_array_elements(content: &str, pattern: &str) -> Option<usize> {
 fn get_project_structure(repo_path: &Path) -> (Option<String>, Option<String>, Option<String>) {
     let output = Command::new("tree")
         .args([
-            "-L", "3",
-            "-I", "target|node_modules|dist|build|.git|__pycache__",
+            "-L",
+            "3",
+            "-I",
+            "target|node_modules|dist|build|.git|__pycache__",
             "--dirsfirst",
         ])
         .current_dir(repo_path)
@@ -827,9 +932,9 @@ fn gather_key_files(repo_path: &Path) -> (Vec<KeyFileContent>, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::evidence::{Confidence, ScanSummary};
     use super::*;
     use crate::changelog::ChangelogCategory;
-    use super::super::evidence::{Confidence, ScanSummary};
 
     #[test]
     fn test_extract_keywords() {
@@ -980,15 +1085,13 @@ mod tests {
         let entry = EntryEvidence::new(
             "Test entry".to_string(),
             ChangelogCategory::Added,
-            vec![
-                KeywordMatch {
-                    keyword: "test".to_string(),
-                    files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
-                    occurrence_count: Some(10),
-                    sample_lines: Some(vec![]),
-                    appears_complete: true,
-                },
-            ],
+            vec![KeywordMatch {
+                keyword: "test".to_string(),
+                files_found: vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                occurrence_count: Some(10),
+                sample_lines: Some(vec![]),
+                appears_complete: true,
+            }],
             vec![],
             vec![],
             ScanSummary::default(),
@@ -1002,15 +1105,13 @@ mod tests {
         let entry = EntryEvidence::new(
             "Test entry".to_string(),
             ChangelogCategory::Added,
-            vec![
-                KeywordMatch {
-                    keyword: "test".to_string(),
-                    files_found: vec!["a.rs".to_string()],
-                    occurrence_count: Some(1),
-                    sample_lines: Some(vec![]),
-                    appears_complete: false,
-                },
-            ],
+            vec![KeywordMatch {
+                keyword: "test".to_string(),
+                files_found: vec!["a.rs".to_string()],
+                occurrence_count: Some(1),
+                sample_lines: Some(vec![]),
+                appears_complete: false,
+            }],
             vec![],
             vec![
                 StubIndicator {
@@ -1072,7 +1173,10 @@ mod tests {
         let checks = verify_numeric_claims("Added WebSocket support", temp_dir.path());
 
         // No numeric claims, should return empty
-        assert!(checks.is_empty(), "Should return empty for no numeric claims");
+        assert!(
+            checks.is_empty(),
+            "Should return empty for no numeric claims"
+        );
     }
 
     #[test]
@@ -1080,7 +1184,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let checks = verify_numeric_claims("Improved UTF-8 handling", temp_dir.path());
 
-        assert!(checks.is_empty(), "Should skip hyphenated tokens like UTF-8");
+        assert!(
+            checks.is_empty(),
+            "Should skip hyphenated tokens like UTF-8"
+        );
     }
 
     #[test]
@@ -1106,7 +1213,10 @@ mod tests {
         assert!(!checks.is_empty());
         let claim = &checks[0];
         // claimed_text should include both the number and subject
-        assert!(claim.claimed_text.contains("10"), "claimed_text should contain the number");
+        assert!(
+            claim.claimed_text.contains("10"),
+            "claimed_text should contain the number"
+        );
     }
 
     #[test]
@@ -1128,7 +1238,8 @@ mod tests {
 
     #[test]
     fn test_parse_rg_json_match_basic() {
-        let line = r#"{"type":"match","data":{"line_number":123,"lines":{"text":"fn main() {\n"}}}"#;
+        let line =
+            r#"{"type":"match","data":{"line_number":123,"lines":{"text":"fn main() {\n"}}}"#;
         let result = parse_rg_json_match(line);
         assert!(result.is_some());
         let (line_num, content) = result.unwrap();
@@ -1138,7 +1249,8 @@ mod tests {
 
     #[test]
     fn test_parse_rg_json_match_skips_context() {
-        let line = r#"{"type":"context","data":{"line_number":45,"lines":{"text":"    let x = 1;\n"}}}"#;
+        let line =
+            r#"{"type":"context","data":{"line_number":45,"lines":{"text":"    let x = 1;\n"}}}"#;
         let result = parse_rg_json_match(line);
         assert!(result.is_none(), "Should skip context lines");
     }
@@ -1153,7 +1265,10 @@ mod tests {
     fn test_parse_rg_json_match_missing_fields() {
         let line = r#"{"type":"match","data":{"lines":{"text":"hello\n"}}}"#;
         let result = parse_rg_json_match(line);
-        assert!(result.is_none(), "Should return None when line_number is missing");
+        assert!(
+            result.is_none(),
+            "Should return None when line_number is missing"
+        );
     }
 
     #[test]
@@ -1278,7 +1393,10 @@ exit 2
 
         let result = run_rg(&mut cmd);
 
-        assert!(result.is_err(), "run_rg should return error for exit code 2");
+        assert!(
+            result.is_err(),
+            "run_rg should return error for exit code 2"
+        );
 
         match result.unwrap_err() {
             VerificationError::RipgrepFailed { exit_code, stderr } => {
@@ -1322,7 +1440,10 @@ exit 3
 
         let result = run_rg(&mut cmd);
 
-        assert!(result.is_err(), "run_rg should return error for exit code 3");
+        assert!(
+            result.is_err(),
+            "run_rg should return error for exit code 3"
+        );
 
         match result.unwrap_err() {
             VerificationError::RipgrepFailed { exit_code, stderr } => {

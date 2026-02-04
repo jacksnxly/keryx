@@ -9,7 +9,7 @@ use tempfile::NamedTempFile;
 
 use crate::error::ChangelogError;
 
-use super::format::{ChangelogOutput, CHANGELOG_HEADER};
+use super::format::{CHANGELOG_HEADER, ChangelogOutput};
 use super::parser::{find_insertion_point, read_changelog};
 
 /// Atomically write content to a file using temp file + rename pattern.
@@ -22,8 +22,7 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), ChangelogError> {
     // Create temp file in same directory (required for atomic rename across filesystems)
     let parent = path.parent().unwrap_or(Path::new("."));
 
-    let mut temp_file =
-        NamedTempFile::new_in(parent).map_err(ChangelogError::WriteFailed)?;
+    let mut temp_file = NamedTempFile::new_in(parent).map_err(ChangelogError::WriteFailed)?;
 
     // Write content
     temp_file
@@ -51,8 +50,7 @@ fn atomic_copy(src: &Path, dst: &Path) -> Result<(), ChangelogError> {
     let content = std::fs::read(src).map_err(ChangelogError::BackupFailed)?;
 
     let parent = dst.parent().unwrap_or(Path::new("."));
-    let mut temp_file =
-        NamedTempFile::new_in(parent).map_err(ChangelogError::BackupFailed)?;
+    let mut temp_file = NamedTempFile::new_in(parent).map_err(ChangelogError::BackupFailed)?;
 
     temp_file
         .write_all(&content)
@@ -294,8 +292,6 @@ mod tests {
             .collect();
 
         assert_eq!(files_after.len(), files_before.len() + 1);
-        assert!(files_after
-            .iter()
-            .any(|e| e.file_name() == "test.md"));
+        assert!(files_after.iter().any(|e| e.file_name() == "test.md"));
     }
 }

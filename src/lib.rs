@@ -19,8 +19,11 @@ pub mod version;
 
 // Re-export commonly used types
 pub use changelog::{ChangelogCategory, ChangelogEntry, ChangelogOutput};
-pub use error::{ChangelogError, ClaudeError, CodexError, CommitError, GitError, GitHubError, VerificationError, VersionError};
+pub use error::{
+    ChangelogError, ClaudeError, CodexError, CommitError, GitError, GitHubError, VerificationError,
+    VersionError,
+};
 pub use git::{CommitType, ParsedCommit};
 pub use github::PullRequest;
-pub use verification::{VerificationEvidence, EntryEvidence, Confidence};
+pub use verification::{Confidence, EntryEvidence, VerificationEvidence};
 pub use version::BumpType;

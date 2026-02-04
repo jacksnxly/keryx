@@ -63,15 +63,21 @@ impl TestRepo {
 
         // Create or update a file to have something to commit
         let file_path = self.dir.path().join("test.txt");
-        let content = format!("{}\n{}", message, std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos());
+        let content = format!(
+            "{}\n{}",
+            message,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
         std::fs::write(&file_path, content).expect("Failed to write test file");
 
         // Add the file to the index
         let mut index = self.repo.index().expect("Failed to get index");
-        index.add_path(std::path::Path::new("test.txt")).expect("Failed to add file");
+        index
+            .add_path(std::path::Path::new("test.txt"))
+            .expect("Failed to add file");
         index.write().expect("Failed to write index");
         let tree_id = index.write_tree().expect("Failed to write tree");
         let tree = self.repo.find_tree(tree_id).expect("Failed to find tree");
@@ -88,21 +94,33 @@ impl TestRepo {
 
     /// Create a lightweight tag pointing to the given OID.
     pub fn tag_lightweight(&self, name: &str, oid: Oid) {
-        let obj = self.repo.find_object(oid, None).expect("Failed to find object");
-        self.repo.tag_lightweight(name, &obj, false).expect("Failed to create lightweight tag");
+        let obj = self
+            .repo
+            .find_object(oid, None)
+            .expect("Failed to find object");
+        self.repo
+            .tag_lightweight(name, &obj, false)
+            .expect("Failed to create lightweight tag");
     }
 
     /// Create an annotated tag pointing to the given OID.
     pub fn tag_annotated(&self, name: &str, oid: Oid, message: &str) {
         let sig = self.signature();
-        let obj = self.repo.find_object(oid, None).expect("Failed to find object");
-        self.repo.tag(name, &obj, &sig, message, false).expect("Failed to create annotated tag");
+        let obj = self
+            .repo
+            .find_object(oid, None)
+            .expect("Failed to find object");
+        self.repo
+            .tag(name, &obj, &sig, message, false)
+            .expect("Failed to create annotated tag");
     }
 
     /// Create a branch pointing to the given OID.
     pub fn branch(&self, name: &str, oid: Oid) {
         let commit = self.repo.find_commit(oid).expect("Failed to find commit");
-        self.repo.branch(name, &commit, false).expect("Failed to create branch");
+        self.repo
+            .branch(name, &commit, false)
+            .expect("Failed to create branch");
     }
 
     /// Create a merge commit with two parents.
@@ -111,8 +129,14 @@ impl TestRepo {
         let sig = self.signature();
 
         // Get both parent commits
-        let parent1_commit = self.repo.find_commit(parent1).expect("Failed to find parent1");
-        let parent2_commit = self.repo.find_commit(parent2).expect("Failed to find parent2");
+        let parent1_commit = self
+            .repo
+            .find_commit(parent1)
+            .expect("Failed to find parent1");
+        let parent2_commit = self
+            .repo
+            .find_commit(parent2)
+            .expect("Failed to find parent2");
 
         // For test purposes, just use parent1's tree (simulates a trivial merge)
         let tree = parent1_commit.tree().expect("Failed to get parent1 tree");

@@ -49,7 +49,8 @@ impl<'de> Deserialize<'de> for ChangelogCategory {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        s.parse::<ChangelogCategory>().map_err(serde::de::Error::custom)
+        s.parse::<ChangelogCategory>()
+            .map_err(serde::de::Error::custom)
     }
 }
 

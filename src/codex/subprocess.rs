@@ -105,7 +105,11 @@ pub async fn run_codex(prompt: &str) -> Result<String, CodexError> {
         .write_all(CHANGELOG_SCHEMA.as_bytes())
         .map_err(|e| CodexError::ExecutionFailed(format!("Failed to write schema file: {}", e)))?;
 
-    run_codex_command(prompt, &["--output-schema", &schema_file.path().display().to_string()]).await
+    run_codex_command(
+        prompt,
+        &["--output-schema", &schema_file.path().display().to_string()],
+    )
+    .await
 }
 
 /// Run Codex CLI with a prompt and return the raw text response.
@@ -185,8 +189,8 @@ mod tests {
 
     #[test]
     fn test_schema_is_valid_json() {
-        let value: serde_json::Value = serde_json::from_str(CHANGELOG_SCHEMA)
-            .expect("schema should be valid JSON");
+        let value: serde_json::Value =
+            serde_json::from_str(CHANGELOG_SCHEMA).expect("schema should be valid JSON");
         assert!(value.get("properties").is_some());
     }
 }

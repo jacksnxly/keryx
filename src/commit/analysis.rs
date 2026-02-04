@@ -113,11 +113,7 @@ pub async fn analyze_split(
     }
 
     // Validate the analysis
-    let changed_files: Vec<&str> = diff
-        .changed_files
-        .iter()
-        .map(|f| f.path.as_str())
-        .collect();
+    let changed_files: Vec<&str> = diff.changed_files.iter().map(|f| f.path.as_str()).collect();
 
     if let Some(error) = validate_split(&analysis, &changed_files) {
         warn!("Split analysis validation failed: {}", error);
@@ -216,9 +212,7 @@ mod tests {
 
     #[test]
     fn test_validate_split_orphaned_file() {
-        let analysis = make_analysis(vec![
-            ("Group A", vec!["src/a.rs"]),
-        ]);
+        let analysis = make_analysis(vec![("Group A", vec!["src/a.rs"])]);
         let changed = vec!["src/a.rs", "src/b.rs"];
         let err = validate_split(&analysis, &changed).unwrap();
         assert!(err.contains("src/b.rs"));
@@ -239,9 +233,7 @@ mod tests {
 
     #[test]
     fn test_validate_split_unknown_file() {
-        let analysis = make_analysis(vec![
-            ("Group A", vec!["src/a.rs", "src/unknown.rs"]),
-        ]);
+        let analysis = make_analysis(vec![("Group A", vec!["src/a.rs", "src/unknown.rs"])]);
         let changed = vec!["src/a.rs"];
         let err = validate_split(&analysis, &changed).unwrap();
         assert!(err.contains("Unknown"));
@@ -306,7 +298,10 @@ mod tests {
         let analysis: SplitAnalysis = serde_json::from_str(json).unwrap();
         assert_eq!(analysis.groups.len(), 2);
         assert_eq!(analysis.groups[0].label, "Add analysis module");
-        assert_eq!(analysis.groups[0].files, vec!["src/commit/analysis.rs", "tests/analysis_test.rs"]);
+        assert_eq!(
+            analysis.groups[0].files,
+            vec!["src/commit/analysis.rs", "tests/analysis_test.rs"]
+        );
         assert_eq!(analysis.groups[1].label, "Update CLI");
         assert_eq!(analysis.groups[1].files, vec!["src/main.rs"]);
     }

@@ -6,7 +6,7 @@ use chrono::{TimeZone, Utc};
 use keryx::error::GitHubError;
 use keryx::github::fetch_merged_prs_with_client;
 use octocrab::Octocrab;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -28,19 +28,76 @@ fn mock_user(login: &str, id: u64) -> Value {
     user.insert("login".into(), json!(login));
     user.insert("id".into(), json!(id));
     user.insert("node_id".into(), json!(format!("MDQ6VXNlcnt{}", id)));
-    user.insert("avatar_url".into(), json!(format!("https://avatars.githubusercontent.com/u/{}?v=4", id)));
+    user.insert(
+        "avatar_url".into(),
+        json!(format!(
+            "https://avatars.githubusercontent.com/u/{}?v=4",
+            id
+        )),
+    );
     user.insert("gravatar_id".into(), json!(""));
-    user.insert("url".into(), json!(format!("https://api.github.com/users/{}", login)));
-    user.insert("html_url".into(), json!(format!("https://github.com/{}", login)));
-    user.insert("followers_url".into(), json!(format!("https://api.github.com/users/{}/followers", login)));
-    user.insert("following_url".into(), json!(format!("https://api.github.com/users/{}/following{{/other_user}}", login)));
-    user.insert("gists_url".into(), json!(format!("https://api.github.com/users/{}/gists{{/gist_id}}", login)));
-    user.insert("starred_url".into(), json!(format!("https://api.github.com/users/{}/starred{{/owner}}{{/repo}}", login)));
-    user.insert("subscriptions_url".into(), json!(format!("https://api.github.com/users/{}/subscriptions", login)));
-    user.insert("organizations_url".into(), json!(format!("https://api.github.com/users/{}/orgs", login)));
-    user.insert("repos_url".into(), json!(format!("https://api.github.com/users/{}/repos", login)));
-    user.insert("events_url".into(), json!(format!("https://api.github.com/users/{}/events{{/privacy}}", login)));
-    user.insert("received_events_url".into(), json!(format!("https://api.github.com/users/{}/received_events", login)));
+    user.insert(
+        "url".into(),
+        json!(format!("https://api.github.com/users/{}", login)),
+    );
+    user.insert(
+        "html_url".into(),
+        json!(format!("https://github.com/{}", login)),
+    );
+    user.insert(
+        "followers_url".into(),
+        json!(format!("https://api.github.com/users/{}/followers", login)),
+    );
+    user.insert(
+        "following_url".into(),
+        json!(format!(
+            "https://api.github.com/users/{}/following{{/other_user}}",
+            login
+        )),
+    );
+    user.insert(
+        "gists_url".into(),
+        json!(format!(
+            "https://api.github.com/users/{}/gists{{/gist_id}}",
+            login
+        )),
+    );
+    user.insert(
+        "starred_url".into(),
+        json!(format!(
+            "https://api.github.com/users/{}/starred{{/owner}}{{/repo}}",
+            login
+        )),
+    );
+    user.insert(
+        "subscriptions_url".into(),
+        json!(format!(
+            "https://api.github.com/users/{}/subscriptions",
+            login
+        )),
+    );
+    user.insert(
+        "organizations_url".into(),
+        json!(format!("https://api.github.com/users/{}/orgs", login)),
+    );
+    user.insert(
+        "repos_url".into(),
+        json!(format!("https://api.github.com/users/{}/repos", login)),
+    );
+    user.insert(
+        "events_url".into(),
+        json!(format!(
+            "https://api.github.com/users/{}/events{{/privacy}}",
+            login
+        )),
+    );
+    user.insert(
+        "received_events_url".into(),
+        json!(format!(
+            "https://api.github.com/users/{}/received_events",
+            login
+        )),
+    );
     user.insert("type".into(), json!("User"));
     user.insert("site_admin".into(), json!(false));
     Value::Object(user)
@@ -58,43 +115,154 @@ fn mock_repo() -> Value {
     repo.insert("html_url".into(), json!("https://github.com/owner/repo"));
     repo.insert("description".into(), json!("Test repository"));
     repo.insert("fork".into(), json!(false));
-    repo.insert("url".into(), json!("https://api.github.com/repos/owner/repo"));
-    repo.insert("forks_url".into(), json!("https://api.github.com/repos/owner/repo/forks"));
-    repo.insert("keys_url".into(), json!("https://api.github.com/repos/owner/repo/keys{/key_id}"));
-    repo.insert("collaborators_url".into(), json!("https://api.github.com/repos/owner/repo/collaborators{/collaborator}"));
-    repo.insert("teams_url".into(), json!("https://api.github.com/repos/owner/repo/teams"));
-    repo.insert("hooks_url".into(), json!("https://api.github.com/repos/owner/repo/hooks"));
-    repo.insert("issue_events_url".into(), json!("https://api.github.com/repos/owner/repo/issues/events{/number}"));
-    repo.insert("events_url".into(), json!("https://api.github.com/repos/owner/repo/events"));
-    repo.insert("assignees_url".into(), json!("https://api.github.com/repos/owner/repo/assignees{/user}"));
-    repo.insert("branches_url".into(), json!("https://api.github.com/repos/owner/repo/branches{/branch}"));
-    repo.insert("tags_url".into(), json!("https://api.github.com/repos/owner/repo/tags"));
-    repo.insert("blobs_url".into(), json!("https://api.github.com/repos/owner/repo/git/blobs{/sha}"));
-    repo.insert("git_tags_url".into(), json!("https://api.github.com/repos/owner/repo/git/tags{/sha}"));
-    repo.insert("git_refs_url".into(), json!("https://api.github.com/repos/owner/repo/git/refs{/sha}"));
-    repo.insert("trees_url".into(), json!("https://api.github.com/repos/owner/repo/git/trees{/sha}"));
-    repo.insert("statuses_url".into(), json!("https://api.github.com/repos/owner/repo/statuses/{sha}"));
-    repo.insert("languages_url".into(), json!("https://api.github.com/repos/owner/repo/languages"));
-    repo.insert("stargazers_url".into(), json!("https://api.github.com/repos/owner/repo/stargazers"));
-    repo.insert("contributors_url".into(), json!("https://api.github.com/repos/owner/repo/contributors"));
-    repo.insert("subscribers_url".into(), json!("https://api.github.com/repos/owner/repo/subscribers"));
-    repo.insert("subscription_url".into(), json!("https://api.github.com/repos/owner/repo/subscription"));
-    repo.insert("commits_url".into(), json!("https://api.github.com/repos/owner/repo/commits{/sha}"));
-    repo.insert("git_commits_url".into(), json!("https://api.github.com/repos/owner/repo/git/commits{/sha}"));
-    repo.insert("comments_url".into(), json!("https://api.github.com/repos/owner/repo/comments{/number}"));
-    repo.insert("issue_comment_url".into(), json!("https://api.github.com/repos/owner/repo/issues/comments{/number}"));
-    repo.insert("contents_url".into(), json!("https://api.github.com/repos/owner/repo/contents/{+path}"));
-    repo.insert("compare_url".into(), json!("https://api.github.com/repos/owner/repo/compare/{base}...{head}"));
-    repo.insert("merges_url".into(), json!("https://api.github.com/repos/owner/repo/merges"));
-    repo.insert("archive_url".into(), json!("https://api.github.com/repos/owner/repo/{archive_format}{/ref}"));
-    repo.insert("downloads_url".into(), json!("https://api.github.com/repos/owner/repo/downloads"));
-    repo.insert("issues_url".into(), json!("https://api.github.com/repos/owner/repo/issues{/number}"));
-    repo.insert("pulls_url".into(), json!("https://api.github.com/repos/owner/repo/pulls{/number}"));
-    repo.insert("milestones_url".into(), json!("https://api.github.com/repos/owner/repo/milestones{/number}"));
-    repo.insert("notifications_url".into(), json!("https://api.github.com/repos/owner/repo/notifications{?since,all,participating}"));
-    repo.insert("labels_url".into(), json!("https://api.github.com/repos/owner/repo/labels{/name}"));
-    repo.insert("releases_url".into(), json!("https://api.github.com/repos/owner/repo/releases{/id}"));
-    repo.insert("deployments_url".into(), json!("https://api.github.com/repos/owner/repo/deployments"));
+    repo.insert(
+        "url".into(),
+        json!("https://api.github.com/repos/owner/repo"),
+    );
+    repo.insert(
+        "forks_url".into(),
+        json!("https://api.github.com/repos/owner/repo/forks"),
+    );
+    repo.insert(
+        "keys_url".into(),
+        json!("https://api.github.com/repos/owner/repo/keys{/key_id}"),
+    );
+    repo.insert(
+        "collaborators_url".into(),
+        json!("https://api.github.com/repos/owner/repo/collaborators{/collaborator}"),
+    );
+    repo.insert(
+        "teams_url".into(),
+        json!("https://api.github.com/repos/owner/repo/teams"),
+    );
+    repo.insert(
+        "hooks_url".into(),
+        json!("https://api.github.com/repos/owner/repo/hooks"),
+    );
+    repo.insert(
+        "issue_events_url".into(),
+        json!("https://api.github.com/repos/owner/repo/issues/events{/number}"),
+    );
+    repo.insert(
+        "events_url".into(),
+        json!("https://api.github.com/repos/owner/repo/events"),
+    );
+    repo.insert(
+        "assignees_url".into(),
+        json!("https://api.github.com/repos/owner/repo/assignees{/user}"),
+    );
+    repo.insert(
+        "branches_url".into(),
+        json!("https://api.github.com/repos/owner/repo/branches{/branch}"),
+    );
+    repo.insert(
+        "tags_url".into(),
+        json!("https://api.github.com/repos/owner/repo/tags"),
+    );
+    repo.insert(
+        "blobs_url".into(),
+        json!("https://api.github.com/repos/owner/repo/git/blobs{/sha}"),
+    );
+    repo.insert(
+        "git_tags_url".into(),
+        json!("https://api.github.com/repos/owner/repo/git/tags{/sha}"),
+    );
+    repo.insert(
+        "git_refs_url".into(),
+        json!("https://api.github.com/repos/owner/repo/git/refs{/sha}"),
+    );
+    repo.insert(
+        "trees_url".into(),
+        json!("https://api.github.com/repos/owner/repo/git/trees{/sha}"),
+    );
+    repo.insert(
+        "statuses_url".into(),
+        json!("https://api.github.com/repos/owner/repo/statuses/{sha}"),
+    );
+    repo.insert(
+        "languages_url".into(),
+        json!("https://api.github.com/repos/owner/repo/languages"),
+    );
+    repo.insert(
+        "stargazers_url".into(),
+        json!("https://api.github.com/repos/owner/repo/stargazers"),
+    );
+    repo.insert(
+        "contributors_url".into(),
+        json!("https://api.github.com/repos/owner/repo/contributors"),
+    );
+    repo.insert(
+        "subscribers_url".into(),
+        json!("https://api.github.com/repos/owner/repo/subscribers"),
+    );
+    repo.insert(
+        "subscription_url".into(),
+        json!("https://api.github.com/repos/owner/repo/subscription"),
+    );
+    repo.insert(
+        "commits_url".into(),
+        json!("https://api.github.com/repos/owner/repo/commits{/sha}"),
+    );
+    repo.insert(
+        "git_commits_url".into(),
+        json!("https://api.github.com/repos/owner/repo/git/commits{/sha}"),
+    );
+    repo.insert(
+        "comments_url".into(),
+        json!("https://api.github.com/repos/owner/repo/comments{/number}"),
+    );
+    repo.insert(
+        "issue_comment_url".into(),
+        json!("https://api.github.com/repos/owner/repo/issues/comments{/number}"),
+    );
+    repo.insert(
+        "contents_url".into(),
+        json!("https://api.github.com/repos/owner/repo/contents/{+path}"),
+    );
+    repo.insert(
+        "compare_url".into(),
+        json!("https://api.github.com/repos/owner/repo/compare/{base}...{head}"),
+    );
+    repo.insert(
+        "merges_url".into(),
+        json!("https://api.github.com/repos/owner/repo/merges"),
+    );
+    repo.insert(
+        "archive_url".into(),
+        json!("https://api.github.com/repos/owner/repo/{archive_format}{/ref}"),
+    );
+    repo.insert(
+        "downloads_url".into(),
+        json!("https://api.github.com/repos/owner/repo/downloads"),
+    );
+    repo.insert(
+        "issues_url".into(),
+        json!("https://api.github.com/repos/owner/repo/issues{/number}"),
+    );
+    repo.insert(
+        "pulls_url".into(),
+        json!("https://api.github.com/repos/owner/repo/pulls{/number}"),
+    );
+    repo.insert(
+        "milestones_url".into(),
+        json!("https://api.github.com/repos/owner/repo/milestones{/number}"),
+    );
+    repo.insert(
+        "notifications_url".into(),
+        json!("https://api.github.com/repos/owner/repo/notifications{?since,all,participating}"),
+    );
+    repo.insert(
+        "labels_url".into(),
+        json!("https://api.github.com/repos/owner/repo/labels{/name}"),
+    );
+    repo.insert(
+        "releases_url".into(),
+        json!("https://api.github.com/repos/owner/repo/releases{/id}"),
+    );
+    repo.insert(
+        "deployments_url".into(),
+        json!("https://api.github.com/repos/owner/repo/deployments"),
+    );
     Value::Object(repo)
 }
 
@@ -159,18 +327,69 @@ fn mock_pr(
 
     // Build the PR object using a Map to avoid macro recursion limits
     let mut pr = Map::new();
-    pr.insert("url".into(), json!(format!("https://api.github.com/repos/owner/repo/pulls/{}", number)));
+    pr.insert(
+        "url".into(),
+        json!(format!(
+            "https://api.github.com/repos/owner/repo/pulls/{}",
+            number
+        )),
+    );
     pr.insert("id".into(), json!(number * 1000));
     pr.insert("node_id".into(), json!(format!("PR_{}", number)));
-    pr.insert("html_url".into(), json!(format!("https://github.com/owner/repo/pull/{}", number)));
-    pr.insert("diff_url".into(), json!(format!("https://github.com/owner/repo/pull/{}.diff", number)));
-    pr.insert("patch_url".into(), json!(format!("https://github.com/owner/repo/pull/{}.patch", number)));
-    pr.insert("issue_url".into(), json!(format!("https://api.github.com/repos/owner/repo/issues/{}", number)));
-    pr.insert("commits_url".into(), json!(format!("https://api.github.com/repos/owner/repo/pulls/{}/commits", number)));
-    pr.insert("review_comments_url".into(), json!(format!("https://api.github.com/repos/owner/repo/pulls/{}/comments", number)));
-    pr.insert("review_comment_url".into(), json!("https://api.github.com/repos/owner/repo/pulls/comments{/number}"));
-    pr.insert("comments_url".into(), json!(format!("https://api.github.com/repos/owner/repo/issues/{}/comments", number)));
-    pr.insert("statuses_url".into(), json!("https://api.github.com/repos/owner/repo/statuses/abc123"));
+    pr.insert(
+        "html_url".into(),
+        json!(format!("https://github.com/owner/repo/pull/{}", number)),
+    );
+    pr.insert(
+        "diff_url".into(),
+        json!(format!(
+            "https://github.com/owner/repo/pull/{}.diff",
+            number
+        )),
+    );
+    pr.insert(
+        "patch_url".into(),
+        json!(format!(
+            "https://github.com/owner/repo/pull/{}.patch",
+            number
+        )),
+    );
+    pr.insert(
+        "issue_url".into(),
+        json!(format!(
+            "https://api.github.com/repos/owner/repo/issues/{}",
+            number
+        )),
+    );
+    pr.insert(
+        "commits_url".into(),
+        json!(format!(
+            "https://api.github.com/repos/owner/repo/pulls/{}/commits",
+            number
+        )),
+    );
+    pr.insert(
+        "review_comments_url".into(),
+        json!(format!(
+            "https://api.github.com/repos/owner/repo/pulls/{}/comments",
+            number
+        )),
+    );
+    pr.insert(
+        "review_comment_url".into(),
+        json!("https://api.github.com/repos/owner/repo/pulls/comments{/number}"),
+    );
+    pr.insert(
+        "comments_url".into(),
+        json!(format!(
+            "https://api.github.com/repos/owner/repo/issues/{}/comments",
+            number
+        )),
+    );
+    pr.insert(
+        "statuses_url".into(),
+        json!("https://api.github.com/repos/owner/repo/statuses/abc123"),
+    );
     pr.insert("number".into(), json!(number));
     pr.insert("state".into(), json!("closed"));
     pr.insert("locked".into(), json!(false));
@@ -209,7 +428,9 @@ fn mock_pr(
 
 /// Create a simple merged PR for a given page number.
 fn pr_for_page(page: u32) -> serde_json::Value {
-    let merged_at = Utc.with_ymd_and_hms(2024, 1, (page % 28) + 1, 12, 0, 0).unwrap();
+    let merged_at = Utc
+        .with_ymd_and_hms(2024, 1, (page % 28) + 1, 12, 0, 0)
+        .unwrap();
     mock_pr(
         page as u64,
         &format!("PR from page {}", page),
@@ -229,7 +450,13 @@ async fn test_pagination_single_page() {
 
     let merged_at = Utc.with_ymd_and_hms(2024, 6, 15, 12, 0, 0).unwrap();
     let pr1 = mock_pr(1, "First PR", Some(merged_at), Some("Body 1"), vec!["bug"]);
-    let pr2 = mock_pr(2, "Second PR", Some(merged_at), Some("Body 2"), vec!["feature"]);
+    let pr2 = mock_pr(
+        2,
+        "Second PR",
+        Some(merged_at),
+        Some("Body 2"),
+        vec!["feature"],
+    );
 
     Mock::given(method("GET"))
         .and(path("/repos/owner/repo/pulls"))
@@ -334,7 +561,8 @@ async fn test_filter_since_date() {
     let client = mock_client(&server).await;
     let since = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
 
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), None, None).await;
+    let result =
+        fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), None, None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -361,7 +589,8 @@ async fn test_filter_until_date() {
     let client = mock_client(&server).await;
     let until = Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap();
 
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, Some(until), None).await;
+    let result =
+        fetch_merged_prs_with_client(&client, "owner", "repo", None, Some(until), None).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -392,7 +621,8 @@ async fn test_filter_date_range() {
     let until = Utc.with_ymd_and_hms(2024, 9, 1, 0, 0, 0).unwrap();
 
     let result =
-        fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), Some(until), None).await;
+        fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), Some(until), None)
+            .await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();
@@ -417,7 +647,8 @@ async fn test_filter_excludes_all() {
     // Date range that excludes all PRs
     let since = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
 
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), None, None).await;
+    let result =
+        fetch_merged_prs_with_client(&client, "owner", "repo", Some(since), None, None).await;
 
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
@@ -537,7 +768,8 @@ async fn test_repository_not_found() {
         .await;
 
     let client = mock_client(&server).await;
-    let result = fetch_merged_prs_with_client(&client, "owner", "nonexistent", None, None, None).await;
+    let result =
+        fetch_merged_prs_with_client(&client, "owner", "nonexistent", None, None, None).await;
 
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -796,7 +1028,8 @@ async fn test_pr_limit_greater_than_available() {
 
     let client = mock_client(&server).await;
     // Limit is greater than available PRs
-    let result = fetch_merged_prs_with_client(&client, "owner", "repo", None, None, Some(100)).await;
+    let result =
+        fetch_merged_prs_with_client(&client, "owner", "repo", None, None, Some(100)).await;
 
     assert!(result.is_ok());
     let prs = result.unwrap();

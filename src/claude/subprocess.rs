@@ -332,8 +332,14 @@ mod tests {
 
         // from_utf8_lossy should handle it gracefully (replaces invalid bytes)
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("valid"), "Should contain valid text before invalid byte");
-        assert!(stdout.contains("text"), "Should contain valid text after invalid byte");
+        assert!(
+            stdout.contains("valid"),
+            "Should contain valid text before invalid byte"
+        );
+        assert!(
+            stdout.contains("text"),
+            "Should contain valid text after invalid byte"
+        );
         assert!(
             stdout.contains('\u{FFFD}'),
             "Should contain Unicode replacement character for invalid bytes"
@@ -358,8 +364,14 @@ mod tests {
 
         // from_utf8_lossy should handle invalid UTF-8 gracefully
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("error"), "Should contain text before invalid bytes");
-        assert!(stderr.contains("msg"), "Should contain text after invalid bytes");
+        assert!(
+            stderr.contains("error"),
+            "Should contain text before invalid bytes"
+        );
+        assert!(
+            stderr.contains("msg"),
+            "Should contain text after invalid bytes"
+        );
 
         // Error should be constructable with lossy string
         let error = ClaudeError::NonZeroExit {
@@ -378,7 +390,10 @@ mod tests {
         // Test the pattern: if a command's --version returns non-zero, it should be treated as not installed
         // We use 'false' as a stand-in since it always returns non-zero
 
-        let version_check = Command::new("false").output().await.expect("failed to run false");
+        let version_check = Command::new("false")
+            .output()
+            .await
+            .expect("failed to run false");
 
         assert!(!version_check.status.success());
 

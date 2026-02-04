@@ -18,7 +18,11 @@ fn make_commit(commit_type: Option<CommitType>, breaking: bool, message: &str) -
 
 #[test]
 fn test_initial_version_with_feat() {
-    let commits = vec![make_commit(Some(CommitType::Feat), false, "feat: initial feature")];
+    let commits = vec![make_commit(
+        Some(CommitType::Feat),
+        false,
+        "feat: initial feature",
+    )];
 
     let next = calculate_next_version(None, &commits);
 
@@ -28,7 +32,11 @@ fn test_initial_version_with_feat() {
 
 #[test]
 fn test_initial_version_with_fix() {
-    let commits = vec![make_commit(Some(CommitType::Fix), false, "fix: initial fix")];
+    let commits = vec![make_commit(
+        Some(CommitType::Fix),
+        false,
+        "fix: initial fix",
+    )];
 
     let next = calculate_next_version(None, &commits);
 
@@ -38,7 +46,11 @@ fn test_initial_version_with_fix() {
 
 #[test]
 fn test_initial_version_with_breaking() {
-    let commits = vec![make_commit(Some(CommitType::Feat), true, "feat!: breaking initial")];
+    let commits = vec![make_commit(
+        Some(CommitType::Feat),
+        true,
+        "feat!: breaking initial",
+    )];
 
     let next = calculate_next_version(None, &commits);
 
@@ -134,7 +146,11 @@ fn test_non_conventional_commits_default_to_patch() {
 #[test]
 fn test_prerelease_base_version() {
     let base = Version::parse("1.0.0-beta.1").unwrap();
-    let commits = vec![make_commit(Some(CommitType::Feat), false, "feat: new feature")];
+    let commits = vec![make_commit(
+        Some(CommitType::Feat),
+        false,
+        "feat: new feature",
+    )];
 
     let next = calculate_next_version(Some(&base), &commits);
 

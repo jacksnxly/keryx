@@ -58,9 +58,7 @@ pub struct DiffSummary {
 fn resolve_head_tree(repo: &Repository) -> Result<Option<Tree<'_>>, CommitError> {
     let head_ref = match repo.head() {
         Ok(r) => r,
-        Err(e)
-            if e.code() == ErrorCode::UnbornBranch || e.code() == ErrorCode::NotFound =>
-        {
+        Err(e) if e.code() == ErrorCode::UnbornBranch || e.code() == ErrorCode::NotFound => {
             return Ok(None);
         }
         Err(e) => return Err(CommitError::DiffFailed(e)),
@@ -91,7 +89,9 @@ pub fn collect_diff_for_paths(
 
     // Unstaged + untracked changes with pathspec filter
     let mut unstaged_opts = DiffOptions::new();
-    unstaged_opts.include_untracked(true).recurse_untracked_dirs(true);
+    unstaged_opts
+        .include_untracked(true)
+        .recurse_untracked_dirs(true);
     for p in paths {
         unstaged_opts.pathspec(p);
     }
@@ -114,8 +114,7 @@ pub fn collect_diff(repo: &Repository) -> Result<DiffSummary, CommitError> {
         .map_err(CommitError::DiffFailed)?;
 
     let mut opts = DiffOptions::new();
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(true);
+    opts.include_untracked(true).recurse_untracked_dirs(true);
     let unstaged_diff = repo
         .diff_index_to_workdir(None, Some(&mut opts))
         .map_err(CommitError::DiffFailed)?;
@@ -144,9 +143,21 @@ fn build_summary(staged: &Diff<'_>, unstaged: &Diff<'_>) -> Result<DiffSummary, 
     let mut deletions = 0usize;
     let mut truncated = false;
 
-    append_diff_text(staged, &mut diff_text, &mut additions, &mut deletions, &mut truncated);
+    append_diff_text(
+        staged,
+        &mut diff_text,
+        &mut additions,
+        &mut deletions,
+        &mut truncated,
+    );
     if !truncated {
-        append_diff_text(unstaged, &mut diff_text, &mut additions, &mut deletions, &mut truncated);
+        append_diff_text(
+            unstaged,
+            &mut diff_text,
+            &mut additions,
+            &mut deletions,
+            &mut truncated,
+        );
     }
 
     Ok(DiffSummary {
@@ -197,7 +208,11 @@ fn collect_files_from_diff(diff: &Diff<'_>, files: &mut HashMap<String, ChangedF
             continue;
         }
 
-        let next = ChangedFile { path: path.clone(), status, old_path };
+        let next = ChangedFile {
+            path: path.clone(),
+            status,
+            old_path,
+        };
 
         files.entry(path).or_insert(next);
     }
@@ -270,7 +285,8 @@ mod tests {
         let sig = git2::Signature::now("Test", "test@test.com").unwrap();
         let tree_id = repo.index().unwrap().write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
 
         let result = collect_diff(&repo);
         assert!(matches!(result, Err(CommitError::NoChanges)));
@@ -285,14 +301,20 @@ mod tests {
         let sig = git2::Signature::now("Test", "test@test.com").unwrap();
         let tree_id = repo.index().unwrap().write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
 
         // Create a new file (untracked)
         std::fs::write(dir.path().join("new.txt"), "hello world\n").unwrap();
 
         let summary = collect_diff(&repo).unwrap();
         assert!(!summary.changed_files.is_empty());
-        assert!(summary.changed_files.iter().any(|f| f.path == "new.txt" && f.status == FileStatus::Added));
+        assert!(
+            summary
+                .changed_files
+                .iter()
+                .any(|f| f.path == "new.txt" && f.status == FileStatus::Added)
+        );
     }
 
     #[test]
@@ -304,7 +326,8 @@ mod tests {
         let sig = git2::Signature::now("Test", "test@test.com").unwrap();
         let tree_id = repo.index().unwrap().write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
 
         // Create 3 files
         std::fs::write(dir.path().join("a.txt"), "file a\n").unwrap();
@@ -316,7 +339,11 @@ mod tests {
         let summary = collect_diff_for_paths(&repo, &paths).unwrap();
 
         assert_eq!(summary.changed_files.len(), 2);
-        let file_names: Vec<&str> = summary.changed_files.iter().map(|f| f.path.as_str()).collect();
+        let file_names: Vec<&str> = summary
+            .changed_files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
         assert!(file_names.contains(&"a.txt"));
         assert!(file_names.contains(&"c.txt"));
         assert!(!file_names.contains(&"b.txt"));
@@ -331,7 +358,8 @@ mod tests {
         let sig = git2::Signature::now("Test", "test@test.com").unwrap();
         let tree_id = repo.index().unwrap().write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
 
         // Create a file but request diff for a non-existent path
         std::fs::write(dir.path().join("a.txt"), "file a\n").unwrap();
@@ -376,7 +404,8 @@ mod tests {
         let sig = git2::Signature::now("Test", "test@test.com").unwrap();
         let tree_id = repo.index().unwrap().write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
 
         // Corrupt HEAD by pointing it to a non-existent ref
         std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/\0invalid").unwrap();
@@ -400,7 +429,8 @@ mod tests {
         let sig = git2::Signature::now("Test", "test@test.com").unwrap();
         let tree_id = repo.index().unwrap().write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
 
         // Corrupt HEAD
         std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/\0invalid").unwrap();
@@ -429,7 +459,8 @@ mod tests {
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
         let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
 
         // Modify and stage the file
         std::fs::write(&file_path, "modified\n").unwrap();
@@ -438,7 +469,12 @@ mod tests {
         index.write().unwrap();
 
         let summary = collect_diff(&repo).unwrap();
-        assert!(summary.changed_files.iter().any(|f| f.path == "file.txt" && f.status == FileStatus::Modified));
+        assert!(
+            summary
+                .changed_files
+                .iter()
+                .any(|f| f.path == "file.txt" && f.status == FileStatus::Modified)
+        );
         assert!(summary.diff_text.contains("modified"));
     }
 }

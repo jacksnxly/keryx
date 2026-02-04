@@ -19,8 +19,8 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -28,8 +28,8 @@ use tempfile::TempDir;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use keryx::claude::ClaudeExecutor;
 use keryx::ClaudeError;
+use keryx::claude::ClaudeExecutor;
 
 /// Test executor that runs a shell script to simulate Claude responses.
 ///
@@ -66,7 +66,10 @@ impl ClaudeExecutor for ScriptExecutor {
             Command::new(&self.script_path)
                 .arg("-p")
                 .arg(prompt)
-                .env("CALL_COUNT", self.call_count.load(Ordering::SeqCst).to_string())
+                .env(
+                    "CALL_COUNT",
+                    self.call_count.load(Ordering::SeqCst).to_string(),
+                )
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output(),
@@ -110,13 +113,13 @@ fn create_mock_script(script_content: &str) -> (TempDir, PathBuf) {
 
 // Import the retry function with internal implementation
 mod retry_helper {
+    use keryx::ClaudeError;
     use keryx::changelog::ChangelogOutput;
     use keryx::claude::ClaudeExecutor;
-    use keryx::ClaudeError;
 
-    use std::time::Duration;
-    use backoff::backoff::Backoff;
     use backoff::ExponentialBackoff;
+    use backoff::backoff::Backoff;
+    use std::time::Duration;
 
     const MAX_ATTEMPTS: u32 = 3;
     // Use very short backoff for tests (10ms)
@@ -321,11 +324,7 @@ async fn test_retries_exhausted_includes_last_error() {
     assert!(result.is_err(), "Should fail after retries exhausted");
 
     // Should have tried 3 times
-    assert_eq!(
-        executor.call_count(),
-        3,
-        "Should have exactly 3 attempts"
-    );
+    assert_eq!(executor.call_count(), 3, "Should have exactly 3 attempts");
 
     // Error should be RetriesExhausted with NonZeroExit inside
     match result {
@@ -368,11 +367,7 @@ async fn test_partial_json_handled_gracefully() {
     assert!(result.is_err(), "Should fail with partial JSON");
 
     // Should have retried all attempts
-    assert_eq!(
-        executor.call_count(),
-        3,
-        "Should exhaust all retries"
-    );
+    assert_eq!(executor.call_count(), 3, "Should exhaust all retries");
 
     // Error should indicate JSON parsing failure
     match result {
@@ -442,7 +437,11 @@ async fn test_recovery_after_transient_failures() {
     let result = retry_helper::generate_with_retry("test prompt", &executor).await;
 
     // Should succeed on third attempt
-    assert!(result.is_ok(), "Should recover from transient failures: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Should recover from transient failures: {:?}",
+        result
+    );
 
     // Should have tried 3 times
     assert_eq!(executor.call_count(), 3, "Should try exactly 3 times");
@@ -524,6 +523,9 @@ async fn test_is_error_flag_handled() {
                 inner
             );
         }
-        other => panic!("Expected RetriesExhausted(ExecutionFailed), got: {:?}", other),
+        other => panic!(
+            "Expected RetriesExhausted(ExecutionFailed), got: {:?}",
+            other
+        ),
     }
 }

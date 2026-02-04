@@ -31,10 +31,7 @@ pub fn apply_bump_to_version(base: Option<&Version>, bump: BumpType) -> Version 
 /// - Breaking changes = major bump
 /// - feat: commits = minor bump
 /// - fix: commits = patch bump
-pub fn calculate_next_version(
-    base_version: Option<&Version>,
-    commits: &[ParsedCommit],
-) -> Version {
+pub fn calculate_next_version(base_version: Option<&Version>, commits: &[ParsedCommit]) -> Version {
     let bump_type = determine_bump_type(commits);
     apply_bump_to_version(base_version, bump_type)
 }
@@ -138,23 +135,35 @@ mod tests {
     #[test]
     fn test_apply_bump_major() {
         let base = Version::new(1, 2, 3);
-        assert_eq!(apply_bump_to_version(Some(&base), BumpType::Major), Version::new(2, 0, 0));
+        assert_eq!(
+            apply_bump_to_version(Some(&base), BumpType::Major),
+            Version::new(2, 0, 0)
+        );
     }
 
     #[test]
     fn test_apply_bump_minor() {
         let base = Version::new(1, 2, 3);
-        assert_eq!(apply_bump_to_version(Some(&base), BumpType::Minor), Version::new(1, 3, 0));
+        assert_eq!(
+            apply_bump_to_version(Some(&base), BumpType::Minor),
+            Version::new(1, 3, 0)
+        );
     }
 
     #[test]
     fn test_apply_bump_patch() {
         let base = Version::new(1, 2, 3);
-        assert_eq!(apply_bump_to_version(Some(&base), BumpType::Patch), Version::new(1, 2, 4));
+        assert_eq!(
+            apply_bump_to_version(Some(&base), BumpType::Patch),
+            Version::new(1, 2, 4)
+        );
     }
 
     #[test]
     fn test_apply_bump_no_base() {
-        assert_eq!(apply_bump_to_version(None, BumpType::Minor), Version::new(0, 1, 0));
+        assert_eq!(
+            apply_bump_to_version(None, BumpType::Minor),
+            Version::new(0, 1, 0)
+        );
     }
 }
