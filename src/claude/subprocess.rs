@@ -80,13 +80,31 @@ pub async fn run_claude(prompt: &str) -> Result<String, ClaudeError> {
     let timeout_duration = get_timeout();
     let timeout_secs = timeout_duration.as_secs();
 
+    // Write prompt to a temp file to avoid shell escaping issues
+    // The prompt may contain diffs with special shell characters
+    let temp_dir = std::env::temp_dir();
+    let prompt_file = temp_dir.join(format!("keryx-prompt-{}.txt", std::process::id()));
+    std::fs::write(&prompt_file, prompt).map_err(|e| ClaudeError::SpawnFailed(e))?;
+
+    // Build command that reads prompt from file
+    let claude_cmd = format!(
+        "claude -p \"$(cat {})\" --output-format json --dangerously-skip-permissions",
+        prompt_file.display()
+    );
+
+    // Use `script` to provide a pseudo-TTY for Claude Code
+    // This works around Claude Code's TTY requirement bug (GitHub #9026)
+    // Linux: script -q -c "command" /dev/null
+    // macOS: script -q /dev/null command
+    #[cfg(target_os = "macos")]
     let output = timeout(
         timeout_duration,
-        Command::new("claude")
-            .arg("-p")
-            .arg(prompt)
-            .arg("--output-format")
-            .arg("json")
+        Command::new("script")
+            .arg("-q")
+            .arg("/dev/null")
+            .arg("sh")
+            .arg("-c")
+            .arg(&claude_cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output(),
@@ -95,6 +113,25 @@ pub async fn run_claude(prompt: &str) -> Result<String, ClaudeError> {
     .map_err(|_| ClaudeError::Timeout(timeout_secs))?
     .map_err(ClaudeError::SpawnFailed)?;
 
+    #[cfg(not(target_os = "macos"))]
+    let output = timeout(
+        timeout_duration,
+        Command::new("script")
+            .arg("-q")
+            .arg("-c")
+            .arg(&claude_cmd)
+            .arg("/dev/null")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| ClaudeError::Timeout(timeout_secs))?
+    .map_err(ClaudeError::SpawnFailed)?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&prompt_file);
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let code = output.status.code().unwrap_or(-1);
@@ -102,7 +139,83 @@ pub async fn run_claude(prompt: &str) -> Result<String, ClaudeError> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    
+    // Strip ANSI escape codes added by the script TTY wrapper
+    let stdout = strip_ansi_codes(&stdout);
     Ok(stdout)
+}
+
+/// Strip ANSI escape codes from a string.
+/// The `script` command adds terminal control sequences that we need to remove.
+fn strip_ansi_codes(s: &str) -> String {
+    // Use regex-like state machine to strip all ANSI sequences
+    // Patterns: ESC [ ... letter, ESC ] ... BEL, ESC [ ? ... letter
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            // ESC character - start of escape sequence
+            i += 1;
+            if i >= bytes.len() {
+                break;
+            }
+            
+            match bytes[i] {
+                b'[' => {
+                    // CSI sequence: ESC [ (params) (letter)
+                    i += 1;
+                    // Skip until we hit a letter (0x40-0x7E)
+                    while i < bytes.len() {
+                        let b = bytes[i];
+                        i += 1;
+                        if (0x40..=0x7E).contains(&b) {
+                            break;
+                        }
+                    }
+                }
+                b']' => {
+                    // OSC sequence: ESC ] ... BEL or ESC ] ... ESC \
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == 0x07 {
+                            // BEL terminates OSC
+                            i += 1;
+                            break;
+                        } else if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                            // ST (ESC \) terminates OSC
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                b'<' => {
+                    // Private sequence ESC < ... - skip to end
+                    i += 1;
+                    while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                    if i < bytes.len() {
+                        i += 1; // skip terminating letter
+                    }
+                }
+                _ => {
+                    // Other ESC sequences - skip next char
+                    i += 1;
+                }
+            }
+        } else if bytes[i] == b'\r' {
+            // Skip carriage returns
+            i += 1;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    
+    result
 }
 
 #[cfg(test)]
