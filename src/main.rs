@@ -1000,21 +1000,83 @@ async fn run_push(
 }
 
 /// Push the current branch to its remote.
+///
+/// Following CLI best practices (clig.dev), this function:
+/// - Checks for upstream tracking before attempting push
+/// - Provides actionable error messages with fix commands
+/// - Uses verbose mode for detailed debugging output
 async fn push_to_remote(verbose: bool) -> Result<()> {
+    // Get current branch name for actionable error messages
+    let branch_output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .await
+        .context("Failed to determine current branch")?;
+
+    let branch_name = String::from_utf8_lossy(&branch_output.stdout)
+        .trim()
+        .to_string();
+
     if verbose {
-        debug!("Running git push");
+        debug!("Current branch: {}", branch_name);
     }
 
-    let status = Command::new("git")
+    // Check if upstream tracking branch is configured
+    // This prevents confusing errors when push fails due to no upstream
+    let upstream_check = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "@{u}"])
+        .output()
+        .await;
+
+    let has_upstream = upstream_check
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !has_upstream {
+        bail!(
+            "No upstream branch configured for '{}'\n\n\
+             To push and set upstream in one command, run:\n  \
+             git push -u origin {}\n\n\
+             Or configure keryx to auto-set upstream (coming soon).",
+            branch_name,
+            branch_name
+        );
+    }
+
+    if verbose {
+        debug!("Upstream configured, running git push");
+    }
+
+    let output = Command::new("git")
         .arg("push")
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+        .stderr(Stdio::piped())
+        .output()
         .await
         .context("Failed to run `git push`")?;
 
-    if !status.success() {
-        bail!("git push failed with status {}", status);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Provide actionable hints based on common failure patterns
+        let hint = if stderr.contains("rejected") && stderr.contains("non-fast-forward") {
+            "\n\nHint: Remote has changes you don't have locally.\n  \
+             Pull first: git pull --rebase\n  \
+             Or force push: git push --force-with-lease"
+        } else if stderr.contains("Permission denied") || stderr.contains("403") {
+            "\n\nHint: Check your Git credentials or repository permissions."
+        } else if stderr.contains("Could not resolve host") {
+            "\n\nHint: Check your network connection."
+        } else {
+            ""
+        };
+
+        bail!(
+            "git push failed (exit {}){}\n\n{}",
+            output.status.code().unwrap_or(-1),
+            hint,
+            stderr.trim()
+        );
     }
 
     Ok(())
@@ -1807,7 +1869,10 @@ mod tests {
     impl EnvVarGuard {
         fn set(key: &'static str, value: String) -> Self {
             let original = env::var(key).ok();
-            // Safety: tests run in a single-threaded process scope with serial guard.
+            // SAFETY: `std::env::set_var` is unsafe since Rust 1.80 because modifying
+            // environment variables is not thread-safe. We use `#[serial]` from
+            // serial_test to ensure these tests run sequentially, preventing data races.
+            // This is the standard pattern for env var manipulation in Rust tests.
             unsafe {
                 env::set_var(key, value);
             }
@@ -1834,12 +1899,24 @@ mod tests {
     async fn test_push_to_remote_success() {
         let temp_dir = tempfile::tempdir().unwrap();
         let git_path = temp_dir.path().join("git");
+        // Mock git that handles: rev-parse --abbrev-ref HEAD, rev-parse --abbrev-ref @{u}, push
         let script = r#"#!/bin/sh
-if [ "$1" != "push" ]; then
-  echo "unexpected args: $@" >&2
-  exit 2
-fi
-exit 0
+case "$1 $2" in
+  "rev-parse --abbrev-ref")
+    if [ "$3" = "HEAD" ]; then
+      echo "main"
+      exit 0
+    elif [ "$3" = "@{u}" ]; then
+      echo "origin/main"
+      exit 0
+    fi
+    ;;
+  "push ")
+    exit 0
+    ;;
+esac
+echo "unexpected args: $@" >&2
+exit 2
 "#;
         std::fs::write(&git_path, script).unwrap();
         let mut perms = std::fs::metadata(&git_path).unwrap().permissions();
@@ -1851,17 +1928,80 @@ exit 0
         let _guard = EnvVarGuard::set("PATH", new_path);
 
         let result = push_to_remote(false).await;
-        assert!(result.is_ok(), "Expected git push to succeed");
+        assert!(result.is_ok(), "Expected git push to succeed: {:?}", result);
     }
 
     #[tokio::test]
     #[cfg(unix)]
     #[serial]
-    async fn test_push_to_remote_failure() {
+    async fn test_push_to_remote_no_upstream() {
         let temp_dir = tempfile::tempdir().unwrap();
         let git_path = temp_dir.path().join("git");
+        // Mock git where upstream check fails (no tracking branch)
         let script = r#"#!/bin/sh
-exit 1
+case "$1 $2" in
+  "rev-parse --abbrev-ref")
+    if [ "$3" = "HEAD" ]; then
+      echo "feature-branch"
+      exit 0
+    elif [ "$3" = "@{u}" ]; then
+      echo "fatal: no upstream configured for branch 'feature-branch'" >&2
+      exit 128
+    fi
+    ;;
+esac
+echo "unexpected args: $@" >&2
+exit 2
+"#;
+        std::fs::write(&git_path, script).unwrap();
+        let mut perms = std::fs::metadata(&git_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&git_path, perms).unwrap();
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", temp_dir.path().display(), original_path);
+        let _guard = EnvVarGuard::set("PATH", new_path);
+
+        let result = push_to_remote(false).await;
+        let err = result.expect_err("Expected push to fail without upstream");
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("No upstream branch configured"),
+            "Expected actionable error about upstream, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("git push -u origin"),
+            "Expected fix command in error, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    #[serial]
+    async fn test_push_to_remote_rejected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let git_path = temp_dir.path().join("git");
+        // Mock git where push is rejected (non-fast-forward)
+        let script = r#"#!/bin/sh
+case "$1 $2" in
+  "rev-parse --abbrev-ref")
+    if [ "$3" = "HEAD" ]; then
+      echo "main"
+      exit 0
+    elif [ "$3" = "@{u}" ]; then
+      echo "origin/main"
+      exit 0
+    fi
+    ;;
+  "push ")
+    echo "error: failed to push some refs" >&2
+    echo "hint: Updates were rejected because the remote contains work" >&2
+    echo "hint: that you do not have locally. non-fast-forward" >&2
+    exit 1
+    ;;
+esac
+echo "unexpected args: $@" >&2
+exit 2
 "#;
         std::fs::write(&git_path, script).unwrap();
         let mut perms = std::fs::metadata(&git_path).unwrap().permissions();
@@ -1874,9 +2014,14 @@ exit 1
 
         let result = push_to_remote(false).await;
         let err = result.expect_err("Expected git push to fail");
+        let err_msg = err.to_string();
         assert!(
-            err.to_string().contains("git push failed"),
-            "Expected error message to mention git push failure, got: {err}"
+            err_msg.contains("git push failed"),
+            "Expected error message to mention git push failure, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("pull --rebase") || err_msg.contains("force-with-lease"),
+            "Expected actionable hint for rejected push, got: {err_msg}"
         );
     }
 }
