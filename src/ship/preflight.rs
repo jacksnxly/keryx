@@ -58,15 +58,18 @@ pub fn run_checks(
     let mut commits = fetch_commits(repo, range.from, range.to, false)
         .map_err(|e| ShipError::GitFailed(e.to_string()))?;
 
-    // Special-case initial repos with a single commit and no tags.
-    // When `from == to`, the revwalk hides the only commit, producing an empty list.
-    if commits.is_empty() && latest_tag.is_none() && range.from == range.to {
+    // Include the root commit for initial releases (no tags).
+    // The revwalk hides `range.from`, so the first commit is otherwise omitted.
+    if latest_tag.is_none() {
         let commit = repo
-            .find_commit(range.to)
+            .find_commit(range.from)
             .map_err(|e| ShipError::GitFailed(e.to_string()))?;
-        let parsed = ParsedCommit::from_git2_commit(&commit, false)
-            .map_err(|e| ShipError::GitFailed(e.to_string()))?;
-        commits = vec![parsed];
+        let root_hash = commit.id().to_string();
+        if !commits.iter().any(|c| c.hash == root_hash) {
+            let parsed = ParsedCommit::from_git2_commit(&commit, false)
+                .map_err(|e| ShipError::GitFailed(e.to_string()))?;
+            commits.push(parsed);
+        }
     }
 
     let tag_ref = latest_tag
