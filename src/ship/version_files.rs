@@ -107,8 +107,12 @@ fn read_cargo_version(path: &Path) -> Result<Option<Version>, ShipError> {
     match version_str {
         Some(s) => match Version::parse(s) {
             Ok(v) => Ok(Some(v)),
-            Err(_) => Ok(None),
+            Err(_) => Err(ShipError::InvalidVersion {
+                path: path.to_path_buf(),
+                version: s.to_string(),
+            }),
         },
+        // No version field - skip this file (e.g., workspace member without version)
         None => Ok(None),
     }
 }
@@ -129,8 +133,12 @@ fn read_package_json_version(path: &Path) -> Result<Option<Version>, ShipError> 
     match version_str {
         Some(s) => match Version::parse(s) {
             Ok(v) => Ok(Some(v)),
-            Err(_) => Ok(None),
+            Err(_) => Err(ShipError::InvalidVersion {
+                path: path.to_path_buf(),
+                version: s.to_string(),
+            }),
         },
+        // No version field - skip this file
         None => Ok(None),
     }
 }
@@ -179,8 +187,12 @@ fn read_pyproject_version(path: &Path) -> Result<Option<Version>, ShipError> {
     match version_str {
         Some(s) => match Version::parse(s) {
             Ok(v) => Ok(Some(v)),
-            Err(_) => Ok(None),
+            Err(_) => Err(ShipError::InvalidVersion {
+                path: path.to_path_buf(),
+                version: s.to_string(),
+            }),
         },
+        // No version field - skip this file
         None => Ok(None),
     }
 }
@@ -411,5 +423,73 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("version = \"0.2.0\""));
+    }
+
+    #[test]
+    fn test_invalid_cargo_version_fails_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test\"\nversion = \"not-semver\"\n",
+        )
+        .unwrap();
+
+        let result = detect_version_files(dir.path());
+        assert!(matches!(result, Err(ShipError::InvalidVersion { .. })));
+        if let Err(ShipError::InvalidVersion { version, .. }) = result {
+            assert_eq!(version, "not-semver");
+        }
+    }
+
+    #[test]
+    fn test_invalid_package_json_version_fails_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name": "test", "version": "1.0.0-beta"}"#,
+        )
+        .unwrap();
+
+        let result = detect_version_files(dir.path());
+        // Note: "1.0.0-beta" is actually valid semver, use truly invalid version
+        assert!(result.is_ok()); // This should pass
+
+        // Now test with truly invalid version
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name": "test", "version": "v1.0"}"#,
+        )
+        .unwrap();
+
+        let result = detect_version_files(dir.path());
+        assert!(matches!(result, Err(ShipError::InvalidVersion { .. })));
+    }
+
+    #[test]
+    fn test_invalid_pyproject_version_fails_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"test\"\nversion = \"2024.01.15\"\n",
+        )
+        .unwrap();
+
+        let result = detect_version_files(dir.path());
+        assert!(matches!(result, Err(ShipError::InvalidVersion { .. })));
+    }
+
+    #[test]
+    fn test_missing_version_field_skips_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Cargo.toml without version field (workspace member)
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test\"\n",
+        )
+        .unwrap();
+
+        let result = detect_version_files(dir.path());
+        // Should return NoVersionFiles, not InvalidVersion
+        assert!(matches!(result, Err(ShipError::NoVersionFiles)));
     }
 }
