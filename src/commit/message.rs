@@ -174,14 +174,13 @@ pub fn stage_paths_and_commit(
             continue;
         }
 
-        if matches!(status, Some(FileStatus::Renamed)) {
-            if let Some(old_path) = change.and_then(|c| c.old_path.as_deref()) {
-                if old_path != path {
-                    index
-                        .remove_path(Path::new(old_path))
-                        .map_err(CommitError::StagingFailed)?;
-                }
-            }
+        if matches!(status, Some(FileStatus::Renamed))
+            && let Some(old_path) = change.and_then(|c| c.old_path.as_deref())
+            && old_path != path
+        {
+            index
+                .remove_path(Path::new(old_path))
+                .map_err(CommitError::StagingFailed)?;
         }
 
         index

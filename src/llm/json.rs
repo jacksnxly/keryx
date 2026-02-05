@@ -49,17 +49,17 @@ fn find_valid_json_object(text: &str) -> Option<String> {
         let candidate = &text[start_idx..];
 
         // Fast path: serde_json handles nested braces and trailing text
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) {
-            if let Ok(json_str) = serde_json::to_string(&value) {
-                return Some(json_str);
-            }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate)
+            && let Ok(json_str) = serde_json::to_string(&value)
+        {
+            return Some(json_str);
         }
 
         // Slow path: balanced-brace extraction then validation
-        if let Some(json_str) = extract_balanced_braces(candidate) {
-            if serde_json::from_str::<serde_json::Value>(&json_str).is_ok() {
-                return Some(json_str);
-            }
+        if let Some(json_str) = extract_balanced_braces(candidate)
+            && serde_json::from_str::<serde_json::Value>(&json_str).is_ok()
+        {
+            return Some(json_str);
         }
     }
 

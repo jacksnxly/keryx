@@ -43,38 +43,38 @@ pub fn detect_version_files(root: &Path) -> Result<Vec<VersionFile>, ShipError> 
 
     // Cargo.toml
     let cargo_path = root.join("Cargo.toml");
-    if cargo_path.exists() {
-        if let Some(version) = read_cargo_version(&cargo_path)? {
-            files.push(VersionFile {
-                path: cargo_path,
-                kind: VersionFileKind::CargoToml,
-                current_version: version,
-            });
-        }
+    if cargo_path.exists()
+        && let Some(version) = read_cargo_version(&cargo_path)?
+    {
+        files.push(VersionFile {
+            path: cargo_path,
+            kind: VersionFileKind::CargoToml,
+            current_version: version,
+        });
     }
 
     // package.json
     let package_path = root.join("package.json");
-    if package_path.exists() {
-        if let Some(version) = read_package_json_version(&package_path)? {
-            files.push(VersionFile {
-                path: package_path,
-                kind: VersionFileKind::PackageJson,
-                current_version: version,
-            });
-        }
+    if package_path.exists()
+        && let Some(version) = read_package_json_version(&package_path)?
+    {
+        files.push(VersionFile {
+            path: package_path,
+            kind: VersionFileKind::PackageJson,
+            current_version: version,
+        });
     }
 
     // pyproject.toml
     let pyproject_path = root.join("pyproject.toml");
-    if pyproject_path.exists() {
-        if let Some(version) = read_pyproject_version(&pyproject_path)? {
-            files.push(VersionFile {
-                path: pyproject_path,
-                kind: VersionFileKind::PyprojectToml,
-                current_version: version,
-            });
-        }
+    if pyproject_path.exists()
+        && let Some(version) = read_pyproject_version(&pyproject_path)?
+    {
+        files.push(VersionFile {
+            path: pyproject_path,
+            kind: VersionFileKind::PyprojectToml,
+            current_version: version,
+        });
     }
 
     if files.is_empty() {

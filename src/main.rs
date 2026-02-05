@@ -1209,7 +1209,7 @@ async fn run_split_commits(
         );
 
         let (message, completion) =
-            generate_commit_message(&group_diff, branch_name, llm, config.verbose)
+            generate_commit_message(group_diff, branch_name, llm, config.verbose)
                 .await
                 .map_err(|e| handle_llm_error(e, config.verbose))?;
 

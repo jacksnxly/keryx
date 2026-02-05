@@ -84,7 +84,7 @@ pub async fn run_claude(prompt: &str) -> Result<String, ClaudeError> {
     // The prompt may contain diffs with special shell characters
     let temp_dir = std::env::temp_dir();
     let prompt_file = temp_dir.join(format!("keryx-prompt-{}.txt", std::process::id()));
-    std::fs::write(&prompt_file, prompt).map_err(|e| ClaudeError::SpawnFailed(e))?;
+    std::fs::write(&prompt_file, prompt).map_err(ClaudeError::SpawnFailed)?;
 
     // Build command that reads prompt from file
     let claude_cmd = format!(
@@ -425,22 +425,24 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_subprocess_non_utf8_stdout_handled() {
-        // Use /usr/bin/printf to ensure we get raw bytes (not shell built-in)
-        // \xFF is invalid UTF-8 (it's a continuation byte without a start byte)
-        let output = Command::new("/usr/bin/printf")
-            .arg("valid\\xFFtext")
+        // Use Python to reliably produce invalid UTF-8 bytes cross-platform.
+        // printf escape sequences behave differently across platforms (macOS vs Linux).
+        // Python is the industry-standard approach for this test scenario.
+        let output = Command::new("python3")
+            .arg("-c")
+            .arg("import sys; sys.stdout.buffer.write(b'valid\\xfftext')")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
-            .expect("failed to execute printf command");
+            .expect("failed to execute python3 command - ensure Python 3 is installed");
 
         assert!(output.status.success());
 
         // Raw bytes should contain invalid UTF-8
         assert!(
             String::from_utf8(output.stdout.clone()).is_err(),
-            "Raw output should contain invalid UTF-8"
+            "Raw output should contain invalid UTF-8 (0xFF byte)"
         );
 
         // from_utf8_lossy should handle it gracefully (replaces invalid bytes)
@@ -455,7 +457,7 @@ mod tests {
         );
         assert!(
             stdout.contains('\u{FFFD}'),
-            "Should contain Unicode replacement character for invalid bytes"
+            "Should contain Unicode replacement character (U+FFFD) for invalid bytes"
         );
     }
 
@@ -464,16 +466,15 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_subprocess_non_utf8_stderr_handled() {
-        // Use /usr/bin/printf to ensure we get raw bytes
-        // Redirect to stderr and exit with error code
-        let output = Command::new("sh")
+        // Use Python to reliably produce invalid UTF-8 in stderr cross-platform.
+        let output = Command::new("python3")
             .arg("-c")
-            .arg("/usr/bin/printf 'error\\xFE\\xFFmsg' >&2; exit 1")
+            .arg("import sys; sys.stderr.buffer.write(b'error\\xfe\\xffmsg'); sys.exit(1)")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
-            .expect("failed to execute command");
+            .expect("failed to execute python3 command - ensure Python 3 is installed");
 
         assert!(!output.status.success());
 
