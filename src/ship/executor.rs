@@ -38,13 +38,13 @@ pub fn commit_tag_push(
 
     // 3. Create annotated tag so --follow-tags will push it
     let tag_message = format!("Release {}", tag_name);
-    run_git(
-        &["tag", "-a", tag_name, "-m", &tag_message],
-        "create tag",
-    )?;
+    run_git(&["tag", "-a", tag_name, "-m", &tag_message], "create tag")?;
 
     // 4. Push with tags (atomic to avoid partial updates)
-    match run_git(&["push", remote, branch, "--follow-tags", "--atomic"], "push") {
+    match run_git(
+        &["push", remote, branch, "--follow-tags", "--atomic"],
+        "push",
+    ) {
         Ok(()) => Ok(()),
         Err(e) => Err(ShipError::PushFailed(e.to_string())),
     }

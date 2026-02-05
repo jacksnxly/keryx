@@ -87,7 +87,9 @@ pub fn detect_version_files(root: &Path) -> Result<Vec<VersionFile>, ShipError> 
 /// Update a version file to the new version.
 pub fn update_version_file(file: &VersionFile, new_version: &Version) -> Result<(), ShipError> {
     match file.kind {
-        VersionFileKind::CargoToml => update_toml_version(&file.path, new_version, &["package", "version"]),
+        VersionFileKind::CargoToml => {
+            update_toml_version(&file.path, new_version, &["package", "version"])
+        }
         VersionFileKind::PackageJson => update_package_json(&file.path, new_version),
         VersionFileKind::PyprojectToml => update_pyproject_toml(&file.path, new_version),
     }
@@ -121,12 +123,11 @@ fn read_cargo_version(path: &Path) -> Result<Option<Version>, ShipError> {
 
 fn read_package_json_version(path: &Path) -> Result<Option<Version>, ShipError> {
     let content = read_file(path)?;
-    let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-        ShipError::VersionFileUpdateFailed {
+    let json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| ShipError::VersionFileUpdateFailed {
             path: path.to_path_buf(),
             reason: format!("Invalid JSON: {}", e),
-        }
-    })?;
+        })?;
 
     let version_str = json.get("version").and_then(|v| v.as_str());
 
@@ -145,21 +146,19 @@ fn read_package_json_version(path: &Path) -> Result<Option<Version>, ShipError> 
 
 fn update_package_json(path: &Path, new_version: &Version) -> Result<(), ShipError> {
     let content = read_file(path)?;
-    let mut json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-        ShipError::VersionFileUpdateFailed {
+    let mut json: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| ShipError::VersionFileUpdateFailed {
             path: path.to_path_buf(),
             reason: format!("Invalid JSON: {}", e),
-        }
-    })?;
+        })?;
 
     json["version"] = serde_json::Value::String(new_version.to_string());
 
-    let output = serde_json::to_string_pretty(&json).map_err(|e| {
-        ShipError::VersionFileUpdateFailed {
+    let output =
+        serde_json::to_string_pretty(&json).map_err(|e| ShipError::VersionFileUpdateFailed {
             path: path.to_path_buf(),
             reason: format!("Failed to serialize JSON: {}", e),
-        }
-    })?;
+        })?;
 
     // npm uses trailing newline
     write_file(path, &format!("{}\n", output))
@@ -202,11 +201,7 @@ fn update_pyproject_toml(path: &Path, new_version: &Version) -> Result<(), ShipE
     let mut doc = parse_toml(path, &content)?;
 
     // Try PEP 621 first
-    if doc
-        .get("project")
-        .and_then(|p| p.get("version"))
-        .is_some()
-    {
+    if doc.get("project").and_then(|p| p.get("version")).is_some() {
         doc["project"]["version"] = toml_edit::value(new_version.to_string());
     }
     // Fall back to Poetry
@@ -250,12 +245,12 @@ fn update_toml_version(path: &Path, new_version: &Version, keys: &[&str]) -> Res
 }
 
 fn parse_toml(path: &Path, content: &str) -> Result<toml_edit::DocumentMut, ShipError> {
-    content.parse::<toml_edit::DocumentMut>().map_err(|e| {
-        ShipError::VersionFileUpdateFailed {
+    content
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| ShipError::VersionFileUpdateFailed {
             path: path.to_path_buf(),
             reason: format!("Invalid TOML: {}", e),
-        }
-    })
+        })
 }
 
 fn read_file(path: &Path) -> Result<String, ShipError> {
@@ -387,11 +382,7 @@ mod tests {
     fn test_update_pyproject_pep621() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pyproject.toml");
-        fs::write(
-            &path,
-            "[project]\nname = \"test\"\nversion = \"1.0.0\"\n",
-        )
-        .unwrap();
+        fs::write(&path, "[project]\nname = \"test\"\nversion = \"1.0.0\"\n").unwrap();
 
         let file = VersionFile {
             path: path.clone(),

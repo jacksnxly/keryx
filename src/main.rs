@@ -372,7 +372,8 @@ async fn main() -> Result<()> {
             run_push(&config, no_split, cli.provider).await
         }
         Some(Commands::Ship) => {
-            let provider_selection = cli.provider
+            let provider_selection = cli
+                .provider
                 .clone()
                 .map(Provider::from)
                 .map(ProviderSelection::from_primary)

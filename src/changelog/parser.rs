@@ -93,7 +93,7 @@ fn extract_version_from_title(title: &str) -> Option<Version> {
 }
 
 /// Find the position to insert a new version section.
-/// Returns the byte offset after the header and any [Unreleased] section.
+/// Returns the byte offset after the header and any `[Unreleased]` section.
 ///
 /// Note: This function normalizes CRLF line endings to LF before processing.
 /// The returned byte offset is valid for the normalized content.

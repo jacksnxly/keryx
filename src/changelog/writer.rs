@@ -72,7 +72,7 @@ fn atomic_copy(src: &Path, dst: &Path) -> Result<(), ChangelogError> {
 ///
 /// - Creates the file with header if it doesn't exist
 /// - Backs up existing file to `<filename>.md.bak` (e.g., `CHANGELOG.md.bak`)
-/// - Handles [Unreleased] section conversion per spec
+/// - Handles `[Unreleased]` section conversion per spec
 pub fn write_changelog(
     path: &Path,
     output: &ChangelogOutput,

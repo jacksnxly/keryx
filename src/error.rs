@@ -212,9 +212,11 @@ pub enum ShipError {
     #[error("No version files found (Cargo.toml, package.json, or pyproject.toml)")]
     NoVersionFiles,
 
-    #[error("{path} contains invalid semver version \"{version}\"\n\n\
+    #[error(
+        "{path} contains invalid semver version \"{version}\"\n\n\
              Expected format: MAJOR.MINOR.PATCH (e.g., 1.2.3)\n\
-             See https://semver.org for the full specification.")]
+             See https://semver.org for the full specification."
+    )]
     InvalidVersion { path: PathBuf, version: String },
 
     #[error("Tag {0} already exists")]

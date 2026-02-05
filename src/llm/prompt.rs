@@ -209,7 +209,7 @@ const MAX_INPUT_LINES: usize = 50;
 /// - Normalizes whitespace
 /// - Limits input length
 ///
-/// See: https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html
+/// See: <https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html>
 pub fn sanitize_for_prompt(text: &str) -> String {
     let mut result = text.to_string();
 

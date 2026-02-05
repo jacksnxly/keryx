@@ -18,14 +18,10 @@ use crate::changelog::parser::read_changelog;
 use crate::changelog::write_changelog;
 use crate::error::ShipError;
 use crate::llm::{
-    build_prompt,
-    build_verification_prompt,
-    ChangelogInput,
-    LlmRouter,
-    ProviderSelection,
+    ChangelogInput, LlmRouter, ProviderSelection, build_prompt, build_verification_prompt,
 };
 use crate::verification::{check_ripgrep_installed, gather_verification_evidence};
-use crate::version::{calculate_next_version, calculate_next_version_with_llm, VersionBumpInput};
+use crate::version::{VersionBumpInput, calculate_next_version, calculate_next_version_with_llm};
 
 use self::preflight::{check_tag_exists, run_checks};
 use self::version_files::{detect_version_files, update_version_file};
@@ -63,12 +59,8 @@ pub async fn run_ship(config: ShipConfig) -> Result<(), ShipError> {
         .map(|t| t.name.as_str())
         .unwrap_or("(none)");
 
-    println!(
-        "  [PASS] Working tree is clean"
-    );
-    println!(
-        "  [PASS] Local branch is up to date with remote"
-    );
+    println!("  [PASS] Working tree is clean");
+    println!("  [PASS] Local branch is up to date with remote");
     println!(
         "  [PASS] {} commits since {}",
         preflight.commits_since_tag.len(),
@@ -92,7 +84,10 @@ pub async fn run_ship(config: ShipConfig) -> Result<(), ShipError> {
         (explicit.clone(), None)
     } else if config.no_llm_bump || !preflight.llm_available {
         (
-            calculate_next_version(preflight.base_version.as_ref(), &preflight.commits_since_tag),
+            calculate_next_version(
+                preflight.base_version.as_ref(),
+                &preflight.commits_since_tag,
+            ),
             None,
         )
     } else {
@@ -141,7 +136,12 @@ pub async fn run_ship(config: ShipConfig) -> Result<(), ShipError> {
 
         // Use the suggested version instead
         return run_ship_with_version(
-            config, &repo, &mut llm, &preflight, suggested, suggested_tag,
+            config,
+            &repo,
+            &mut llm,
+            &preflight,
+            suggested,
+            suggested_tag,
         )
         .await;
     }
@@ -168,7 +168,10 @@ async fn run_ship_with_version(
     println!();
     println!("Version files:");
     for vf in &version_files {
-        println!("  [UPDATE] {}: {} -> {}", vf.kind, vf.current_version, next_version);
+        println!(
+            "  [UPDATE] {}: {} -> {}",
+            vf.kind, vf.current_version, next_version
+        );
     }
 
     // ── Stage 5: Changelog check/generation ──
@@ -185,22 +188,18 @@ async fn run_ship_with_version(
         .map(|parsed| parsed.has_version(&next_version))
         .unwrap_or(false);
 
-    let changelog_generated;
-    if changelog_exists_for_version {
+    let changelog_generated = if changelog_exists_for_version {
         println!();
         println!(
             "  [SKIP] Changelog section for {} already exists",
             next_version
         );
-        changelog_generated = false;
+        false
     } else {
         println!();
-        println!(
-            "  [CREATE] Changelog section for {}",
-            next_version
-        );
-        changelog_generated = true;
-    }
+        println!("  [CREATE] Changelog section for {}", next_version);
+        true
+    };
 
     if changelog_generated && !preflight.llm_available && !config.dry_run {
         let provider = config.provider_selection.primary;
@@ -306,10 +305,7 @@ async fn run_ship_with_version(
                 preflight.remote_name, preflight.current_branch
             );
             println!();
-            println!(
-                "Release {} shipped!",
-                tag_name
-            );
+            println!("Release {} shipped!", tag_name);
         }
         Err(e) => {
             if !matches!(&e, ShipError::PushFailed(_)) {
@@ -347,6 +343,7 @@ async fn run_ship_with_version(
 }
 
 /// Generate changelog entries and write them to the changelog file.
+#[allow(clippy::too_many_arguments)]
 async fn generate_and_write_changelog(
     repo: &Repository,
     llm: &mut LlmRouter,
@@ -408,14 +405,15 @@ async fn generate_and_write_changelog(
 
     if changelog_output.entries.is_empty() {
         debug!("No changelog entries generated");
-        return Err(ShipError::Changelog(crate::error::ChangelogError::EmptyOutput));
+        return Err(ShipError::Changelog(
+            crate::error::ChangelogError::EmptyOutput,
+        ));
     }
 
     if !no_verify {
         let repo_path = repo.workdir().ok_or_else(|| {
             ShipError::GitFailed(
-                "Cannot verify in a bare repository. Use --no-verify to skip verification."
-                    .into(),
+                "Cannot verify in a bare repository. Use --no-verify to skip verification.".into(),
             )
         })?;
 
@@ -427,9 +425,10 @@ async fn generate_and_write_changelog(
         let draft_json = serde_json::to_string_pretty(&changelog_output).map_err(|e| {
             ShipError::VerificationFailed(format!("Failed to serialize draft entries: {}", e))
         })?;
-        let verification_prompt = build_verification_prompt(&draft_json, &evidence).map_err(|e| {
-            ShipError::VerificationFailed(format!("Failed to build verification prompt: {}", e))
-        })?;
+        let verification_prompt =
+            build_verification_prompt(&draft_json, &evidence).map_err(|e| {
+                ShipError::VerificationFailed(format!("Failed to build verification prompt: {}", e))
+            })?;
 
         let verified_completion = llm.generate(&verification_prompt).await.map_err(|e| {
             ShipError::VerificationFailed(format!("LLM verification failed: {}", e.summary()))
@@ -439,7 +438,9 @@ async fn generate_and_write_changelog(
 
         if changelog_output.entries.is_empty() {
             debug!("No changelog entries remained after verification");
-            return Err(ShipError::Changelog(crate::error::ChangelogError::EmptyOutput));
+            return Err(ShipError::Changelog(
+                crate::error::ChangelogError::EmptyOutput,
+            ));
         }
     }
 
@@ -449,15 +450,15 @@ async fn generate_and_write_changelog(
 }
 
 /// Fetch PRs for changelog generation (best-effort).
-async fn fetch_prs(
-    repo: &Repository,
-) -> Result<Vec<crate::github::PullRequest>, anyhow::Error> {
+async fn fetch_prs(repo: &Repository) -> Result<Vec<crate::github::PullRequest>, anyhow::Error> {
     use crate::github::auth::get_github_token;
     use crate::github::prs::{fetch_merged_prs, parse_github_remote};
 
     let token = get_github_token().await?;
     let remote = repo.find_remote("origin")?;
-    let url = remote.url().ok_or_else(|| anyhow::anyhow!("No remote URL"))?;
+    let url = remote
+        .url()
+        .ok_or_else(|| anyhow::anyhow!("No remote URL"))?;
     let (owner, repo_name) = parse_github_remote(url)?;
     let prs = fetch_merged_prs(&token, &owner, &repo_name, None, None, None).await?;
     Ok(prs)
@@ -505,10 +506,7 @@ fn suggest_next_version(version: &Version) -> Version {
 }
 
 /// Find the next available patch version by skipping existing tags.
-fn find_next_available_version(
-    repo: &Repository,
-    version: &Version,
-) -> Result<Version, ShipError> {
+fn find_next_available_version(repo: &Repository, version: &Version) -> Result<Version, ShipError> {
     let mut candidate = suggest_next_version(version);
     for _ in 0..1000 {
         let tag_name = format!("v{}", candidate);

@@ -36,7 +36,10 @@ fn test_preflight_single_commit_initial_repo() {
     git2::Repository::init_bare(remote_dir.path()).expect("Failed to init bare repo");
 
     repo.repo
-        .remote("origin", remote_dir.path().to_str().expect("Invalid remote path"))
+        .remote(
+            "origin",
+            remote_dir.path().to_str().expect("Invalid remote path"),
+        )
         .expect("Failed to add origin remote");
 
     let original_dir = std::env::current_dir().expect("Failed to get current dir");
@@ -74,7 +77,10 @@ fn test_preflight_multi_commit_initial_repo_includes_root() {
     git2::Repository::init_bare(remote_dir.path()).expect("Failed to init bare repo");
 
     repo.repo
-        .remote("origin", remote_dir.path().to_str().expect("Invalid remote path"))
+        .remote(
+            "origin",
+            remote_dir.path().to_str().expect("Invalid remote path"),
+        )
         .expect("Failed to add origin remote");
 
     let original_dir = std::env::current_dir().expect("Failed to get current dir");

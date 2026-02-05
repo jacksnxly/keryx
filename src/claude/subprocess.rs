@@ -139,7 +139,7 @@ pub async fn run_claude(prompt: &str) -> Result<String, ClaudeError> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    
+
     // Strip ANSI escape codes added by the script TTY wrapper
     let stdout = strip_ansi_codes(&stdout);
     Ok(stdout)
@@ -153,7 +153,7 @@ fn strip_ansi_codes(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
-    
+
     while i < bytes.len() {
         if bytes[i] == 0x1b {
             // ESC character - start of escape sequence
@@ -161,7 +161,7 @@ fn strip_ansi_codes(s: &str) -> String {
             if i >= bytes.len() {
                 break;
             }
-            
+
             match bytes[i] {
                 b'[' => {
                     // CSI sequence: ESC [ (params) (letter)
@@ -214,7 +214,7 @@ fn strip_ansi_codes(s: &str) -> String {
             i += 1;
         }
     }
-    
+
     result
 }
 

@@ -9,10 +9,10 @@ use git2::Repository;
 use semver::Version;
 
 use crate::error::ShipError;
+use crate::git::ParsedCommit;
 use crate::git::commits::fetch_commits;
 use crate::git::range::resolve_range;
-use crate::git::tags::{get_all_tags, get_latest_reachable_tag, TagInfo};
-use crate::git::ParsedCommit;
+use crate::git::tags::{TagInfo, get_all_tags, get_latest_reachable_tag};
 use crate::llm::{Provider, ProviderSelection};
 
 /// Result of all preflight checks.
