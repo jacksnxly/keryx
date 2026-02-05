@@ -203,6 +203,9 @@ pub enum ShipError {
     #[error("Working tree has uncommitted changes")]
     DirtyWorkingTree,
 
+    #[error("Detached HEAD is not supported. Check out a branch before running ship.")]
+    DetachedHead,
+
     #[error("Local branch is behind remote. Run 'git pull' first.")]
     BehindRemote,
 

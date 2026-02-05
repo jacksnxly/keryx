@@ -126,9 +126,16 @@ fn check_clean_working_tree(verbose: bool) -> Result<(), ShipError> {
 
 /// Get the current branch name.
 fn get_current_branch(repo: &Repository) -> Result<String, ShipError> {
-    repo.head()
-        .ok()
-        .and_then(|h| h.shorthand().map(String::from))
+    let head = repo
+        .head()
+        .map_err(|e| ShipError::GitFailed(format!("Could not determine HEAD: {}", e)))?;
+
+    if !head.is_branch() {
+        return Err(ShipError::DetachedHead);
+    }
+
+    head.shorthand()
+        .map(String::from)
         .ok_or_else(|| ShipError::GitFailed("Could not determine current branch".into()))
 }
 

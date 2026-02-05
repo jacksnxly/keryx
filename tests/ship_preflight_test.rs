@@ -5,6 +5,7 @@ use std::process::Command;
 
 use serial_test::serial;
 
+use keryx::ShipError;
 use keryx::llm::ProviderSelection;
 use keryx::ship::preflight::run_checks;
 
@@ -113,4 +114,30 @@ fn test_preflight_multi_commit_initial_repo_includes_root() {
         .collect();
     assert!(messages.iter().any(|m| m.contains("feat: first commit")));
     assert!(messages.iter().any(|m| m.contains("feat: second commit")));
+}
+
+#[test]
+#[serial]
+fn test_preflight_fails_on_detached_head() {
+    let repo = TestRepo::new();
+    let commit_oid = repo.commit("feat: initial commit");
+
+    repo.repo
+        .set_head_detached(commit_oid)
+        .expect("Failed to detach HEAD");
+
+    let commit = repo
+        .repo
+        .find_commit(commit_oid)
+        .expect("Failed to find detached commit");
+    repo.repo
+        .checkout_tree(commit.as_object(), None)
+        .expect("Failed to checkout detached commit");
+
+    let original_dir = std::env::current_dir().expect("Failed to get current dir");
+    std::env::set_current_dir(repo.dir.path()).expect("Failed to change to repo dir");
+    let _guard = DirGuard::new(original_dir);
+
+    let result = run_checks(&repo.repo, false, ProviderSelection::default(), false);
+    assert!(matches!(result, Err(ShipError::DetachedHead)));
 }
