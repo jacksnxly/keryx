@@ -16,6 +16,8 @@ pub struct TagInfo {
     pub version: Option<Version>,
 }
 
+const SEMVER_TAG_PATTERNS: [&str; 2] = ["v[0-9]*.[0-9]*.[0-9]*", "[0-9]*.[0-9]*.[0-9]*"];
+
 /// Get the latest semver tag reachable from HEAD.
 ///
 /// Uses `git describe --tags --abbrev=0` which is the industry standard approach
@@ -23,20 +25,27 @@ pub struct TagInfo {
 /// This correctly handles multi-branch scenarios (maintenance branches, backports)
 /// by only considering tags in the commit history of the current branch.
 pub fn get_latest_reachable_tag(repo: &Repository) -> Result<Option<TagInfo>, GitError> {
-    // Use git describe to find the most recent tag reachable from HEAD
+    // Use git describe to find the most recent semver-like tag reachable from HEAD.
     let output = Command::new("git")
-        .args(["describe", "--tags", "--abbrev=0"])
+        .args([
+            "describe",
+            "--tags",
+            "--abbrev=0",
+            "--match",
+            SEMVER_TAG_PATTERNS[0],
+            "--match",
+            SEMVER_TAG_PATTERNS[1],
+        ])
         .output()
         .map_err(|e| GitError::CommandFailed(format!("Failed to run git describe: {}", e)))?;
 
     if !output.status.success() {
-        // Exit code 128 means no tags found - this is normal for new repos
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("No names found") || stderr.contains("No tags can describe") {
-            debug!("No tags reachable from HEAD");
+        if output.status.code() == Some(128) && !has_reachable_semver_tag(repo)? {
+            debug!("No semver tags reachable from HEAD");
             return Ok(None);
         }
-        // Other errors should be reported
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(GitError::CommandFailed(format!(
             "git describe failed: {}",
             stderr.trim()
@@ -50,11 +59,44 @@ pub fn get_latest_reachable_tag(repo: &Repository) -> Result<Option<TagInfo>, Gi
 
     debug!(tag = %tag_name, "Found latest reachable tag via git describe");
 
-    // Look up the tag in the repository to get OID and version info
+    // Look up the tag in the repository to get OID and version info.
     let all_tags = get_all_tags(repo)?;
-    let tag_info = all_tags.into_iter().find(|t| t.name == tag_name);
+    let tag_info = all_tags
+        .into_iter()
+        .find(|t| t.name == tag_name && t.version.is_some());
 
-    Ok(tag_info)
+    match tag_info {
+        Some(tag) => Ok(Some(tag)),
+        None => Err(GitError::CommandFailed(format!(
+            "git describe returned non-semver tag '{}'",
+            tag_name
+        ))),
+    }
+}
+
+fn has_reachable_semver_tag(repo: &Repository) -> Result<bool, GitError> {
+    let head_oid = match repo.head().ok().and_then(|head| head.target()) {
+        Some(oid) => oid,
+        None => return Ok(false),
+    };
+
+    for tag in get_all_tags(repo)?
+        .into_iter()
+        .filter(|tag| tag.version.is_some())
+    {
+        if tag.oid == head_oid {
+            return Ok(true);
+        }
+
+        let is_descendant = repo
+            .graph_descendant_of(head_oid, tag.oid)
+            .map_err(GitError::RevwalkError)?;
+        if is_descendant {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 /// Get the latest semver tag from the repository (highest version globally).
@@ -126,7 +168,51 @@ pub fn get_version_from_tag(tag_name: &str) -> Option<Version> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
+    use git2::{Oid, Signature};
+    use serial_test::serial;
+
     use super::*;
+
+    struct CwdGuard {
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &Path) -> Self {
+            let original = std::env::current_dir().expect("failed to get current directory");
+            std::env::set_current_dir(path).expect("failed to set current directory");
+            Self { original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    fn commit(repo: &Repository, repo_dir: &Path, message: &str) -> Oid {
+        let file_path = repo_dir.join("test.txt");
+        std::fs::write(&file_path, format!("{}\n{}", message, std::process::id()))
+            .expect("failed to write test file");
+
+        let mut index = repo.index().expect("failed to open index");
+        index
+            .add_path(Path::new("test.txt"))
+            .expect("failed to add file");
+        index.write().expect("failed to write index");
+
+        let tree_id = index.write_tree().expect("failed to write tree");
+        let tree = repo.find_tree(tree_id).expect("failed to find tree");
+        let sig = Signature::now("Test User", "test@example.com").expect("failed to create sig");
+        let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
+            .expect("failed to create commit")
+    }
 
     #[test]
     fn test_version_from_tag_with_v() {
@@ -151,5 +237,57 @@ mod tests {
     fn test_version_from_tag_invalid() {
         let v = get_version_from_tag("release-candidate");
         assert_eq!(v, None);
+    }
+
+    #[test]
+    #[serial]
+    fn test_get_latest_reachable_tag_ignores_non_semver_tags() {
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let repo = Repository::init(dir.path()).expect("failed to init repo");
+        let _cwd = CwdGuard::set(dir.path());
+
+        let first = commit(&repo, dir.path(), "feat: first");
+        repo.tag_lightweight(
+            "v1.2.3",
+            &repo.find_object(first, None).expect("failed to find first"),
+            false,
+        )
+        .expect("failed to tag semver");
+
+        let second = commit(&repo, dir.path(), "chore: second");
+        repo.tag_lightweight(
+            "deploy-2026-02-05",
+            &repo
+                .find_object(second, None)
+                .expect("failed to find second"),
+            false,
+        )
+        .expect("failed to tag deploy");
+
+        let latest = get_latest_reachable_tag(&repo)
+            .expect("failed to resolve latest reachable tag")
+            .expect("expected a semver tag");
+
+        assert_eq!(latest.name, "v1.2.3");
+        assert_eq!(latest.version, Some(Version::new(1, 2, 3)));
+    }
+
+    #[test]
+    #[serial]
+    fn test_get_latest_reachable_tag_returns_none_when_only_non_semver_tags_exist() {
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let repo = Repository::init(dir.path()).expect("failed to init repo");
+        let _cwd = CwdGuard::set(dir.path());
+
+        let first = commit(&repo, dir.path(), "feat: first");
+        repo.tag_lightweight(
+            "nightly-2026-02-05",
+            &repo.find_object(first, None).expect("failed to find first"),
+            false,
+        )
+        .expect("failed to tag nightly");
+
+        let latest = get_latest_reachable_tag(&repo).expect("failed to resolve latest tag");
+        assert!(latest.is_none());
     }
 }
