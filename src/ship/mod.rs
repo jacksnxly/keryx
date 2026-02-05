@@ -290,16 +290,21 @@ async fn run_ship_with_version(
 
     // 7d. Commit, tag, push
     let commit_message = format!("chore(release): v{}", next_version);
-    match executor::commit_tag_push(
+    let commit_result = executor::commit_and_tag(
         &commit_message,
         &tag_name,
         &files_to_stage,
-        &preflight.remote_name,
-        &preflight.current_branch,
-    ) {
+    )?;
+
+    if commit_result.commit_created {
+        println!("  [DONE] Created commit: {}", commit_message);
+    } else {
+        println!("  [SKIP] No changes to commit; using current HEAD");
+    }
+    println!("  [DONE] Created tag: {}", tag_name);
+
+    match executor::push_with_tags(&preflight.remote_name, &preflight.current_branch) {
         Ok(()) => {
-            println!("  [DONE] Created commit: {}", commit_message);
-            println!("  [DONE] Created tag: {}", tag_name);
             println!(
                 "  [DONE] Pushed to {}/{}",
                 preflight.remote_name, preflight.current_branch
@@ -308,30 +313,31 @@ async fn run_ship_with_version(
             println!("Release {} shipped!", tag_name);
         }
         Err(e) => {
-            if !matches!(&e, ShipError::PushFailed(_)) {
-                eprintln!("  [FAIL] {}", e);
-                return Err(e);
-            }
-
             // ── Stage 8: Rollback on push failure ──
             eprintln!("  [FAIL] {}", e);
             eprintln!();
             eprintln!("Rolling back...");
 
-            match executor::rollback(&tag_name) {
+            match executor::rollback(&tag_name, commit_result.commit_created) {
                 Ok(()) => {
                     eprintln!("  [DONE] Deleted tag {}", tag_name);
-                    eprintln!("  [DONE] Reset commit {}", commit_message);
+                    if commit_result.commit_created {
+                        eprintln!("  [DONE] Reset commit {}", commit_message);
+                    }
                     eprintln!();
                     eprintln!("Release aborted. Fix the push issue and try again.");
                 }
                 Err(rollback_err) => {
                     eprintln!("  [FAIL] Rollback failed: {}", rollback_err);
                     eprintln!();
-                    eprintln!(
-                        "Manual cleanup may be needed: git tag -d {} && git reset --soft HEAD~1",
-                        tag_name
-                    );
+                    if commit_result.commit_created {
+                        eprintln!(
+                            "Manual cleanup may be needed: git tag -d {} && git reset --soft HEAD~1",
+                            tag_name
+                        );
+                    } else {
+                        eprintln!("Manual cleanup may be needed: git tag -d {}", tag_name);
+                    }
                 }
             }
 

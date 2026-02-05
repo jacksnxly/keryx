@@ -8,20 +8,21 @@ use std::process::Command;
 
 use crate::error::ShipError;
 
-/// Stage files, create a release commit, tag it, and push.
+/// Stage files, create a release commit (if needed), and tag it.
 ///
 /// Steps:
 /// 1. `git add <files>` - stage only modified version/changelog files
-/// 2. `git commit -m "chore(release): vX.Y.Z"` - create release commit
+/// 2. `git commit -m "chore(release): vX.Y.Z"` - create release commit (skipped if no staged changes)
 /// 3. `git tag -a vX.Y.Z -m "Release vX.Y.Z"` - create annotated tag
-/// 4. `git push <remote> <branch> --follow-tags --atomic` - push commit + tag atomically
-pub fn commit_tag_push(
+pub struct CommitResult {
+    pub commit_created: bool,
+}
+
+pub fn commit_and_tag(
     message: &str,
     tag_name: &str,
     files: &[PathBuf],
-    remote: &str,
-    branch: &str,
-) -> Result<(), ShipError> {
+) -> Result<CommitResult, ShipError> {
     // 1. Stage files
     let file_args: Vec<&str> = files.iter().filter_map(|p| p.to_str()).collect();
     if file_args.is_empty() {
@@ -33,14 +34,24 @@ pub fn commit_tag_push(
 
     run_git(&add_args, "stage files")?;
 
-    // 2. Create commit
-    run_git(&["commit", "-m", message], "create commit")?;
+    // 2. Create commit (if there are staged changes)
+    let commit_created = if has_staged_changes()? {
+        run_git(&["commit", "-m", message], "create commit")?;
+        true
+    } else {
+        false
+    };
 
     // 3. Create annotated tag so --follow-tags will push it
     let tag_message = format!("Release {}", tag_name);
     run_git(&["tag", "-a", tag_name, "-m", &tag_message], "create tag")?;
 
-    // 4. Push with tags (atomic to avoid partial updates)
+    Ok(CommitResult { commit_created })
+}
+
+/// Push commits and tags atomically.
+pub fn push_with_tags(remote: &str, branch: &str) -> Result<(), ShipError> {
+    // Push with tags (atomic to avoid partial updates)
     match run_git(
         &["push", remote, branch, "--follow-tags", "--atomic"],
         "push",
@@ -53,7 +64,7 @@ pub fn commit_tag_push(
 /// Roll back a failed release: delete the local tag and undo the release commit.
 ///
 /// Uses `--soft` reset so the version bump changes stay staged.
-pub fn rollback(tag_name: &str) -> Result<(), ShipError> {
+pub fn rollback(tag_name: &str, commit_created: bool) -> Result<(), ShipError> {
     // 1. Delete local tag
     if let Err(e) = run_git(&["tag", "-d", tag_name], "delete tag") {
         return Err(ShipError::RollbackFailed(format!(
@@ -62,15 +73,44 @@ pub fn rollback(tag_name: &str) -> Result<(), ShipError> {
         )));
     }
 
-    // 2. Undo the release commit (keep changes staged)
-    if let Err(e) = run_git(&["reset", "--soft", "HEAD~1"], "reset commit") {
-        return Err(ShipError::RollbackFailed(format!(
-            "Failed to reset commit: {}",
-            e
-        )));
+    // 2. Undo the release commit (keep changes staged) if we created one
+    if commit_created {
+        if let Err(e) = run_git(&["reset", "--soft", "HEAD~1"], "reset commit") {
+            return Err(ShipError::RollbackFailed(format!(
+                "Failed to reset commit: {}",
+                e
+            )));
+        }
     }
 
     Ok(())
+}
+
+/// Return true if there are staged changes (git diff --cached --quiet).
+fn has_staged_changes() -> Result<bool, ShipError> {
+    let output = Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .output()
+        .map_err(|e| {
+            ShipError::GitFailed(format!(
+                "Failed to run git check for staged changes: {}",
+                e
+            ))
+        })?;
+
+    if output.status.success() {
+        return Ok(false);
+    }
+
+    if output.status.code() == Some(1) {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(ShipError::GitFailed(format!(
+        "git check for staged changes failed: {}",
+        stderr.trim()
+    )))
 }
 
 /// Run a git command and return success or a descriptive error.
