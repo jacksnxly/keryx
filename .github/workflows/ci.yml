@@ -1,0 +1,117 @@
+# Continuous Integration workflow for keryx
+# Runs on every PR and push to main
+
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Check code formatting
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      
+      - uses: dtolnay/rust-action@stable
+        with:
+          components: rustfmt
+      
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  # Run clippy lints
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      
+      - uses: dtolnay/rust-action@stable
+        with:
+          components: clippy
+      
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Run clippy
+        # Treat warnings as errors for clean code
+        run: cargo clippy --all-features -- -D warnings
+
+  # Run tests
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: [stable]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      
+      - uses: dtolnay/rust-action@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Install ripgrep (for tests)
+        run: |
+          if ! command -v rg &> /dev/null; then
+            curl -LO https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz
+            tar xzf ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz
+            sudo cp ripgrep-14.1.0-x86_64-unknown-linux-musl/rg /usr/local/bin/
+          fi
+        if: matrix.os == 'ubuntu-latest'
+      
+      - name: Install ripgrep (macOS)
+        run: |
+          if ! command -v rg &> /dev/null; then
+            brew install ripgrep
+          fi
+        if: matrix.os == 'macos-latest'
+      
+      - name: Build
+        run: cargo build --all-features
+      
+      - name: Run tests
+        run: cargo test --all-features
+
+  # Check documentation builds
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      
+      - uses: dtolnay/rust-action@stable
+      
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Build documentation
+        run: cargo doc --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings

@@ -1,0 +1,42 @@
+# Clippy configuration for keryx
+# See: https://doc.rust-lang.org/clippy/configuration.html
+
+# Minimum Supported Rust Version (MSRV)
+# This project uses Rust 2024 edition
+msrv = "1.85.0"
+
+# Avoid suggesting API changes that would break the exported API
+avoid-breaking-exported-api = false
+
+# Maximum cognitive complexity for functions
+cognitive-complexity-threshold = 25
+
+# Maximum number of arguments for functions
+# CLI tools often need more arguments for configuration
+too-many-arguments-threshold = 8
+
+# Maximum size for types that should be passed by value
+# Large types should be passed by reference to avoid unnecessary copying
+trivial-copy-size-limit = 64
+
+# Maximum length for enum variant names
+enum-variant-name-threshold = 35
+
+# Maximum length for struct field names
+struct-field-name-threshold = 35
+
+# Maximum size for array literals that can be large
+# Helps avoid stack overflow with large static arrays
+array-size-threshold = 512
+
+# Maximum size for vector literals that can be large
+vec-box-size-threshold = 4096
+
+# Lint groups for CLI applications
+# These are generally good practices for CLI tools
+
+# Allow expect in tests - sometimes panics are expected in test code
+# This is set in code with #[cfg_attr(test, allow(clippy::expect_used))]
+
+# Allow panic in test code
+# This is set in code with #[cfg_attr(test, allow(clippy::panic))]
