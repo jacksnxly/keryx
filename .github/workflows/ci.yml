@@ -28,7 +28,7 @@ jobs:
         with:
           persist-credentials: false
       
-      - uses: dtolnay/rust-action@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       
@@ -44,7 +44,7 @@ jobs:
         with:
           persist-credentials: false
       
-      - uses: dtolnay/rust-action@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       
@@ -68,7 +68,7 @@ jobs:
         with:
           persist-credentials: false
       
-      - uses: dtolnay/rust-action@master
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
       
@@ -106,7 +106,7 @@ jobs:
         with:
           persist-credentials: false
       
-      - uses: dtolnay/rust-action@stable
+      - uses: dtolnay/rust-toolchain@stable
       
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
