@@ -92,10 +92,7 @@ fn has_staged_changes() -> Result<bool, ShipError> {
         .args(["diff", "--cached", "--quiet"])
         .output()
         .map_err(|e| {
-            ShipError::GitFailed(format!(
-                "Failed to run git check for staged changes: {}",
-                e
-            ))
+            ShipError::GitFailed(format!("Failed to run git check for staged changes: {}", e))
         })?;
 
     if output.status.success() {

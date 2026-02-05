@@ -290,11 +290,7 @@ async fn run_ship_with_version(
 
     // 7d. Commit, tag, push
     let commit_message = format!("chore(release): v{}", next_version);
-    let commit_result = executor::commit_and_tag(
-        &commit_message,
-        &tag_name,
-        &files_to_stage,
-    )?;
+    let commit_result = executor::commit_and_tag(&commit_message, &tag_name, &files_to_stage)?;
 
     if commit_result.commit_created {
         println!("  [DONE] Created commit: {}", commit_message);
