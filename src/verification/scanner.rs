@@ -1366,30 +1366,13 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_run_rg_exit_code_2_returns_ripgrep_failed() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let bin_dir = temp_dir.path().join("bin");
-        std::fs::create_dir(&bin_dir).unwrap();
-
-        // Create a mock rg script that exits with code 2 and writes to stderr
-        let rg_path = bin_dir.join("rg");
-        std::fs::write(
-            &rg_path,
-            r#"#!/bin/sh
-echo "rg: error: invalid regex pattern" >&2
-exit 2
-"#,
-        )
-        .unwrap();
-
-        let mut perms = std::fs::metadata(&rg_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&rg_path, perms).unwrap();
-
-        // Build command using the mock rg
-        let mut cmd = Command::new(&rg_path);
-        cmd.arg("test");
+        // Use `sh -c` instead of executing a temp script directly to avoid
+        // intermittent ETXTBSY ("Text file busy") races on Linux CI.
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            r#"echo "rg: error: invalid regex pattern" >&2; exit 2"#,
+        ]);
 
         let result = run_rg(&mut cmd);
 
@@ -1414,29 +1397,11 @@ exit 2
     #[test]
     #[cfg(unix)]
     fn test_run_rg_exit_code_3_returns_ripgrep_failed() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let bin_dir = temp_dir.path().join("bin");
-        std::fs::create_dir(&bin_dir).unwrap();
-
-        // Create a mock rg script that exits with code 3 (permission denied scenario)
-        let rg_path = bin_dir.join("rg");
-        std::fs::write(
-            &rg_path,
-            r#"#!/bin/sh
-echo "rg: permission denied: /secret/file" >&2
-exit 3
-"#,
-        )
-        .unwrap();
-
-        let mut perms = std::fs::metadata(&rg_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&rg_path, perms).unwrap();
-
-        let mut cmd = Command::new(&rg_path);
-        cmd.arg("test");
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            r#"echo "rg: permission denied: /secret/file" >&2; exit 3"#,
+        ]);
 
         let result = run_rg(&mut cmd);
 
@@ -1461,28 +1426,8 @@ exit 3
     #[test]
     #[cfg(unix)]
     fn test_run_rg_exit_code_1_is_no_match() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let bin_dir = temp_dir.path().join("bin");
-        std::fs::create_dir(&bin_dir).unwrap();
-
-        // Create a mock rg that exits with code 1 (no matches)
-        let rg_path = bin_dir.join("rg");
-        std::fs::write(
-            &rg_path,
-            r#"#!/bin/sh
-exit 1
-"#,
-        )
-        .unwrap();
-
-        let mut perms = std::fs::metadata(&rg_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&rg_path, perms).unwrap();
-
-        let mut cmd = Command::new(&rg_path);
-        cmd.arg("test");
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 1"]);
 
         let result = run_rg(&mut cmd);
 
@@ -1496,29 +1441,8 @@ exit 1
     #[test]
     #[cfg(unix)]
     fn test_run_rg_success_returns_stdout() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let bin_dir = temp_dir.path().join("bin");
-        std::fs::create_dir(&bin_dir).unwrap();
-
-        // Create a mock rg that exits successfully with output
-        let rg_path = bin_dir.join("rg");
-        std::fs::write(
-            &rg_path,
-            r#"#!/bin/sh
-echo "file.rs:10:fn main() {"
-exit 0
-"#,
-        )
-        .unwrap();
-
-        let mut perms = std::fs::metadata(&rg_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&rg_path, perms).unwrap();
-
-        let mut cmd = Command::new(&rg_path);
-        cmd.arg("test");
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", r#"echo "file.rs:10:fn main() {"; exit 0"#]);
 
         let result = run_rg(&mut cmd);
 
