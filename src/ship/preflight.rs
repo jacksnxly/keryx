@@ -11,7 +11,7 @@ use semver::Version;
 use crate::error::ShipError;
 use crate::git::ParsedCommit;
 use crate::git::commits::fetch_commits;
-use crate::git::range::resolve_range;
+use crate::git::range::find_root_commit;
 use crate::git::tags::{TagInfo, get_all_tags, get_latest_reachable_tag};
 use crate::llm::{Provider, ProviderSelection};
 
@@ -63,20 +63,29 @@ pub fn run_checks(
         get_latest_reachable_tag(repo).map_err(|e| ShipError::GitFailed(e.to_string()))?;
     let base_version = latest_tag.as_ref().and_then(|t| t.version.clone());
 
-    // Use the reachable tag as range start to ensure commit list matches the tag we report.
-    // This prevents including already-released commits when another branch has a newer tag.
-    let from_ref = latest_tag.as_ref().map(|t| t.name.as_str());
-    let range = resolve_range(repo, from_ref, Some("HEAD"), false)
-        .map_err(|e| ShipError::GitFailed(e.to_string()))?;
+    // Build commit range directly from reachable context:
+    // - If a reachable release tag exists, start from that tag.
+    // - Otherwise start from HEAD's root commit (initial release).
+    // This avoids falling back to global tags from unrelated/orphan branches.
+    let from_oid = if let Some(tag) = latest_tag.as_ref() {
+        tag.oid
+    } else {
+        find_root_commit(repo, false).map_err(|e| ShipError::GitFailed(e.to_string()))?
+    };
+    let to_oid = repo
+        .head()
+        .and_then(|h| h.peel_to_commit())
+        .map(|c| c.id())
+        .map_err(|e| ShipError::GitFailed(format!("Could not determine HEAD commit: {}", e)))?;
 
-    let mut commits = fetch_commits(repo, range.from, range.to, false)
+    let mut commits = fetch_commits(repo, from_oid, to_oid, false)
         .map_err(|e| ShipError::GitFailed(e.to_string()))?;
 
     // Include the root commit for initial releases (no tags).
     // The revwalk hides `range.from`, so the first commit is otherwise omitted.
     if latest_tag.is_none() {
         let commit = repo
-            .find_commit(range.from)
+            .find_commit(from_oid)
             .map_err(|e| ShipError::GitFailed(e.to_string()))?;
         let root_hash = commit.id().to_string();
         if !commits.iter().any(|c| c.hash == root_hash) {

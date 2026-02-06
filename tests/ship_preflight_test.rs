@@ -203,3 +203,71 @@ fn test_preflight_respects_tracked_upstream_when_branch_names_differ() {
     let result = run_checks(&repo.repo, false, ProviderSelection::default(), false);
     assert!(matches!(result, Err(ShipError::BehindRemote)));
 }
+
+#[test]
+#[serial]
+fn test_preflight_ignores_unreachable_semver_tag_from_orphan_branch() {
+    let repo = TestRepo::new();
+    repo.commit("feat: mainline commit");
+
+    let remote_dir = tempfile::tempdir().expect("Failed to create remote dir");
+    git2::Repository::init_bare(remote_dir.path()).expect("Failed to init bare repo");
+
+    repo.repo
+        .remote(
+            "origin",
+            remote_dir.path().to_str().expect("Invalid remote path"),
+        )
+        .expect("Failed to add origin remote");
+
+    let original_dir = std::env::current_dir().expect("Failed to get current dir");
+    std::env::set_current_dir(repo.dir.path()).expect("Failed to change to repo dir");
+    let _guard = DirGuard::new(original_dir);
+
+    let local_branch = repo
+        .repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().map(|s| s.to_string()))
+        .unwrap_or_else(|| "master".to_string());
+
+    // Set upstream on the active branch so preflight remote checks can run.
+    run_git(&[
+        "push",
+        "-u",
+        "origin",
+        &format!("HEAD:refs/heads/{}", local_branch),
+    ]);
+
+    // Create an orphan branch with a semver tag that is unreachable from mainline.
+    run_git(&["switch", "--orphan", "release-line"]);
+    let _ = std::fs::remove_file(repo.dir.path().join("test.txt"));
+    std::fs::write(repo.dir.path().join("orphan.txt"), "orphan release line\n")
+        .expect("Failed to write orphan test file");
+    run_git(&["add", "orphan.txt"]);
+    run_git(&["commit", "-m", "chore: orphan release branch commit"]);
+    run_git(&["tag", "v9.9.9"]);
+
+    // Return to mainline and verify the orphan tag does not affect preflight range resolution.
+    run_git(&["switch", &local_branch]);
+
+    let result = run_checks(&repo.repo, false, ProviderSelection::default(), false)
+        .expect("preflight should succeed on mainline branch");
+
+    assert!(result.latest_tag.is_none());
+    assert_eq!(result.commits_since_tag.len(), 1);
+    assert!(
+        result
+            .commits_since_tag
+            .iter()
+            .any(|c| c.message.contains("feat: mainline commit")),
+        "mainline commit should be included"
+    );
+    assert!(
+        result
+            .commits_since_tag
+            .iter()
+            .all(|c| !c.message.contains("orphan release branch commit")),
+        "orphan branch commit should not be included"
+    );
+}
