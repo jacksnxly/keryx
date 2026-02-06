@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-02-06
+
+### Added
+
+- Add `keryx ship` command to automate releases with version bumping, changelog updates, tagging, and pushing
+- Add `keryx push` command that runs the commit flow then pushes to the current branch
+- Add `keryx commit` subcommand that generates conventional commit messages from staged changes using AI, with automatic splitting of large changesets into focused commits
+- Add LLM-based semantic version bumping with `--no-llm-bump` flag to skip
+- Verify generated changelog entries against repository evidence before writing
+- Show a clear error when running `ship` with a detached HEAD
+
+### Changed
+
+- Require an upstream tracking branch for `ship` and push to the correct remote branch instead of guessing
+- Use branch-aware tag discovery for accurate version detection in multi-branch workflows
+- Skip redundant version-bump commit when version files already match the target version
+- Improve error messages when changelog generation fails or the required LLM provider is unavailable
+
+### Fixed
+
+- Fix release preflight picking up tags from unrelated branches
+- Fix incorrect version detection when non-semver tags (e.g. deploy dates) are present
+- Show clear error when version files contain invalid semver strings instead of silently skipping them
+- Fix commit list including already-released commits when another branch has a newer tag
+- Include the root commit when releasing a repository with no prior tags
+- Avoid partial pushes during releases by pushing tags atomically
+- Fix release tags not being pushed to remote by switching to annotated tags
+- Fix version suggestion when multiple tags conflict and handle initial repos with a single commit
+- Fix duplicate entries in v0.5.0 changelog
+
+
 ## [0.5.0] - 2026-02-04
 
 ### Added
