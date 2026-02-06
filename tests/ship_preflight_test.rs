@@ -241,6 +241,9 @@ fn test_preflight_ignores_unreachable_semver_tag_from_orphan_branch() {
 
     // Create an orphan branch with a semver tag that is unreachable from mainline.
     run_git(&["switch", "--orphan", "release-line"]);
+    // Ensure shell `git commit` works in CI environments without global identity.
+    run_git(&["config", "user.name", "Test User"]);
+    run_git(&["config", "user.email", "test@example.com"]);
     let _ = std::fs::remove_file(repo.dir.path().join("test.txt"));
     std::fs::write(repo.dir.path().join("orphan.txt"), "orphan release line\n")
         .expect("Failed to write orphan test file");
