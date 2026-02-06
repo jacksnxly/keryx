@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-02-06
+
+### Added
+
+- New `keryx commit` command that generates conventional commit messages from staged changes using AI, with automatic splitting of large changesets into multiple focused commits (`--no-split` to disable)
+- New `keryx push` command that runs the commit flow and then pushes to the current branch in one step
+- LLM-based semantic version bumping that intelligently determines the next version number based on changes (`--no-llm-bump` to disable)
+- New `keryx ship` command for streamlined release workflow
+
+### Fixed
+
+- Duplicate file deduplication and character-safe UTF-8 truncation in diff processing
+- Initial commits into empty repositories now work correctly
+- File renames are properly staged with old path removed from the index
+
+
 ## [0.6.0] - 2026-02-06
 
 ### Added
