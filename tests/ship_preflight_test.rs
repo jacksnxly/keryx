@@ -187,6 +187,9 @@ fn test_preflight_respects_tracked_upstream_when_branch_names_differ() {
     run_git(&["push", "-u", "origin", "HEAD:refs/heads/main"]);
     // Create a release branch that tracks origin/main.
     run_git(&["switch", "-c", "release", "--track", "origin/main"]);
+    // Ensure shell `git commit` works in CI environments without global identity.
+    run_git(&["config", "user.name", "Test User"]);
+    run_git(&["config", "user.email", "test@example.com"]);
 
     // Advance origin/main while keeping release behind.
     run_git(&["switch", &local_branch]);
