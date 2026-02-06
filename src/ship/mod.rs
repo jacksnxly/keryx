@@ -238,7 +238,7 @@ async fn run_ship_with_version(
     println!("  Tag:       {}", tag_name);
     println!(
         "  Push to:   {}/{}",
-        preflight.remote_name, preflight.current_branch
+        preflight.remote_name, preflight.upstream_branch
     );
 
     if config.dry_run {
@@ -299,11 +299,11 @@ async fn run_ship_with_version(
     }
     println!("  [DONE] Created tag: {}", tag_name);
 
-    match executor::push_with_tags(&preflight.remote_name, &preflight.current_branch) {
+    match executor::push_with_tags(&preflight.remote_name, &preflight.upstream_branch) {
         Ok(()) => {
             println!(
                 "  [DONE] Pushed to {}/{}",
-                preflight.remote_name, preflight.current_branch
+                preflight.remote_name, preflight.upstream_branch
             );
             println!();
             println!("Release {} shipped!", tag_name);

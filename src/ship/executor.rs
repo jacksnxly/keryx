@@ -50,10 +50,11 @@ pub fn commit_and_tag(
 }
 
 /// Push commits and tags atomically.
-pub fn push_with_tags(remote: &str, branch: &str) -> Result<(), ShipError> {
+pub fn push_with_tags(remote: &str, remote_branch: &str) -> Result<(), ShipError> {
+    let refspec = format!("HEAD:refs/heads/{}", remote_branch);
     // Push with tags (atomic to avoid partial updates)
     match run_git(
-        &["push", remote, branch, "--follow-tags", "--atomic"],
+        &["push", remote, &refspec, "--follow-tags", "--atomic"],
         "push",
     ) {
         Ok(()) => Ok(()),

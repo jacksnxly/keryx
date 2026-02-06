@@ -27,6 +27,18 @@ impl Drop for DirGuard {
     }
 }
 
+fn run_git(args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .status()
+        .expect("Failed to run git command in test");
+    assert!(
+        status.success(),
+        "git command failed: git {}",
+        args.join(" ")
+    );
+}
+
 #[test]
 #[serial]
 fn test_preflight_single_commit_initial_repo() {
@@ -54,11 +66,12 @@ fn test_preflight_single_commit_initial_repo() {
         .and_then(|h| h.shorthand().map(|s| s.to_string()))
         .unwrap_or_else(|| "master".to_string());
 
-    let status = Command::new("git")
-        .args(["push", "origin", &format!("HEAD:refs/heads/{}", branch)])
-        .status()
-        .expect("Failed to push to origin");
-    assert!(status.success(), "git push failed in test setup");
+    run_git(&[
+        "push",
+        "-u",
+        "origin",
+        &format!("HEAD:refs/heads/{}", branch),
+    ]);
 
     let result = run_checks(&repo.repo, false, ProviderSelection::default(), false)
         .expect("preflight should succeed for single-commit repo");
@@ -95,11 +108,12 @@ fn test_preflight_multi_commit_initial_repo_includes_root() {
         .and_then(|h| h.shorthand().map(|s| s.to_string()))
         .unwrap_or_else(|| "master".to_string());
 
-    let status = Command::new("git")
-        .args(["push", "origin", &format!("HEAD:refs/heads/{}", branch)])
-        .status()
-        .expect("Failed to push to origin");
-    assert!(status.success(), "git push failed in test setup");
+    run_git(&[
+        "push",
+        "-u",
+        "origin",
+        &format!("HEAD:refs/heads/{}", branch),
+    ]);
 
     let result = run_checks(&repo.repo, false, ProviderSelection::default(), false)
         .expect("preflight should succeed for multi-commit repo");
@@ -140,4 +154,49 @@ fn test_preflight_fails_on_detached_head() {
 
     let result = run_checks(&repo.repo, false, ProviderSelection::default(), false);
     assert!(matches!(result, Err(ShipError::DetachedHead)));
+}
+
+#[test]
+#[serial]
+fn test_preflight_respects_tracked_upstream_when_branch_names_differ() {
+    let repo = TestRepo::new();
+    repo.commit("feat: initial commit");
+
+    let remote_dir = tempfile::tempdir().expect("Failed to create remote dir");
+    git2::Repository::init_bare(remote_dir.path()).expect("Failed to init bare repo");
+
+    repo.repo
+        .remote(
+            "origin",
+            remote_dir.path().to_str().expect("Invalid remote path"),
+        )
+        .expect("Failed to add origin remote");
+
+    let original_dir = std::env::current_dir().expect("Failed to get current dir");
+    std::env::set_current_dir(repo.dir.path()).expect("Failed to change to repo dir");
+    let _guard = DirGuard::new(original_dir);
+
+    let local_branch = repo
+        .repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().map(|s| s.to_string()))
+        .unwrap_or_else(|| "master".to_string());
+
+    // Create origin/main and set upstream on the local default branch.
+    run_git(&["push", "-u", "origin", "HEAD:refs/heads/main"]);
+    // Create a release branch that tracks origin/main.
+    run_git(&["switch", "-c", "release", "--track", "origin/main"]);
+
+    // Advance origin/main while keeping release behind.
+    run_git(&["switch", &local_branch]);
+    std::fs::write(repo.dir.path().join("tracked.txt"), "remote moves ahead\n")
+        .expect("Failed to write tracked test file");
+    run_git(&["add", "tracked.txt"]);
+    run_git(&["commit", "-m", "feat: upstream commit"]);
+    run_git(&["push", "origin", "HEAD:refs/heads/main"]);
+    run_git(&["switch", "release"]);
+
+    let result = run_checks(&repo.repo, false, ProviderSelection::default(), false);
+    assert!(matches!(result, Err(ShipError::BehindRemote)));
 }

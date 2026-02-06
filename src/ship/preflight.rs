@@ -19,10 +19,16 @@ use crate::llm::{Provider, ProviderSelection};
 pub struct PreflightResult {
     pub current_branch: String,
     pub remote_name: String,
+    pub upstream_branch: String,
     pub latest_tag: Option<TagInfo>,
     pub commits_since_tag: Vec<ParsedCommit>,
     pub llm_available: bool,
     pub base_version: Option<Version>,
+}
+
+struct TrackingBranch {
+    remote: String,
+    branch: String,
 }
 
 /// Run all preflight checks.
@@ -43,14 +49,16 @@ pub fn run_checks(
 
     // Get branch info
     let current_branch = get_current_branch(repo)?;
-    let remote_name = get_remote_name(repo);
+    let tracking = get_tracking_branch(repo, &current_branch)?;
+    let remote_name = tracking.remote;
+    let upstream_branch = tracking.branch;
 
     // 2. Up to date with remote
-    check_remote_sync(&remote_name, &current_branch, verbose)?;
+    check_remote_sync(&remote_name, &upstream_branch, verbose)?;
 
-    // 3. Commits exist since last reachable tag
-    // Uses git describe to find tags reachable from HEAD, correctly handling
-    // multi-branch workflows (maintenance branches, backports, etc.)
+    // 3. Commits exist since last reachable stable semver tag
+    // Uses commit-graph reachability from HEAD so multi-branch workflows
+    // (maintenance branches, backports, etc.) are handled correctly.
     let latest_tag =
         get_latest_reachable_tag(repo).map_err(|e| ShipError::GitFailed(e.to_string()))?;
     let base_version = latest_tag.as_ref().and_then(|t| t.version.clone());
@@ -93,6 +101,7 @@ pub fn run_checks(
     Ok(PreflightResult {
         current_branch,
         remote_name,
+        upstream_branch,
         latest_tag,
         commits_since_tag: commits,
         llm_available,
@@ -139,21 +148,47 @@ fn get_current_branch(repo: &Repository) -> Result<String, ShipError> {
         .ok_or_else(|| ShipError::GitFailed("Could not determine current branch".into()))
 }
 
-/// Get the remote name (defaults to "origin").
-fn get_remote_name(repo: &Repository) -> String {
-    repo.find_remote("origin")
-        .map(|_| "origin".to_string())
-        .unwrap_or_else(|_| {
-            // Try first remote
-            repo.remotes()
-                .ok()
-                .and_then(|remotes| remotes.get(0).map(|s| s.to_string()))
-                .unwrap_or_else(|| "origin".to_string())
-        })
+/// Resolve tracked upstream for the current branch from git config.
+fn get_tracking_branch(
+    repo: &Repository,
+    current_branch: &str,
+) -> Result<TrackingBranch, ShipError> {
+    let config = repo
+        .config()
+        .map_err(|e| ShipError::GitFailed(format!("Could not read git config: {}", e)))?;
+
+    let remote_key = format!("branch.{}.remote", current_branch);
+    let merge_key = format!("branch.{}.merge", current_branch);
+
+    let remote =
+        config
+            .get_string(&remote_key)
+            .map_err(|_| ShipError::MissingUpstreamTracking {
+                branch: current_branch.to_string(),
+            })?;
+    let merge_ref =
+        config
+            .get_string(&merge_key)
+            .map_err(|_| ShipError::MissingUpstreamTracking {
+                branch: current_branch.to_string(),
+            })?;
+
+    let branch = merge_ref
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&merge_ref)
+        .to_string();
+
+    if remote.trim().is_empty() || branch.trim().is_empty() {
+        return Err(ShipError::MissingUpstreamTracking {
+            branch: current_branch.to_string(),
+        });
+    }
+
+    Ok(TrackingBranch { remote, branch })
 }
 
 /// Check that local branch is not behind the remote.
-fn check_remote_sync(remote: &str, branch: &str, verbose: bool) -> Result<(), ShipError> {
+fn check_remote_sync(remote: &str, upstream_branch: &str, verbose: bool) -> Result<(), ShipError> {
     // Fetch from remote first
     let fetch_output = Command::new("git")
         .args(["fetch", remote])
@@ -181,17 +216,27 @@ fn check_remote_sync(remote: &str, branch: &str, verbose: bool) -> Result<(), Sh
         .args(["rev-parse", "HEAD"])
         .output()
         .map_err(|e| ShipError::GitFailed(format!("Failed to run git rev-parse HEAD: {}", e)))?;
+    if !local.status.success() {
+        let stderr = String::from_utf8_lossy(&local.stderr);
+        return Err(ShipError::GitFailed(format!(
+            "git rev-parse HEAD failed: {}",
+            stderr.trim()
+        )));
+    }
 
-    let upstream_ref = format!("{}/{}", remote, branch);
+    let upstream_ref = format!("refs/remotes/{}/{}", remote, upstream_branch);
     let upstream = Command::new("git")
         .args(["rev-parse", &upstream_ref])
-        .output();
-
-    // If upstream doesn't exist (new branch), that's fine
-    let upstream = match upstream {
-        Ok(o) if o.status.success() => o,
-        _ => return Ok(()),
-    };
+        .output()
+        .map_err(|e| ShipError::GitFailed(format!("Failed to run git rev-parse: {}", e)))?;
+    if !upstream.status.success() {
+        let stderr = String::from_utf8_lossy(&upstream.stderr);
+        return Err(ShipError::GitFailed(format!(
+            "Could not resolve upstream ref {}: {}",
+            upstream_ref,
+            stderr.trim()
+        )));
+    }
 
     let local_sha = String::from_utf8_lossy(&local.stdout).trim().to_string();
     let upstream_sha = String::from_utf8_lossy(&upstream.stdout).trim().to_string();

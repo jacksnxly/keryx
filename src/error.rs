@@ -206,6 +206,11 @@ pub enum ShipError {
     #[error("Detached HEAD is not supported. Check out a branch before running ship.")]
     DetachedHead,
 
+    #[error(
+        "Branch '{branch}' has no upstream tracking branch configured. Set one with `git push -u <remote> <branch>`."
+    )]
+    MissingUpstreamTracking { branch: String },
+
     #[error("Local branch is behind remote. Run 'git pull' first.")]
     BehindRemote,
 
