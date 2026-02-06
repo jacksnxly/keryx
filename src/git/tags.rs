@@ -1,6 +1,6 @@
 //! Tag enumeration and version detection.
 
-use std::process::Command;
+use std::collections::HashMap;
 
 use git2::Repository;
 use semver::Version;
@@ -16,87 +16,66 @@ pub struct TagInfo {
     pub version: Option<Version>,
 }
 
-const SEMVER_TAG_PATTERNS: [&str; 2] = ["v[0-9]*.[0-9]*.[0-9]*", "[0-9]*.[0-9]*.[0-9]*"];
+fn is_stable_release_tag(name: &str) -> bool {
+    let raw = name.strip_prefix('v').unwrap_or(name);
+    let mut parts = raw.split('.');
+    let major = parts.next();
+    let minor = parts.next();
+    let patch = parts.next();
+    let extra = parts.next();
+
+    extra.is_none()
+        && major.is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        && minor.is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        && patch.is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
 
 /// Get the latest semver tag reachable from HEAD.
 ///
-/// Uses `git describe --tags --abbrev=0` which is the industry standard approach
-/// used by semantic-release, cargo-release, and other release automation tools.
-/// This correctly handles multi-branch scenarios (maintenance branches, backports)
-/// by only considering tags in the commit history of the current branch.
+/// Walks commits reachable from `HEAD` and returns the first commit that has
+/// a strict stable release tag (`vX.Y.Z` or `X.Y.Z`) attached.
+/// This avoids glob-based false positives from non-semver tags while still
+/// respecting branch reachability.
 pub fn get_latest_reachable_tag(repo: &Repository) -> Result<Option<TagInfo>, GitError> {
-    // Use git describe to find the most recent semver-like tag reachable from HEAD.
-    let output = Command::new("git")
-        .args([
-            "describe",
-            "--tags",
-            "--abbrev=0",
-            "--match",
-            SEMVER_TAG_PATTERNS[0],
-            "--match",
-            SEMVER_TAG_PATTERNS[1],
-        ])
-        .output()
-        .map_err(|e| GitError::CommandFailed(format!("Failed to run git describe: {}", e)))?;
+    let head_oid = match repo.head().ok().and_then(|head| head.target()) {
+        Some(oid) => oid,
+        None => return Ok(None),
+    };
 
-    if !output.status.success() {
-        if output.status.code() == Some(128) && !has_reachable_semver_tag(repo)? {
-            debug!("No semver tags reachable from HEAD");
-            return Ok(None);
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(GitError::CommandFailed(format!(
-            "git describe failed: {}",
-            stderr.trim()
-        )));
+    let mut tags_by_commit: HashMap<git2::Oid, Vec<TagInfo>> = HashMap::new();
+    for tag in get_all_tags(repo)?
+        .into_iter()
+        .filter(|tag| tag.version.is_some() && is_stable_release_tag(&tag.name))
+    {
+        tags_by_commit.entry(tag.oid).or_default().push(tag);
     }
 
-    let tag_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if tag_name.is_empty() {
+    if tags_by_commit.is_empty() {
+        debug!("No stable semver tags found in repository");
         return Ok(None);
     }
 
-    debug!(tag = %tag_name, "Found latest reachable tag via git describe");
+    let mut revwalk = repo.revwalk().map_err(GitError::RevwalkError)?;
+    revwalk.push(head_oid).map_err(GitError::RevwalkError)?;
+    revwalk
+        .set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+        .map_err(GitError::RevwalkError)?;
 
-    // Look up the tag in the repository to get OID and version info.
-    let all_tags = get_all_tags(repo)?;
-    let tag_info = all_tags
-        .into_iter()
-        .find(|t| t.name == tag_name && t.version.is_some());
-
-    match tag_info {
-        Some(tag) => Ok(Some(tag)),
-        None => Err(GitError::CommandFailed(format!(
-            "git describe returned non-semver tag '{}'",
-            tag_name
-        ))),
-    }
-}
-
-fn has_reachable_semver_tag(repo: &Repository) -> Result<bool, GitError> {
-    let head_oid = match repo.head().ok().and_then(|head| head.target()) {
-        Some(oid) => oid,
-        None => return Ok(false),
-    };
-
-    for tag in get_all_tags(repo)?
-        .into_iter()
-        .filter(|tag| tag.version.is_some())
-    {
-        if tag.oid == head_oid {
-            return Ok(true);
-        }
-
-        let is_descendant = repo
-            .graph_descendant_of(head_oid, tag.oid)
-            .map_err(GitError::RevwalkError)?;
-        if is_descendant {
-            return Ok(true);
+    for oid in revwalk {
+        let oid = oid.map_err(GitError::RevwalkError)?;
+        if let Some(candidates) = tags_by_commit.get(&oid) {
+            let latest = candidates
+                .iter()
+                .max_by(|a, b| a.version.cmp(&b.version))
+                .cloned();
+            if let Some(tag) = latest {
+                debug!(tag = %tag.name, "Found latest reachable stable semver tag");
+                return Ok(Some(tag));
+            }
         }
     }
 
-    Ok(false)
+    Ok(None)
 }
 
 /// Get the latest semver tag from the repository (highest version globally).
@@ -256,13 +235,13 @@ mod tests {
 
         let second = commit(&repo, dir.path(), "chore: second");
         repo.tag_lightweight(
-            "deploy-2026-02-05",
+            "v1foo.0.0",
             &repo
                 .find_object(second, None)
                 .expect("failed to find second"),
             false,
         )
-        .expect("failed to tag deploy");
+        .expect("failed to tag invalid semver");
 
         let latest = get_latest_reachable_tag(&repo)
             .expect("failed to resolve latest reachable tag")
