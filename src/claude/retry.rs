@@ -95,20 +95,37 @@ struct ClaudeCliResponse {
 /// If the response cannot be parsed as an envelope, returns the raw response as-is.
 /// If the envelope indicates an error (`is_error: true`), returns
 /// `Err(ClaudeError::ExecutionFailed(...))` so callers can retry or surface the failure.
+///
+/// When Claude CLI is invoked via `script` (pseudo-TTY wrapper), stderr from
+/// hooks or other processes may be interleaved with stdout.  The direct
+/// `serde_json::from_str` call fails in that case because of trailing
+/// non-JSON text.  We fall back to `extract_json` which uses balanced-brace
+/// extraction and handles surrounding garbage gracefully.
 pub(crate) fn unwrap_claude_envelope(response: &str) -> Result<String, ClaudeError> {
+    // Fast path: response is clean JSON (no trailing garbage)
     if let Ok(envelope) = serde_json::from_str::<ClaudeCliResponse>(response) {
         if envelope.is_error {
             return Err(ClaudeError::ExecutionFailed(envelope.result));
         }
-        Ok(envelope.result)
-    } else {
-        tracing::warn!(
-            "Could not parse as Claude CLI envelope - treating as raw response. \
-             This may indicate a Claude CLI version mismatch. Consider running \
-             'claude --version' to check your installation."
-        );
-        Ok(response.to_string())
+        return Ok(envelope.result);
     }
+
+    // Slow path: extract JSON from noisy output (e.g., hook stderr mixed
+    // into the PTY stream by the `script` wrapper)
+    let extracted = extract_json(response);
+    if let Ok(envelope) = serde_json::from_str::<ClaudeCliResponse>(&extracted) {
+        if envelope.is_error {
+            return Err(ClaudeError::ExecutionFailed(envelope.result));
+        }
+        return Ok(envelope.result);
+    }
+
+    tracing::warn!(
+        "Could not parse as Claude CLI envelope - treating as raw response. \
+         This may indicate a Claude CLI version mismatch. Consider running \
+         'claude --version' to check your installation."
+    );
+    Ok(response.to_string())
 }
 
 /// Parse Claude's JSON response into ChangelogOutput.
@@ -368,6 +385,43 @@ mod tests {
         let response = r#"{"result":"no error field"}"#;
         let result = unwrap_claude_envelope(response);
         assert_eq!(result.unwrap(), "no error field");
+    }
+
+    /// Test that envelope is extracted when hook stderr is mixed into PTY output.
+    ///
+    /// When Claude CLI runs via `script` (pseudo-TTY), stderr from hooks
+    /// (e.g. SessionEnd) gets interleaved with stdout, producing trailing
+    /// garbage after the JSON envelope.
+    #[test]
+    fn test_unwrap_envelope_with_trailing_hook_stderr() {
+        let response = concat!(
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"{\"groups\": [{\"label\": \"test\", \"files\": [\"a.rs\"]}]}"}"#,
+            "\nSessionEnd hook [python3 hooks/kill.py] failed: Traceback (most recent call last):\n",
+            "  File \"hooks/kill.py\", line 43, in <module>\n",
+            "    os.kill(pid, signal.SIGKILL)\n",
+            "ProcessLookupError: [Errno 3] No such process\n",
+        );
+        let result = unwrap_claude_envelope(response).unwrap();
+        assert_eq!(
+            result,
+            r#"{"groups": [{"label": "test", "files": ["a.rs"]}]}"#
+        );
+    }
+
+    /// Test that error envelopes are still detected even with trailing garbage.
+    #[test]
+    fn test_unwrap_envelope_error_with_trailing_garbage() {
+        let response = concat!(
+            r#"{"type":"result","is_error":true,"result":"rate limited"}"#,
+            "\nsome trailing output\n",
+        );
+        let result = unwrap_claude_envelope(response);
+        match result {
+            Err(ClaudeError::ExecutionFailed(msg)) => {
+                assert_eq!(msg, "rate limited");
+            }
+            other => panic!("Expected ExecutionFailed, got: {:?}", other),
+        }
     }
 
     // ============================================
