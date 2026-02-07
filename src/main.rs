@@ -407,12 +407,14 @@ async fn main() -> Result<()> {
 ///
 /// Returns true if a newer version is available, false otherwise.
 fn check_for_update() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    use axoupdater::{AxoUpdater, Version};
-
-    let current_version: Version = env!("CARGO_PKG_VERSION").parse()?;
+    use axoupdater::AxoUpdater;
 
     let mut updater = AxoUpdater::new_for("keryx");
-    updater.set_current_version(current_version)?;
+
+    // Load the install receipt to get source info (GitHub owner/repo).
+    // This is required for axoupdater to know where to check for updates.
+    // The receipt also contains the installed version.
+    updater.load_receipt()?;
 
     Ok(updater.is_update_needed_sync()?)
 }
@@ -431,16 +433,27 @@ fn print_update_notification() {
 
 /// Run the self-update command.
 async fn run_update() -> Result<()> {
-    use axoupdater::{AxoUpdater, Version};
+    use axoupdater::AxoUpdater;
 
     println!("Checking for updates...");
 
-    let current_version: Version = env!("CARGO_PKG_VERSION")
-        .parse()
-        .context("Failed to parse current version")?;
-
     let mut updater = AxoUpdater::new_for("keryx");
-    updater.set_current_version(current_version)?;
+
+    // Load the install receipt to get source info (GitHub owner/repo) and current version.
+    // This is required for axoupdater to know where to fetch updates from.
+    // If no receipt exists (e.g., built from source), provide a helpful error.
+    if let Err(e) = updater.load_receipt() {
+        eprintln!("\x1b[31mFailed to load install receipt: {}\x1b[0m", e);
+        eprintln!();
+        eprintln!("The update command requires an install receipt created by the installer.");
+        eprintln!("This typically means keryx was built from source rather than installed.");
+        eprintln!();
+        eprintln!("To install keryx properly, run:");
+        eprintln!(
+            "  curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jacksnxly/keryx/releases/latest/download/keryx-installer.sh | sh"
+        );
+        return Err(anyhow::anyhow!("No install receipt found"));
+    }
 
     // Enable output from the installer
     updater.enable_installer_output();
