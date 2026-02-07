@@ -86,9 +86,13 @@ pub async fn run_claude(prompt: &str) -> Result<String, ClaudeError> {
     let prompt_file = temp_dir.join(format!("keryx-prompt-{}.txt", std::process::id()));
     std::fs::write(&prompt_file, prompt).map_err(ClaudeError::SpawnFailed)?;
 
-    // Build command that reads prompt from file
+    // Build command that reads prompt from file.
+    // Redirect stderr to /dev/null so that hook output (e.g. SessionEnd
+    // errors) from Claude Code doesn't leak into the pseudo-TTY stdout
+    // captured by `script`.  All actionable error info is already available
+    // via the JSON envelope (`is_error` field) and the process exit code.
     let claude_cmd = format!(
-        "claude -p \"$(cat {})\" --output-format json --dangerously-skip-permissions",
+        "claude -p \"$(cat {})\" --output-format json --dangerously-skip-permissions 2>/dev/null",
         prompt_file.display()
     );
 
