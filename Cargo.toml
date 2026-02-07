@@ -1,6 +1,6 @@
 [package]
 name = "keryx"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 description = "A CLI tool that generates release notes from merged PRs and conventional commits"
 license = "MIT"
