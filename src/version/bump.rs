@@ -51,7 +51,7 @@ pub fn determine_bump_type(commits: &[ParsedCommit]) -> BumpType {
             let bump = match commit_type {
                 CommitType::Feat => BumpType::Minor,
                 CommitType::Fix => BumpType::Patch,
-                CommitType::Perf => BumpType::Patch,
+                CommitType::Perf => BumpType::Minor,
                 // All other types don't trigger bumps by themselves
                 _ => BumpType::Patch,
             };

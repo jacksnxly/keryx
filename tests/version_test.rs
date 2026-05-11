@@ -114,8 +114,8 @@ fn test_bump_patch_from_perf() {
 
     let next = calculate_next_version(Some(&base), &commits);
 
-    // Perf = patch bump
-    assert_eq!(next, Version::new(2, 0, 1));
+    // Perf = minor bump
+    assert_eq!(next, Version::new(2, 1, 0));
 }
 
 #[test]
