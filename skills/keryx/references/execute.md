@@ -41,6 +41,8 @@ python3 "$SKILL_DIR/scripts/cursor.py" locked --slug S [--ref R]   # every locke
 python3 "$SKILL_DIR/scripts/cursor.py" gates --slug S [--ref R]    # architecture gates the diff changed
 python3 "$SKILL_DIR/scripts/cursor.py" followup --slug S --prompt-file <state>/rounds-in/02.md
 python3 "$SKILL_DIR/scripts/cursor.py" scrub --slug S       # strip the attribution trailer before anything leaves
+python3 "$SKILL_DIR/scripts/cursor.py" review-brief --slug S [--risk]   # the fresh reviewer's brief and how to dispatch it
+python3 "$SKILL_DIR/scripts/cursor.py" finish --slug S [--head R]       # FINISHED, or what the run still lacks
 ```
 
 For Cursor, pick the cheapest model preflight lists that has done this kind of work. For GLM, `create --runner glm` with no `--model` runs glm-5.3; every other command takes only `--slug`, since the loop remembers its runner. Never poll in short loops; while it runs, prepare the QA script and the review package. *(owner; fact)*

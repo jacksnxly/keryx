@@ -3,7 +3,8 @@
 ## Before you finish
 
 - Run the done-when commands once more on the final head, and bring the branch up to date with its base (merge, not rebase, once it is shared). *(evidence)*
-- Log the finish row: `cursor.py log --slug <slug> finish <what> <why> <evidence> <result>` — one per PR when the run ships several. Rulings live in the run log, nowhere else. *(evidence: a run kept its rulings in the repository's docs and logged no finish; a 27-hour run shipped five PRs under one record)*
+- Log the finish row: `cursor.py log --slug <slug> finish <what> <why> <evidence> <result>` — one per PR when the run ships several; a findings-only review logs one for the findings it reported. Rulings live in the run log, nowhere else. *(evidence: a run kept its rulings in the repository's docs and logged no finish; a 27-hour run shipped five PRs under one record)*
+- Run `cursor.py finish --slug <slug> [--head <shipped commit>]`. It refuses, and lists what is missing, until the log has a finish row and a fresh review in the brief's shape covers the shipped head (that commit or an earlier one on its line; both finders for a risk-list diff). The run is finished only when it prints FINISHED; never call it finished, in the report or anywhere else, before that. Its lines (time, review counts, what shipped, rulings, deferred minors, executor rounds, the QA file) are the facts your report is built from. *(evidence: three field runs in a row ended without a finish row)*
 - Remember what the next run should not have to ask or relearn: `cursor.py remember "<note>"` for an owner's choice that will recur, `--repo` for this repository's trap that cost a round. Never a secret (the command refuses anything that looks like one, a full 40-character commit id included: write short ids), never a one-off. *(owner)*
 
 ## Act within the autonomy
@@ -16,7 +17,7 @@
 
 ## The report
 
-A few lines, in the owner's words, not the process's:
+A few lines, in the owner's words, not the process's, taken from what `cursor.py finish` printed:
 
 1. **What changed** for the person using it, and where it lives (branch, commits, PR).
 2. **Proof**: the acceptance check's command and its result on the base and now; the mutation probes and what caught them; the QA file (`<state>/qa/QA.md`), with each piece of evidence named for what it is.

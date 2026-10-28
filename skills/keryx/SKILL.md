@@ -27,8 +27,8 @@ Size by the work, not the wording; when an S grows, stop and re-size. *(evidence
 3. **Plan** (M/L) — `references/plan.md`. Decisions (with the Domain block where `domain.md` applies) and locked tests, never implementation code. Run every done-command once on the base before anyone builds. *(owner; evidence)*
 4. **Execute** — `references/execute.md`. The executors set up once with `cursor.py setup` (the Claude subagent when there is no setup), the next one on any error. Tests first, proven to fail for the stated reason; then the code. Escalate after 2 failed rounds on the same finding. *(evidence; owner)*
 5. **Check** — `references/check.md`. Mechanical first: locked tests unchanged, diff inside bounds, tests re-run by you, no assistant attribution. Then QA on the real surface, scripted and exploratory, and at least one mutation probe. *(evidence: a lock check caught a false "copied verbatim"; probes found weak tests twice)*
-6. **Fresh review** (M/L) — `references/review.md`. One reviewer with fresh context on the whole branch (two finders for a risk-list diff); validate each finding before acting on it. *(owner; evidence: converged branches still had 3–12 real bugs)*
-7. **Finish** — `references/finish.md`. Act within the autonomy, then a short report with links to evidence. *(owner)*
+6. **Fresh review** (M/L) — `references/review.md`. `cursor.py review-brief` writes the reviewer's brief (two for a risk-list diff); dispatch it exactly as printed, never a prompt of your own. One reviewer with fresh context on the whole branch; validate each finding before acting on it. *(owner; evidence: converged branches still had 3–12 real bugs; a reviewer briefed from memory lost the reach question and the grades)*
+7. **Finish** — `references/finish.md`. Act within the autonomy, log a finish row, and run `cursor.py finish`: an M or L run is finished only when it prints FINISHED. Then a short report with links to evidence. *(owner; evidence: three field runs in a row ended without a finish row)*
 
 Modes add their own steps: **bug** and **CI** `references/bug.md` · **feature** `references/intake.md` · **review a PR/branch** `references/review.md`.
 

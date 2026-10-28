@@ -8,7 +8,8 @@
 
 - **Test-driven by default**: the acceptance check fails before the work and passes after; locked tests cannot be edited by the agent that writes the code.
 - **Cheaper executors**: a Sonnet subagent ships with the plugin; the Cursor CLI, a GLM Coding Plan or Cursor Cloud can take over, with automatic fallback when one fails or hits a usage limit.
-- **Real QA and code review**: scripted and exploratory QA with kept evidence, mutation probes, and a review with a written bar (P0–P3), a production-reach question and two reviewers for risky changes.
+- **Real QA and code review**: scripted and exploratory QA with kept evidence, mutation probes, and a review with a written bar (P0–P3), a production-reach question and two reviewers for risky changes. The reviewer's brief ships with the plugin, so the bar is the same in every run.
+- **Finished means finished**: a run counts as done only when its log records what shipped and a well-formed fresh review covers the shipped commit.
 - **Guards architecture**: guard tests, import contracts, dependency rules and CI config changed by an executor are flagged; a domain-driven design lens applies wherever a change touches business rules.
 - **Stays inside your limits**: it asks once how far it may go (commit, push, PR, merge, deploy) and never goes further.
 
@@ -78,14 +79,14 @@ When an executor fails (an error, a stop, a dispatch that never starts), keryx m
 4. **Plan and locked tests.** Decisions and exact tests, no implementation code. The tests are locked: an executor that changes one fails the check.
 5. **Execute.** Tests first, shown to fail for the stated reason, then the code.
 6. **Check.** Mechanical first (locked tests intact, diff inside its bounds, architecture gates untouched, no assistant attribution), then QA on the real surface and mutation probes that break the change on purpose.
-7. **One fresh review** of the whole branch, each finding checked before it is acted on.
-8. **Finish** within the autonomy, with a short report: what changed, the proof, what is open, and every ruling made on your behalf.
+7. **One fresh review** of the whole branch from a brief that ships with keryx, each finding checked before it is acted on.
+8. **Finish** within the autonomy. `cursor.py finish` refuses until the run log has a finish row and the review covers the shipped commit, then prints the facts for a short report: what changed, the proof, what is open, and every ruling made on your behalf.
 
 Every decision is logged as it is made (`<git-common-dir>/cursor-loop/<slug>/decisions.tsv`), so a run can be picked up after a context reset.
 
 ## What is in the repository
 
-- `skills/keryx/` — the workflow (`SKILL.md`, `references/`) and the executor adapter (`scripts/cursor.py`).
+- `skills/keryx/` — the workflow (`SKILL.md`, `references/`), the reviewer's brief (`prompts/`) and the executor adapter (`scripts/cursor.py`).
 - `skills/evidence/` — the always-on rule: get the evidence that could prove a claim wrong before making it.
 - `agents/executor.md` — the Sonnet executor agent.
 - `bench/` — a replay benchmark that compares workflow versions on recorded tasks.
