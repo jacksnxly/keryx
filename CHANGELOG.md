@@ -2,7 +2,7 @@
 
 ## 1.1.0 — 2026-10-28
 
-- `cursor.py review-brief` writes the fresh reviewer's brief from a file that ships with keryx (`skills/keryx/prompts/reviewer.md`): the bar for a finding, P0–P3 and confidence, the reach and spec questions, the plan, the repository's rule files and the exact shape of the findings file. `--risk` adds a second brief with a security pass. The coordinator dispatches what the command prints instead of retyping the rules; a field run that retyped them lost the reach question and the grades.
+- `cursor.py review-brief` writes the fresh reviewer's brief from a file that ships with keryx (`skills/keryx/prompts/reviewer.md`): the bar for a finding, P0–P3 and confidence, the reach and spec questions, the plan, the repository's rule files, where the reviewed commit is checked out, and the exact shape of the findings file. `--risk` adds a second brief with a security pass. The coordinator dispatches what the command prints instead of retyping the rules; a field run that retyped them lost the reach question and the grades.
 - `cursor.py finish` decides when a run is finished. It refuses, and says what is missing, until the run log has a finish row and a well-formed fresh review covers the shipped commit (both finders for a risky diff); then it prints the report's facts: time, review counts, what shipped, rulings, deferred minors, executor rounds and the QA file. Three field runs in a row had ended without a finish row.
 
 ## 1.0.2 — 2026-10-28
