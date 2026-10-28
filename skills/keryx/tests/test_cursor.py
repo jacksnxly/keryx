@@ -963,3 +963,210 @@ class RoundUsageLimit(unittest.TestCase):
             self.assertIsNone(cloud.round_usage_limit(r))
             (r / "stderr.log").write_text("API Error: Request rejected (429) · " + msg + "\n")
             self.assertEqual(cloud.round_usage_limit(r)["resetsAt"], "2026-10-27T11:58:02Z")
+
+
+def _two_commit_repo(tmp):
+    """A repository with a CLAUDE.md and app.py at the base, and one commit on top that changes app.py."""
+    import subprocess
+    repo = Path(tmp) / "repo"
+    repo.mkdir()
+
+    def run(*a):
+        return subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+    run("init", "-q", "-b", "main")
+    (repo / "CLAUDE.md").write_text("Domain code imports no framework.\n")
+    (repo / "app.py").write_text("def f():\n    return 1\n")
+    run("add", ".")
+    run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base")
+    base = run("rev-parse", "HEAD")
+    (repo / "app.py").write_text("def f():\n    return 2\n")
+    run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am", "fix: two")
+    return repo, run, base, run("rev-parse", "HEAD")
+
+
+def _cli(repo, argv):
+    """Run cursor.py inside the repository; returns (exit code, stdout)."""
+    import contextlib
+    import io
+    import os
+    old = os.getcwd()
+    os.chdir(repo)
+    try:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cloud.main(argv)
+        return code, out.getvalue()
+    finally:
+        os.chdir(old)
+
+
+class ReviewBrief(unittest.TestCase):
+    """The fresh reviewer's prompt ships with keryx: the coordinator hands out a file instead of retyping the bar
+    (field run 10 wrote its own prompt and lost the reach question and the P0-P3 grades)."""
+
+    def test_the_brief_carries_the_bar_the_paths_and_where_to_write_the_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "rb"
+            state.mkdir(parents=True)
+            (state / "PLAN.md").write_text("# rb: f returns 2\n")
+            code, out = _cli(repo, ["review-brief", "--slug", "rb", "--base", base, "--head", head])
+            self.assertEqual(code, 0)
+            name = f"{base[:12]}..{head[:12]}"
+            brief = state / "review" / f"{name}.brief.md"
+            text = brief.read_text()
+            for must in ("Reach:", "Spec:", "P0", "P3", "confidence", "Findings:", head, str(state / "PLAN.md"),
+                         str(state / "review" / f"{name}.diff"), str(state / "review" / f"{name}.findings.md"),
+                         str(Path(run("rev-parse", "--show-toplevel")) / "CLAUDE.md")):
+                self.assertIn(must, text)
+            self.assertNotIn("{{", text)
+            self.assertNotIn("Security pass", text)
+            self.assertIn("+    return 2", (state / "review" / f"{name}.diff").read_text())
+            self.assertEqual(out.count("dispatch"), 1)
+            self.assertIn(f"dispatch  model=sonnet  prompt=\"Read {brief} and follow it exactly.\"", out)
+            self.assertIn("review brief", (state / "decisions.tsv").read_text())
+
+    def test_a_risk_list_diff_gets_two_finders_the_second_with_a_security_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "rb"
+            code, out = _cli(repo, ["review-brief", "--slug", "rb", "--base", base, "--head", head, "--risk"])
+            self.assertEqual(code, 0)
+            name = f"{base[:12]}..{head[:12]}"
+            first, second = state / "review" / f"{name}.brief.md", state / "review" / f"{name}.security.brief.md"
+            self.assertNotIn("Security pass", first.read_text())
+            self.assertIn("no plan file", first.read_text())
+            self.assertIn("Security pass", second.read_text())
+            self.assertIn("blame", second.read_text())
+            self.assertIn(str(state / "review" / f"{name}.security.findings.md"), second.read_text())
+            self.assertEqual(out.count("dispatch"), 2)
+            self.assertIn(f"dispatch  model=opus  prompt=\"Read {first} and follow it exactly.\"", out)
+            self.assertIn(f"dispatch  model=sonnet  prompt=\"Read {second} and follow it exactly.\"", out)
+
+    def test_a_loop_supplies_base_and_head_and_without_one_the_base_is_needed(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "nb", "--head", head])[0], 1,
+                             "no executor loop and no --base")
+            (Path(tmp) / "brief.md").write_text("Mode: IMPLEMENT\n")
+            self.assertEqual(_cli(repo, ["create", "--slug", "lp", "--runner", "subagent",
+                                         "--prompt-file", str(Path(tmp) / "brief.md"), "--ref", "main"])[0], 0)
+            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "lp"
+            wt = json.loads((state / "agent.json").read_text())["workspace"]
+            (Path(wt) / "app.py").write_text("def f():\n    return 3\n")
+            subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am",
+                            "fix: three"], check=True, capture_output=True)
+            sub_head = run("rev-parse", "sub/lp")
+            self.assertEqual(_cli(repo, ["fetch", "--slug", "lp"])[0], 0)
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "lp"])[0], 0)
+            self.assertTrue((state / "review" / f"{head[:12]}..{sub_head[:12]}.brief.md").exists())
+
+
+class FinishGate(unittest.TestCase):
+    """A run is finished only when its log has a finish row and a well-formed fresh review covers the shipped head
+    (field runs 8, 9 and 10 never logged one)."""
+
+    GOOD = ("Head: {head}\nReach: POST /v1/x mounts the router; nothing breaks on the way\nSpec: matches\n"
+            "Findings:\n- app.py:2 — returns 2 for every input — f() with no flag set gives 2, not 1 — P1 — 0.8\n"
+            "- app.py:1 — the name f says nothing — any call — P3 — 0.4\n"
+            "Tests: none would catch f() returning 3\n")
+
+    def test_well_formed_findings_are_counted_and_malformed_ones_named(self):
+        got = cloud.review_findings(self.GOOD.format(head="a" * 40))
+        self.assertEqual((got["head"], got["problems"]), ("a" * 40, []))
+        self.assertEqual(got["counts"], {"P0": 0, "P1": 1, "P2": 0, "P3": 1})
+        clean = cloud.review_findings("Head: " + "b" * 40 + "\nReach: one caller\nSpec: matches\nFindings: none\n")
+        self.assertEqual((clean["problems"], sum(clean["counts"].values())), ([], 0))
+        no_reach = cloud.review_findings(self.GOOD.format(head="a" * 40).replace("Reach: POST", "Rich: POST"))
+        self.assertTrue(any("Reach" in p for p in no_reach["problems"]))
+        ungraded = cloud.review_findings(self.GOOD.format(head="a" * 40).replace(" — P1 — 0.8", ""))
+        self.assertTrue(any("app.py:2" in p for p in ungraded["problems"]))
+        self.assertTrue(cloud.review_findings("Reach: x\nSpec: y\nFindings: none\n")["problems"], "no Head line")
+        self.assertTrue(cloud.review_findings("Head: " + "b" * 40 + "\nReach: x\nSpec: y\nFindings:\nTests: z\n")
+                        ["problems"], "an empty list that does not say none")
+
+    def test_finish_refuses_without_a_finish_row_or_a_well_formed_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "fg"
+            self.assertEqual(_cli(repo, ["log", "--slug", "fg", "plan", "planned", "why", "ev", "ok"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head])
+            self.assertEqual(code, 1)
+            self.assertIn("NOT FINISHED", out)
+            self.assertIn("missing  a finish row", out)
+            self.assertIn("missing  a fresh review", out)
+            self.assertFalse((state / "finished.json").exists())
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "fg", "--base", base, "--head", head])[0], 0)
+            findings = state / "review" / f"{base[:12]}..{head[:12]}.findings.md"
+            findings.write_text(self.GOOD.format(head=head).replace(" — P1 — 0.8", ""))
+            self.assertEqual(_cli(repo, ["log", "--slug", "fg", "finish", "PR #6", "why", "ev", "merged"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head])
+            self.assertEqual(code, 1, "an ungraded finding is not a review")
+            self.assertIn(str(findings), out)
+            self.assertIn("missing  a fresh review", out)
+            self.assertNotIn("missing  a finish row", out)
+            self.assertFalse((state / "finished.json").exists())
+
+    def test_finish_passes_with_a_finish_row_and_a_review_and_reports_the_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "fg"
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "fg", "--base", base, "--head", head])[0], 0)
+            findings = state / "review" / f"{base[:12]}..{head[:12]}.findings.md"
+            findings.write_text(self.GOOD.format(head=head))
+            for row in (["ruling", "Ruling: keep the old flag name", "renaming breaks callers", "app.py:1", "ruled"],
+                        ["review", "minor (deferred): the name f", "P3", "app.py:1", "deferred"],
+                        ["finish", "PR #7 merged into main", "the acceptance check passes", "ci run 42", "merged"]):
+                self.assertEqual(_cli(repo, ["log", "--slug", "fg", *row])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head])
+            self.assertEqual(code, 0, out)
+            self.assertIn("FINISHED", out)
+            self.assertNotIn("NOT FINISHED", out)
+            for must in ("PR #7 merged into main", "Ruling: keep the old flag name", "minor (deferred): the name f",
+                         "P1 1", str(findings), "the final head"):
+                self.assertIn(must, out)
+            self.assertEqual(json.loads((state / "finished.json").read_text())["head"], head)
+            last = (state / "decisions.tsv").read_text().splitlines()[-1].split("\t")
+            self.assertEqual(last[1], "done")
+
+    def test_a_review_counts_for_later_commits_on_top_but_not_for_another_line_of_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "fg"
+            run("checkout", "-q", "-b", "side", base)
+            (repo / "other.py").write_text("x = 1\n")
+            run("add", "other.py")
+            run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "side")
+            side = run("rev-parse", "HEAD")
+            run("checkout", "-q", "main")
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "fg", "--base", base, "--head", side])[0], 0)
+            (state / "review" / f"{base[:12]}..{side[:12]}.findings.md").write_text(self.GOOD.format(head=side))
+            self.assertEqual(_cli(repo, ["log", "--slug", "fg", "finish", "PR #8", "why", "ev", "merged"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head])
+            self.assertEqual(code, 1, "the side branch's review does not cover main")
+            self.assertIn("missing  a fresh review", out)
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "fg", "--base", base, "--head", head])[0], 0)
+            (state / "review" / f"{base[:12]}..{head[:12]}.findings.md").write_text(self.GOOD.format(head=head))
+            (repo / "app.py").write_text("def f():\n    return 4\n")
+            run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am", "fix: four")
+            later = run("rev-parse", "HEAD")
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", later])
+            self.assertEqual(code, 0, out)
+            self.assertIn("1 commit before the final head", out)
+
+    def test_a_risk_review_needs_both_finders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "fg"
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "fg", "--base", base, "--head", head,
+                                         "--risk"])[0], 0)
+            name = f"{base[:12]}..{head[:12]}"
+            (state / "review" / f"{name}.findings.md").write_text(self.GOOD.format(head=head))
+            self.assertEqual(_cli(repo, ["log", "--slug", "fg", "finish", "PR #9", "why", "ev", "merged"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head])
+            self.assertEqual(code, 1, "the second finder has not reported")
+            self.assertIn(f"{name}.security.findings.md", out)
+            (state / "review" / f"{name}.security.findings.md").write_text(self.GOOD.format(head=head))
+            self.assertEqual(_cli(repo, ["finish", "--slug", "fg", "--head", head])[0], 0)
