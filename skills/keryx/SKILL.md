@@ -25,10 +25,10 @@ Size by the work, not the wording; when an S grows, stop and re-size. *(evidence
 1. **Intake** — `references/intake.md`. Read what you can yourself, then ask only what you can't find: one question at a time, choices where possible. Ask the autonomy question once. Turn "who accepts this and what do they look at" into a check, run it on the base, and see it fail. *(owner)*
 2. **Ground truth** — facts with their source, assumptions with the cheapest test that would disprove each; test the riskiest one with a real call before building on it. *(evidence)* When the change touches a business rule, owned data or an integration, the domain facts too: context, terms, invariants, who owns the data, which way imports go — `references/domain.md`. *(owner)*
 3. **Plan** (M/L) — `references/plan.md`. Decisions (with the Domain block where `domain.md` applies) and locked tests, never implementation code. Run every done-command once on the base before anyone builds. *(owner; evidence)*
-4. **Execute** — `references/execute.md`. The executors set up once with `cursor.py setup` (the Claude subagent when there is no setup), the next one on any error. Tests first, proven to fail for the stated reason; then the code. Escalate after 2 failed rounds on the same finding. *(evidence; owner)*
+4. **Execute** — `references/execute.md`. The executors set up once with `keryx.py setup` (the Claude subagent when there is no setup), the next one on any error. Tests first, proven to fail for the stated reason; then the code. Escalate after 2 failed rounds on the same finding. *(evidence; owner)*
 5. **Check** — `references/check.md`. Mechanical first: locked tests unchanged, diff inside bounds, tests re-run by you, no assistant attribution. Then QA on the real surface, scripted and exploratory, and at least one mutation probe. *(evidence: a lock check caught a false "copied verbatim"; probes found weak tests twice)*
-6. **Fresh review** (M/L) — `references/review.md`. `cursor.py review-brief` writes the reviewer's brief (two for a risk-list diff); dispatch it exactly as printed, never a prompt of your own. One reviewer with fresh context on the whole branch; validate each finding before acting on it. *(owner; evidence: converged branches still had 3–12 real bugs; a reviewer briefed from memory lost the reach question and the grades)*
-7. **Finish** — `references/finish.md`. Act within the autonomy, log a finish row, and run `cursor.py finish`: an M or L run is finished only when it prints FINISHED. Then a short report with links to evidence. *(owner; evidence: three field runs in a row ended without a finish row)*
+6. **Fresh review** (M/L) — `references/review.md`. `keryx.py review-brief` writes the reviewer's brief (two for a risk-list diff); dispatch it exactly as printed, never a prompt of your own. One reviewer with fresh context on the whole branch; validate each finding before acting on it. *(owner; evidence: converged branches still had 3–12 real bugs; a reviewer briefed from memory lost the reach question and the grades)*
+7. **Finish** — `references/finish.md`. Act within the autonomy, log a finish row, and run `keryx.py finish`: an M or L run is finished only when it prints FINISHED. Then a short report with links to evidence. *(owner; evidence: three field runs in a row ended without a finish row)*
 
 Modes add their own steps: **bug** and **CI** `references/bug.md` · **feature** `references/intake.md` · **review a PR/branch** `references/review.md`.
 
@@ -50,6 +50,13 @@ Stop and ask only for: an irreversible or destructive step; a security-sensitive
 
 ## 5. Run log
 
-M and L runs keep one log, written as you go, one row per decision: `python3 "$SKILL_DIR/scripts/cursor.py" log --slug <slug> <phase> <decision> <why> <evidence> <result>` — five quoted arguments; it prints the log's path (`<git-common-dir>/cursor-loop/<slug>/decisions.tsv`). The Cursor adapter adds its own rows. After a context reset, trust the log, `git log` and the executor's status over your memory. *(evidence: lost-context coordinators re-ran finished work)*
+M and L runs keep one log, written as you go, one row per decision: `python3 "$SKILL_DIR/scripts/keryx.py" log --slug <slug> <phase> <decision> <why> <evidence> <result>` — five quoted arguments; it prints the log's path (`.keryx/runs/<slug>/decisions.tsv`). The adapter adds its own rows. After a context reset, trust the log, `git log` and the executor's status over your memory. *(evidence: lost-context coordinators re-ran finished work)*
 
 `SKILL_DIR` is this file's folder. Run commands from inside the target repository.
+
+## 6. Where things live
+
+- **`.keryx/runs/<slug>/`** in the repository's main checkout, written `<state>` in the references: the plan, the run log, locked tests, executor rounds, review briefs and findings, QA evidence, reproductions. The folder ignores itself (`.keryx/.gitignore`), so it never shows up in `git status`; `git clean -fdx` deletes it. A run started before keryx 1.2 keeps `.git/cursor-loop/<slug>/` until it finishes. *(fact: `.git` is a protected path, where an agent's writes prompt or are denied)*
+- **`.keryx/memory.md`**: this repository's traps; `~/.config/keryx/memory.md` and `config.json`: the owner's choices and executors.
+- **`docs/keryx/<date>-<slug>.md`**: the run's report, committed with the change (`keryx.py report`). Screenshots, executor logs and the plan never leave `.keryx/`. *(owner)*
+- **`.worktrees/<runner>-<slug>`**: each executor's worktree, on branch `<runner>/<slug>`; its fetched head is `refs/keryx/<slug>`.

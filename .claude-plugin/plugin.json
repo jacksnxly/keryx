@@ -1,6 +1,6 @@
 {
   "name": "keryx",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A test-first workflow for coding agents: an acceptance check that fails first, locked tests, cheaper executors (Sonnet subagent, Cursor CLI, GLM), mechanical checks, QA with kept evidence, mutation probes and one fresh code review.",
   "author": {
     "name": "Jackson Ly"

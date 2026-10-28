@@ -46,7 +46,7 @@ Ask for the work and say keryx, or call it directly:
 /keryx:keryx review this PR, findings only
 ```
 
-keryx remembers the choices you make that will come up again (your executor order, how far it may go, a repository's traps) in `~/.config/keryx/memory.md` and, per repository, in `.git/cursor-loop/memory.md`. It never stores a secret; edit or delete either file at any time.
+keryx remembers the choices you make that will come up again (your executor order, how far it may go, a repository's traps) in `~/.config/keryx/memory.md` and, per repository, in `.keryx/memory.md`. It never stores a secret; edit or delete either file at any time.
 
 The first time it needs an executor, keryx runs a short setup: it shows which executors it found on this machine and asks which to use, in which order. The answer is saved in `~/.config/keryx/config.json`; say "keryx setup" to change it.
 
@@ -80,13 +80,32 @@ When an executor fails (an error, a stop, a dispatch that never starts), keryx m
 5. **Execute.** Tests first, shown to fail for the stated reason, then the code.
 6. **Check.** Mechanical first (locked tests intact, diff inside its bounds, architecture gates untouched, no assistant attribution), then QA on the real surface and mutation probes that break the change on purpose.
 7. **One fresh review** of the whole branch from a brief that ships with keryx, each finding checked before it is acted on.
-8. **Finish** within the autonomy. `cursor.py finish` refuses until the run log has a finish row and the review covers the shipped commit, then prints the facts for a short report: what changed, the proof, what is open, and every ruling made on your behalf.
+8. **Finish** within the autonomy, with a short report committed next to the change (`docs/keryx/<date>-<slug>.md`): what changed, the proof, what is open, and every ruling made on your behalf. `keryx.py finish` refuses until the run log has a finish row, the review covers the shipped commit and the report is there.
 
-Every decision is logged as it is made (`<git-common-dir>/cursor-loop/<slug>/decisions.tsv`), so a run can be picked up after a context reset.
+Every decision is logged as it is made (`.keryx/runs/<slug>/decisions.tsv`), so a run can be picked up after a context reset.
+
+## Where keryx keeps its files
+
+```
+<your repository>/
+├── .keryx/                     ignored by git (it carries its own .gitignore)
+│   ├── memory.md               this repository's traps
+│   └── runs/<slug>/            one folder per task
+│       ├── PLAN.md             decisions and locked tests
+│       ├── decisions.tsv       the run log
+│       ├── locked/  rounds/    locked test blocks, each executor round
+│       ├── review/             the reviewer's brief and findings
+│       └── qa/QA.md            QA steps, screenshots, responses
+├── docs/keryx/
+│   └── <date>-<slug>.md        the run's report, committed with the change
+└── .worktrees/<runner>-<slug>  each executor's worktree
+```
+
+Screenshots and executor logs never leave `.keryx/`, since they can show real data. `git clean -fdx` deletes `.keryx/`. Runs started with keryx 1.1 or earlier finish in `.git/cursor-loop/`.
 
 ## What is in the repository
 
-- `skills/keryx/` — the workflow (`SKILL.md`, `references/`), the reviewer's brief (`prompts/`) and the executor adapter (`scripts/cursor.py`).
+- `skills/keryx/` — the workflow (`SKILL.md`, `references/`), the reviewer's brief (`prompts/`) and the executor adapter (`scripts/keryx.py`).
 - `skills/evidence/` — the always-on rule: get the evidence that could prove a claim wrong before making it.
 - `agents/executor.md` — the Sonnet executor agent.
 - `bench/` — a replay benchmark that compares workflow versions on recorded tasks.

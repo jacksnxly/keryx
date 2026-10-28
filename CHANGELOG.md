@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 — 2026-10-29
+
+- Every run's files now live in `.keryx/runs/<slug>/` in the repository's main checkout: the plan, the run log, locked tests, executor rounds, the review and QA evidence. The folder ignores itself, so it stays out of `git status`. They used to live in `.git/cursor-loop/`, where Claude Code prompts for every write an agent makes (and denies it in dontAsk mode), because `.git` is a protected path. Runs started before 1.2 finish where they started.
+- Each finished run leaves a short report in the repository. `keryx.py report` drafts `docs/keryx/<date>-<slug>.md` from the run, the coordinator fills it in and commits it with the change, and `finish` refuses until it is there (`--findings-only` for a review that changes nothing). Screenshots, executor logs and the plan stay in `.keryx/`.
+- The repository's memory moves to `.keryx/memory.md` with the first new note; until then the old file is still read.
+- keryx's own names throughout: the adapter is `scripts/keryx.py` (`scripts/cursor.py` still works in this release), the fetched head is `refs/keryx/<slug>`, and errors start with `keryx:`.
+- A GLM executor may not read `.keryx/`, since QA screenshots can show real people.
+- The field recorder and the benchmark read executor logs in both places.
+
 ## 1.1.0 — 2026-10-28
 
 - `cursor.py review-brief` writes the fresh reviewer's brief from a file that ships with keryx (`skills/keryx/prompts/reviewer.md`): the bar for a finding, P0–P3 and confidence, the reach and spec questions, the plan, the repository's rule files, where the reviewed commit is checked out, and the exact shape of the findings file. `--risk` adds a second brief with a security pass. The coordinator dispatches what the command prints instead of retyping the rules; a field run that retyped them lost the reach question and the grades.

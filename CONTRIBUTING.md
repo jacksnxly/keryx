@@ -14,7 +14,7 @@ Every rule in `skills/keryx/` carries where it comes from: *fact*, *owner* (a ma
 (cd bench && python3 -m pip install -r requirements.txt && python3 -m pytest -q)
 ```
 
-No test calls a model or the network. New behaviour in `scripts/cursor.py` comes with a test that fails without it.
+No test calls a model or the network. New behaviour in `scripts/keryx.py` comes with a test that fails without it.
 
 ## Pull requests
 

@@ -2,7 +2,7 @@
 
 ## Read first, then ask
 
-Start with `cursor.py recall`: the owner's standing choices and this repository's known traps. What it answers you do not ask again; a remembered fact the repository has since changed is checked, not trusted. *(owner: "keryx gets its own memory … it remembers the user's decisions and adapts over time")*
+Start with `keryx.py recall`: the owner's standing choices and this repository's known traps. What it answers you do not ask again; a remembered fact the repository has since changed is checked, not trusted. *(owner: "keryx gets its own memory … it remembers the user's decisions and adapts over time")*
 
 Read the code, docs, data, issue and history you can reach. Ask only what changes what gets built and you cannot find out yourself. *(owner)*
 

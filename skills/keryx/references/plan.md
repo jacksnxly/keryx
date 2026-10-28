@@ -2,7 +2,7 @@
 
 A plan is the set of decisions an implementer who has never seen this codebase cannot make alone. It holds no implementation code except the locked tests. One slice fits on one or two screens plus its tests. *(owner; evidence: plans of 3k–22k lines that contained the code got it written twice)*
 
-Save it as `<git-common-dir>/cursor-loop/<slug>/PLAN.md` (never committed). The executor cannot read that folder: paste the plan into its brief.
+Save it as `<state>/PLAN.md` (`.keryx/runs/<slug>/PLAN.md`, never committed). The executor does not read that folder: paste the plan into its brief.
 
 ```markdown
 # <slug>: <one-line goal>
@@ -35,7 +35,7 @@ Save it as `<git-common-dir>/cursor-loop/<slug>/PLAN.md` (never committed). The 
 
 ## Before dispatch
 
-- **Lock the tests.** For each locked block write `<state>/locked/NN.json` = `{"path": "<repo-relative file>", "block": "<exact code>"}`; `cursor.py locked` later proves each block is still there verbatim. *(evidence)*
+- **Lock the tests.** For each locked block write `<state>/locked/NN.json` = `{"path": "<repo-relative file>", "block": "<exact code>"}`; `keryx.py locked` later proves each block is still there verbatim. *(evidence)*
 - **Preflight.** Run every done-command once on the base. A command that is already broken, or stricter than the repository's own gate, is fixed now, not discovered by an executor. *(evidence: two loops lost a round to a done-command that could never pass)*
 - **Take the done-commands from CI.** Read the repository's CI workflows and copy, for the jobs the change touches, the same commands, flags and environment (including jobs that run a subset of tests without the shared setup, and lists of known failures that turn an unexpected pass into a failure). Name the jobs you could not run here. *(evidence: one PR went through four CI rounds on tests and jobs its done-commands never ran)*
 - **Real paths.** Locked tests may fake what the change does not reach; for each outside dependency the change calls, at least one locked test or QA step goes through the real thing (`check.md`). *(evidence)*
