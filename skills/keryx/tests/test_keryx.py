@@ -1,4 +1,4 @@
-"""Offline tests for the pure helpers in scripts/cursor.py. Run: python3 -m unittest discover -s tests"""
+"""Offline tests for the pure helpers in scripts/keryx.py. Run: python3 -m unittest discover -s tests"""
 
 import json
 import sys
@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import cursor as cloud  # noqa: E402
+import keryx as cloud  # noqa: E402
 
 
 class ParseSse(unittest.TestCase):
@@ -717,7 +717,7 @@ class SubagentLoop(unittest.TestCase):
             try:
                 self.assertEqual(cloud.main(["create", "--slug", "s1", "--runner", "subagent",
                                              "--prompt-file", str(Path(tmp) / "brief.md"), "--ref", "main"]), 0)
-                state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "s1"
+                state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "s1"
                 agent = json.loads((state / "agent.json").read_text())
                 self.assertEqual((agent["runner"], agent["branch"], agent["baseSha"]), ("subagent", "sub/s1", base))
                 self.assertEqual(run("-C", agent["workspace"], "rev-parse", "HEAD"), base)
@@ -753,7 +753,7 @@ class RefusedSwitch(unittest.TestCase):
             try:
                 self.assertEqual(cloud.main(["create", "--slug", "s5", "--runner", "subagent",
                                              "--prompt-file", str(brief), "--ref", "main"]), 0)
-                state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "s5"
+                state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "s5"
                 work = json.loads((state / "agent.json").read_text())["workspace"]
                 run("-C", work, "commit", "-q", "--allow-empty", "-m", "feat: the executor's work")
                 self.assertEqual(cloud.main(["mark", "--slug", "s5", "--status", "ERROR"]), 0)
@@ -802,7 +802,7 @@ class ReviewFindings(unittest.TestCase):
     def _subagent(self, slug):
         self.assertEqual(cloud.main(["create", "--slug", slug, "--runner", "subagent",
                                      "--prompt-file", str(self.brief), "--ref", "trunk"]), 0)
-        state = Path(self.run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / slug
+        state = Path(self.run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / slug
         return state, json.loads((state / "agent.json").read_text())["workspace"]
 
     def test_a_gate_file_renamed_away_is_a_gate_change(self):
@@ -986,7 +986,7 @@ def _two_commit_repo(tmp):
 
 
 def _cli(repo, argv):
-    """Run cursor.py inside the repository; returns (exit code, stdout)."""
+    """Run keryx.py inside the repository; returns (exit code, stdout)."""
     import contextlib
     import io
     import os
@@ -1008,7 +1008,7 @@ class ReviewBrief(unittest.TestCase):
     def test_the_brief_carries_the_bar_the_paths_and_where_to_write_the_findings(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, run, base, head = _two_commit_repo(tmp)
-            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "rb"
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "rb"
             state.mkdir(parents=True)
             (state / "PLAN.md").write_text("# rb: f returns 2\n")
             code, out = _cli(repo, ["review-brief", "--slug", "rb", "--base", base, "--head", head])
@@ -1030,7 +1030,7 @@ class ReviewBrief(unittest.TestCase):
     def test_a_risk_list_diff_gets_two_finders_the_second_with_a_security_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, run, base, head = _two_commit_repo(tmp)
-            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "rb"
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "rb"
             code, out = _cli(repo, ["review-brief", "--slug", "rb", "--base", base, "--head", head, "--risk"])
             self.assertEqual(code, 0)
             name = f"{base[:12]}..{head[:12]}"
@@ -1053,7 +1053,7 @@ class ReviewBrief(unittest.TestCase):
             (Path(tmp) / "brief.md").write_text("Mode: IMPLEMENT\n")
             self.assertEqual(_cli(repo, ["create", "--slug", "lp", "--runner", "subagent",
                                          "--prompt-file", str(Path(tmp) / "brief.md"), "--ref", "main"])[0], 0)
-            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "lp"
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "lp"
             wt = json.loads((state / "agent.json").read_text())["workspace"]
             (Path(wt) / "app.py").write_text("def f():\n    return 3\n")
             subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am",
@@ -1090,9 +1090,9 @@ class FinishGate(unittest.TestCase):
     def test_finish_refuses_without_a_finish_row_or_a_well_formed_review(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, run, base, head = _two_commit_repo(tmp)
-            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "fg"
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "fg"
             self.assertEqual(_cli(repo, ["log", "--slug", "fg", "plan", "planned", "why", "ev", "ok"])[0], 0)
-            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head])
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head, "--findings-only"])
             self.assertEqual(code, 1)
             self.assertIn("NOT FINISHED", out)
             self.assertIn("missing  a finish row", out)
@@ -1102,7 +1102,7 @@ class FinishGate(unittest.TestCase):
             findings = state / "review" / f"{base[:12]}..{head[:12]}.findings.md"
             findings.write_text(self.GOOD.format(head=head).replace(" — P1 — 0.8", ""))
             self.assertEqual(_cli(repo, ["log", "--slug", "fg", "finish", "PR #6", "why", "ev", "merged"])[0], 0)
-            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head])
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head, "--findings-only"])
             self.assertEqual(code, 1, "an ungraded finding is not a review")
             self.assertIn(str(findings), out)
             self.assertIn("missing  a fresh review", out)
@@ -1112,7 +1112,7 @@ class FinishGate(unittest.TestCase):
     def test_finish_passes_with_a_finish_row_and_a_review_and_reports_the_facts(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, run, base, head = _two_commit_repo(tmp)
-            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "fg"
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "fg"
             self.assertEqual(_cli(repo, ["review-brief", "--slug", "fg", "--base", base, "--head", head])[0], 0)
             findings = state / "review" / f"{base[:12]}..{head[:12]}.findings.md"
             findings.write_text(self.GOOD.format(head=head))
@@ -1120,7 +1120,7 @@ class FinishGate(unittest.TestCase):
                         ["review", "minor (deferred): the name f", "P3", "app.py:1", "deferred"],
                         ["finish", "PR #7 merged into main", "the acceptance check passes", "ci run 42", "merged"]):
                 self.assertEqual(_cli(repo, ["log", "--slug", "fg", *row])[0], 0)
-            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head])
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head, "--findings-only"])
             self.assertEqual(code, 0, out)
             self.assertIn("FINISHED", out)
             self.assertNotIn("NOT FINISHED", out)
@@ -1134,7 +1134,7 @@ class FinishGate(unittest.TestCase):
     def test_a_review_counts_for_later_commits_on_top_but_not_for_another_line_of_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, run, base, head = _two_commit_repo(tmp)
-            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "fg"
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "fg"
             run("checkout", "-q", "-b", "side", base)
             (repo / "other.py").write_text("x = 1\n")
             run("add", "other.py")
@@ -1144,7 +1144,7 @@ class FinishGate(unittest.TestCase):
             self.assertEqual(_cli(repo, ["review-brief", "--slug", "fg", "--base", base, "--head", side])[0], 0)
             (state / "review" / f"{base[:12]}..{side[:12]}.findings.md").write_text(self.GOOD.format(head=side))
             self.assertEqual(_cli(repo, ["log", "--slug", "fg", "finish", "PR #8", "why", "ev", "merged"])[0], 0)
-            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head])
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head, "--findings-only"])
             self.assertEqual(code, 1, "the side branch's review does not cover main")
             self.assertIn("missing  a fresh review", out)
             self.assertEqual(_cli(repo, ["review-brief", "--slug", "fg", "--base", base, "--head", head])[0], 0)
@@ -1152,24 +1152,24 @@ class FinishGate(unittest.TestCase):
             (repo / "app.py").write_text("def f():\n    return 4\n")
             run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am", "fix: four")
             later = run("rev-parse", "HEAD")
-            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", later])
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", later, "--findings-only"])
             self.assertEqual(code, 0, out)
             self.assertIn("1 commit before the final head", out)
 
     def test_a_risk_review_needs_both_finders(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, run, base, head = _two_commit_repo(tmp)
-            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "fg"
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "fg"
             self.assertEqual(_cli(repo, ["review-brief", "--slug", "fg", "--base", base, "--head", head,
                                          "--risk"])[0], 0)
             name = f"{base[:12]}..{head[:12]}"
             (state / "review" / f"{name}.findings.md").write_text(self.GOOD.format(head=head))
             self.assertEqual(_cli(repo, ["log", "--slug", "fg", "finish", "PR #9", "why", "ev", "merged"])[0], 0)
-            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head])
+            code, out = _cli(repo, ["finish", "--slug", "fg", "--head", head, "--findings-only"])
             self.assertEqual(code, 1, "the second finder has not reported")
             self.assertIn(f"{name}.security.findings.md", out)
             (state / "review" / f"{name}.security.findings.md").write_text(self.GOOD.format(head=head))
-            self.assertEqual(_cli(repo, ["finish", "--slug", "fg", "--head", head])[0], 0)
+            self.assertEqual(_cli(repo, ["finish", "--slug", "fg", "--head", head, "--findings-only"])[0], 0)
 
 
 class FinishRowsAreTheCoordinators(unittest.TestCase):
@@ -1182,7 +1182,7 @@ class FinishRowsAreTheCoordinators(unittest.TestCase):
             (Path(tmp) / "brief.md").write_text("Mode: IMPLEMENT\n")
             self.assertEqual(_cli(repo, ["create", "--slug", "sc", "--runner", "subagent",
                                          "--prompt-file", str(Path(tmp) / "brief.md"), "--ref", "main"])[0], 0)
-            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "sc"
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "sc"
             wt = json.loads((state / "agent.json").read_text())["workspace"]
             (Path(wt) / "app.py").write_text("def f():\n    return 3\n")
             subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am",
@@ -1195,12 +1195,12 @@ class FinishRowsAreTheCoordinators(unittest.TestCase):
             sub_head = (state / "head.txt").read_text().strip()
             (state / "review" / f"{head[:12]}..{sub_head[:12]}.findings.md").write_text(
                 FinishGate.GOOD.format(head=sub_head))
-            code, out = _cli(repo, ["finish", "--slug", "sc"])
+            code, out = _cli(repo, ["finish", "--slug", "sc", "--findings-only"])
             self.assertEqual(code, 1, out)
             self.assertIn("missing  a finish row", out)
             self.assertEqual(_cli(repo, ["log", "--slug", "sc", "finish", "branch sub/sc committed", "why", "ev",
                                          "committed"])[0], 0)
-            self.assertEqual(_cli(repo, ["finish", "--slug", "sc"])[0], 0)
+            self.assertEqual(_cli(repo, ["finish", "--slug", "sc", "--findings-only"])[0], 0)
 
 
 class ReviewBriefNamesTheCheckout(unittest.TestCase):
@@ -1214,7 +1214,7 @@ class ReviewBriefNamesTheCheckout(unittest.TestCase):
             (Path(tmp) / "brief.md").write_text("Mode: IMPLEMENT\n")
             self.assertEqual(_cli(repo, ["create", "--slug", "wt", "--runner", "subagent",
                                          "--prompt-file", str(Path(tmp) / "brief.md"), "--ref", "main"])[0], 0)
-            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "wt"
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "wt"
             wt = json.loads((state / "agent.json").read_text())["workspace"]
             (Path(wt) / "app.py").write_text("def f():\n    return 3\n")
             subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am",
@@ -1251,7 +1251,7 @@ class FinishWithoutALoop(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo, run, base, head = _two_commit_repo(tmp)
             self.assertEqual(_cli(repo, ["log", "--slug", "nh", "finish", "PR #1 reviewed", "why", "ev", "reported"])[0], 0)
-            for argv in (["finish", "--slug", "nh"], ["review-brief", "--slug", "nh", "--base", base]):
+            for argv in (["finish", "--slug", "nh", "--findings-only"], ["review-brief", "--slug", "nh", "--base", base]):
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err):
                     self.assertEqual(_cli(repo, argv)[0], 1, argv)
@@ -1270,3 +1270,170 @@ class FindingsAsReviewersWriteThem(unittest.TestCase):
         self.assertEqual(got["problems"], [])
         self.assertEqual(got["head"], "1a2b3c4d5")
         self.assertEqual(got["counts"], {"P0": 0, "P1": 1, "P2": 0, "P3": 1})
+
+
+class KeryxFolder(unittest.TestCase):
+    """A run's files live in <main checkout>/.keryx/runs/<slug>/, a folder that ignores itself: out of .git (a
+    protected path where agent writes prompt or are denied) and out of git status."""
+
+    def test_a_run_lives_in_dot_keryx_which_ignores_itself(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            self.assertEqual(_cli(repo, ["log", "--slug", "lay", "intake", "size M", "why", "ev", "M"])[0], 0)
+            self.assertTrue((top / ".keryx" / "runs" / "lay" / "decisions.tsv").is_file())
+            self.assertEqual((top / ".keryx" / ".gitignore").read_text(), "*\n")
+            self.assertEqual(run("status", "--porcelain"), "")
+            self.assertFalse((Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop").exists())
+
+    def test_reading_never_creates_the_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            self.assertEqual(_cli(repo, ["recall"])[0], 0)
+            self.assertEqual(_cli(repo, ["finish", "--slug", "none", "--head", head])[0], 1)
+            self.assertFalse((Path(run("rev-parse", "--show-toplevel")) / ".keryx").exists())
+
+    def test_every_worktree_shares_the_main_checkouts_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            (Path(tmp) / "brief.md").write_text("Mode: IMPLEMENT\n")
+            self.assertEqual(_cli(repo, ["create", "--slug", "wl", "--runner", "subagent",
+                                         "--prompt-file", str(Path(tmp) / "brief.md"), "--ref", "main"])[0], 0)
+            state = top / ".keryx" / "runs" / "wl"
+            wt = Path(json.loads((state / "agent.json").read_text())["workspace"])
+            self.assertEqual(wt.parent.name, ".worktrees")
+            self.assertEqual(_cli(wt, ["log", "--slug", "wl", "check", "from the worktree", "why", "ev", "ok"])[0], 0)
+            self.assertIn("from the worktree", (state / "decisions.tsv").read_text())
+            self.assertFalse((wt / ".keryx").exists())
+            self.assertEqual(_cli(repo, ["fetch", "--slug", "wl"])[0], 0)
+            self.assertEqual(run("rev-parse", "refs/keryx/wl"), run("rev-parse", "sub/wl"))
+
+    def test_a_run_started_before_the_move_stays_where_it_is(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            legacy = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "old"
+            legacy.mkdir(parents=True)
+            (legacy / "decisions.tsv").write_text("ts\tphase\tdecision\twhy\tevidence\tresult\n"
+                                                  "2026-10-28T10:00:00Z\tintake\tsize M\tw\te\tM\n")
+            self.assertEqual(_cli(repo, ["log", "--slug", "old", "plan", "planned", "why", "ev", "ok"])[0], 0)
+            self.assertIn("planned", (legacy / "decisions.tsv").read_text())
+            self.assertFalse((Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "old").exists())
+
+    def test_the_repositorys_memory_moves_into_dot_keryx(self):
+        import os
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            legacy = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "memory.md"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text("- 2026-10-20 CI runs four files with --noconftest\n")
+            with mock.patch.dict(os.environ, {"KERYX_CONFIG": str(Path(tmp) / "cfg" / "config.json")}):
+                self.assertIn("--noconftest", _cli(repo, ["recall"])[1], "an old note is still recalled")
+                self.assertEqual(_cli(repo, ["remember", "--repo", "the e2e suite needs the dev stack"])[0], 0)
+                out = _cli(repo, ["recall"])[1]
+            mem = top / ".keryx" / "memory.md"
+            self.assertIn("--noconftest", mem.read_text())
+            self.assertIn("the e2e suite needs the dev stack", mem.read_text())
+            self.assertFalse(legacy.exists())
+            self.assertEqual(out.count("--noconftest"), 1)
+
+
+class RunReport(unittest.TestCase):
+    """Each finished run leaves a short report in the repository, docs/keryx/<date>-<slug>.md; screenshots and
+    executor logs stay in the ignored folder."""
+
+    def _reviewed(self, tmp):
+        repo, run, base, head = _two_commit_repo(tmp)
+        top = Path(run("rev-parse", "--show-toplevel"))
+        state = top / ".keryx" / "runs" / "rp"
+        self.assertEqual(_cli(repo, ["review-brief", "--slug", "rp", "--base", base, "--head", head])[0], 0)
+        (state / "review" / f"{base[:12]}..{head[:12]}.findings.md").write_text(FinishGate.GOOD.format(head=head))
+        (state / "PLAN.md").write_text("# rp: f returns 2\n\n## Acceptance check\n"
+                                       "`python3 -c 'import app; assert app.f() == 2'` — on the base: AssertionError.\n")
+        for row in (["ruling", "Ruling: keep the name f", "callers use it", "app.py:1", "a rename later"],
+                    ["review", "minor (deferred): f has no docstring", "P3", "app.py:1", "deferred"],
+                    ["finish", "branch main committed", "the acceptance check passes", "ev", "committed"]):
+            self.assertEqual(_cli(repo, ["log", "--slug", "rp", *row])[0], 0)
+        return repo, run, head, top, state
+
+    def test_the_report_is_drafted_from_the_run_and_finish_needs_it_filled_and_committed(self):
+        import datetime
+        import re
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, head, top, state = self._reviewed(tmp)
+            code, out = _cli(repo, ["report", "--slug", "rp"])
+            self.assertEqual(code, 0, out)
+            name = f"docs/keryx/{datetime.date.today().isoformat()}-rp.md"
+            report = top / name
+            self.assertIn(name, out)
+            text = report.read_text()
+            for must in ("# rp: f returns 2", "## What changed", "## Proof",
+                         "python3 -c 'import app; assert app.f() == 2'", "P1 1", "Ruling: keep the name f",
+                         "minor (deferred): f has no docstring", ".keryx/runs/rp/", "<!--"):
+                self.assertIn(must, text)
+            self.assertNotIn(str(top), text, "a committed report names no local absolute path")
+            code, out = _cli(repo, ["finish", "--slug", "rp", "--head", head])
+            self.assertEqual(code, 1)
+            self.assertIn("missing  the run report", out)
+            run("add", name)
+            run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "docs(keryx): draft report")
+            draft = run("rev-parse", "HEAD")
+            code, out = _cli(repo, ["finish", "--slug", "rp", "--head", draft])
+            self.assertEqual(code, 1, "a draft with its placeholders left is not a report")
+            self.assertIn("missing  the run report", out)
+            report.write_text(re.sub(r"<!--.*?-->", "filled in", text, flags=re.S))
+            run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am", "docs(keryx): report for rp")
+            done = run("rev-parse", "HEAD")
+            code, out = _cli(repo, ["finish", "--slug", "rp", "--head", done])
+            self.assertEqual(code, 0, out)
+            self.assertIn(name, out)
+
+    def test_a_findings_only_review_finishes_without_a_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, head, top, state = self._reviewed(tmp)
+            self.assertEqual(_cli(repo, ["finish", "--slug", "rp", "--head", head])[0], 1)
+            code, out = _cli(repo, ["finish", "--slug", "rp", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertFalse((top / "docs" / "keryx").exists())
+
+
+class KeryxNames(unittest.TestCase):
+    """The adapter is keryx's, not the old cursor-loop skill's; the old script name keeps working for one release."""
+
+    def test_the_adapter_calls_itself_keryx(self):
+        import contextlib
+        import io
+        self.assertTrue(cloud.USER_AGENT.startswith("keryx/"))
+        self.assertEqual(cloud.NO_PUSH_ENV["GIT_CONFIG_VALUE_0"], "https://push-disabled.invalid/keryx")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            cloud.main(["--help"])
+        self.assertNotIn("cursor-loop", out.getvalue())
+        self.assertNotIn("Cursor adapter", out.getvalue())
+
+    def test_the_old_script_name_still_runs_the_adapter(self):
+        import subprocess
+        scripts = Path(__file__).resolve().parents[1] / "scripts"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            r = subprocess.run([sys.executable, str(scripts / "cursor.py"), "log", "--slug", "sh", "intake",
+                                "via the old name", "why", "ev", "ok"], cwd=repo, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("via the old name",
+                          (Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "sh" / "decisions.tsv")
+                          .read_text())
+            r = subprocess.run([sys.executable, str(scripts / "keryx.py"), "finish", "--slug", "nope", "--head",
+                                head], cwd=repo, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1)
+            self.assertTrue(r.stderr.startswith("keryx: "), r.stderr)
+
+
+class ThirdPartyExecutorAndTheFolder(unittest.TestCase):
+    """A GLM executor gets the plan in its brief; it never reads keryx's folder, which can hold QA screenshots of
+    real people and other runs' logs."""
+
+    def test_glm_is_denied_the_keryx_folder(self):
+        for rule in ("Read(**/.keryx/**)", "Read(//**/.keryx/**)"):
+            self.assertIn(rule, cloud.GLM_DENY)

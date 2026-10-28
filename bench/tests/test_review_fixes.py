@@ -434,3 +434,21 @@ def test_the_executors_logs_outlive_the_workspace_but_its_config_does_not(tmp_pa
     assert (kept / "rounds" / "01" / "events.ndjson").exists()
     assert not (kept / "cursor-config").exists()
     assert not (tmp_path / "runs" / "r1" / "a").exists()
+
+
+def test_the_executors_logs_in_the_keryx_folder_outlive_the_workspace(tmp_path, toy_repo, monkeypatch):
+    async def logging_run_case(case, system, ws, plugin_dirs, standin, transcript, **kw):
+        state = ws.repo / ".keryx" / "runs" / "slug"
+        (state / "rounds" / "01").mkdir(parents=True)
+        (state / "rounds" / "01" / "events.ndjson").write_text("{}\n")
+        (state / "cursor-config").mkdir()
+        (state / "cursor-config" / "cli-config.json").write_text("{}")
+        return RunRecord(case_id=case.id, system=system.name, run_id=ws.run_id, status="finished")
+
+    monkeypatch.setattr(runner, "run_case", logging_run_case)
+    monkeypatch.setattr(runner, "model_says_yes", _no)
+    case = _case(tmp_path, toy_repo, "a")
+    asyncio.run(runner.run_one(case, PLAIN, tmp_path / "runs", tmp_path / "results", "r1", matcher=KeywordMatcher()))
+    kept = tmp_path / "results" / "r1" / "a" / "executor" / "runs" / "slug"
+    assert (kept / "rounds" / "01" / "events.ndjson").exists()
+    assert not (kept / "cursor-config").exists()

@@ -251,3 +251,14 @@ def test_a_round_with_only_run_json_counts_as_a_run(tmp_path):
     assert runs["tf-x"]["rounds"] == 2 and runs["tf-x"]["status"] == "success"
     assert 11.9 <= runs["tf-x"]["minutes"] <= 12.1
     assert runs["tf-sub"]["status"] == "running" and 4.9 <= runs["tf-sub"]["minutes"] <= 5.1
+
+
+def test_a_run_in_the_keryx_folder_is_read_from_there(tmp_path):
+    session, repo = _setup(tmp_path)
+    legacy, new = repo / ".git" / "cursor-loop", repo / ".keryx" / "runs"
+    new.mkdir(parents=True)
+    for name in ("tf", "tf-s1", "tf-s2"):
+        (legacy / name).rename(new / name)
+    rec = run.record(session, repo, slug="tf", now=BASE)
+    assert rec["log"]["rows"] == 3
+    assert sorted(x["loop"] for x in rec["executor"]["runs"]) == ["tf-s1", "tf-s2"]
