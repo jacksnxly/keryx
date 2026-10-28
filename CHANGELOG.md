@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Usage-limit reports also recognise GLM's weekly/monthly message (code 1310); 1.0.1 knew only the 5-hour one (1308).
+
 ## 1.0.1 — 2026-10-28
 
 - Linux: list processes with POSIX `ps` options at unlimited width (`-ww`), so leftover executor processes and test daemons are found and stopped (the BSD-style options listed nothing under procps, and piped output was cut at 80 columns).

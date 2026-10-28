@@ -508,8 +508,10 @@ def config_path(environ: dict) -> Path:
     return Path(environ.get("HOME") or os.path.expanduser("~")) / ".config" / "keryx" / "config.json"
 
 
-GLM_LIMIT = re.compile(r"Usage limit reached for (?P<kind>[^.]+?)\. Your limit will reset at "
-                       r"(?P<at>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+# Z.ai: [1308][Usage limit reached for 5 hour. Your limit will reset at …] and
+# [1310][Weekly/Monthly Limit Exhausted. Your limit will reset at …] (both seen in the field).
+GLM_LIMIT = re.compile(r"\[13\d\d\]\[(?:Usage limit reached for (?P<kind>[^.\]]+?)|(?P<span>\w+(?:/\w+)*) Limit Exhausted)\. "
+                       r"Your limit will reset at (?P<at>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
 CURSOR_LIMIT = re.compile(r"(?P<kind>\w+) usage limit reached\. It resets in (?P<span>[^.]+?)\.", re.I)
 GLM_UTC_OFFSET = dt.timedelta(hours=8)  # Z.ai prints its reset time in UTC+8, no DST
 
@@ -521,7 +523,8 @@ def usage_limit(text: str) -> dict | None:
     m = GLM_LIMIT.search(text or "")
     if m:
         local = dt.datetime.strptime(m.group("at"), "%Y-%m-%d %H:%M:%S")
-        return {"kind": m.group("kind"), "resetsAt": (local - GLM_UTC_OFFSET).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        return {"kind": m.group("kind") or m.group("span").lower(),
+                "resetsAt": (local - GLM_UTC_OFFSET).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "resetsIn": None}
     m = CURSOR_LIMIT.search(text or "")
     if m:

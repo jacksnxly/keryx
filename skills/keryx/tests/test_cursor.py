@@ -883,6 +883,14 @@ class UsageLimit(unittest.TestCase):
         got = cloud.usage_limit(text)
         self.assertEqual((got["kind"], got["resetsAt"], got["resetsIn"]), ("5 hour", "2026-10-27T11:58:02Z", None))
 
+    def test_glm_weekly_limit_resets_in_utc(self):
+        # Seen 2026-10-28: code 1310 words it differently from the 5-hour 1308.
+        text = ("API Error: Request rejected (429) · [1310][Weekly/Monthly Limit Exhausted. "
+                "Your limit will reset at 2026-11-02 23:52:29][20261028094557c82516b14b6d488b]")
+        got = cloud.usage_limit(text)
+        self.assertEqual((got["kind"], got["resetsAt"], got["resetsIn"]),
+                         ("weekly/monthly", "2026-11-02T15:52:29Z", None))
+
     def test_cursor_weekly_limit(self):
         got = cloud.usage_limit("ActionRequiredError: Weekly usage limit reached. It resets in 4 days. "
                                 "Buy credits to keep going now.")
