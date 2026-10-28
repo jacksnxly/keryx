@@ -1734,7 +1734,8 @@ def resolve_head(d: Path, ref: str | None) -> str:
         return sha
     head = (d / "head.txt").read_text().strip() if (d / "head.txt").exists() else ""
     if not head:
-        raise LoopError("run `fetch` first")
+        raise LoopError("no head recorded for this slug: run `fetch` for an executor loop, or name the commit "
+                        "with --head (review-brief, finish) or --ref (gates, locked)")
     return head
 
 
