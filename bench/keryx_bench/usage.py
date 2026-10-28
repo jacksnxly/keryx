@@ -10,7 +10,9 @@ def collect_executor_usage(repo: Path) -> dict[str, dict[str, float]]:
     if not git_dir.is_dir():
         return {}
     totals = {"runs": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "seconds": 0.0}
-    for events in sorted(git_dir.glob("cursor-loop/*/rounds/*/events.ndjson")):
+    logs = [*git_dir.glob("cursor-loop/*/rounds/*/events.ndjson"),
+            *(Path(repo) / ".keryx").glob("runs/*/rounds/*/events.ndjson")]
+    for events in sorted(logs):
         for line in events.read_text(errors="replace").splitlines():
             try:
                 event = json.loads(line)
