@@ -1839,6 +1839,11 @@ def cmd_review_brief(args) -> int:
     return 0
 
 
+# scrub and archive log their own rows under the finish phase; they are adapter bookkeeping, never the run's
+# finish row (this also covers run logs written before this release).
+ADAPTER_FINISH_ROWS = ("scrubbed assistant attribution", "archived the cloud agent")
+
+
 def cmd_finish(args) -> int:
     """The run is finished only when its log has a finish row and a fresh, well-formed review covers the
     shipped head; the newest review on that line of history decides, and nothing older rescues it."""
@@ -1848,7 +1853,8 @@ def cmd_finish(args) -> int:
         raise LoopError(f"no run log at {log}")
     final = resolve_head(d, args.head)
     rows = [c for c in (line.split("\t") for line in log.read_text().splitlines()[1:]) if len(c) >= 6]
-    finish_rows = [c for c in rows if c[1].split("-")[0] == "finish"]
+    finish_rows = [c for c in rows if c[1].split("-")[0] == "finish"
+                   and not c[2].startswith(ADAPTER_FINISH_ROWS)]
     rulings = [c for c in rows if c[1] == "ruling" or c[2].lower().startswith("ruling")]
     deferred = [c for c in rows if "deferred" in c[2].lower()]
 
