@@ -1,0 +1,25 @@
+title: "keryx: a test-first workflow plugin for Claude Code"
+description: "keryx makes a coding agent prove its work: an acceptance check that fails first, locked tests, cheaper executors (Sonnet, Cursor CLI, GLM), mechanical checks, QA with kept evidence, mutation probes and one fresh code review."
+url: "https://jacksnxly.github.io"
+baseurl: "/keryx"
+lang: en
+author: jacksnxly
+image: /assets/social-preview.png
+theme: jekyll-theme-minimal
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+  - jekyll-optional-front-matter
+  - jekyll-readme-index
+  - jekyll-relative-links
+  - jekyll-default-layout
+  - jekyll-titles-from-headings
+exclude:
+  - bench
+  - field
+  - .github
+  - skills/keryx/tests
+  - skills/keryx/scripts
+  - CLAUDE.md
+  - AGENTS.md
+  - "*.bak"

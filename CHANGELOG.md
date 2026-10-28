@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.0.2 — 2026-10-28
 
 - Usage-limit reports also recognise GLM's weekly/monthly message (code 1310); 1.0.1 knew only the 5-hour one (1308).
+- A project site at https://jacksnxly.github.io/keryx/, a plugin icon, a social preview image and clearer descriptions for search.
 
 ## 1.0.1 — 2026-10-28
 

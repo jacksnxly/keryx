@@ -1,7 +1,7 @@
 {
   "name": "keryx",
-  "version": "1.0.1",
-  "description": "One agent workflow for bugs, features and PR review: an acceptance check that fails first, cheap executors, mechanical checks, mutation probes, one fresh review.",
+  "version": "1.0.2",
+  "description": "A test-first workflow for coding agents: an acceptance check that fails first, locked tests, cheaper executors (Sonnet subagent, Cursor CLI, GLM), mechanical checks, QA with kept evidence, mutation probes and one fresh code review.",
   "author": {
     "name": "Jackson Ly"
   },
@@ -9,10 +9,20 @@
   "homepage": "https://github.com/jacksnxly/keryx",
   "repository": "https://github.com/jacksnxly/keryx",
   "keywords": [
-    "workflow",
     "tdd",
+    "test-driven-development",
     "code-review",
+    "qa",
+    "acceptance-tests",
+    "mutation-testing",
+    "agentic-coding",
+    "coding-agent",
+    "workflow",
     "executor",
-    "acceptance-test"
-  ]
+    "cursor",
+    "glm",
+    "domain-driven-design",
+    "ci-repair"
+  ],
+  "displayName": "keryx"
 }

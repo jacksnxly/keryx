@@ -1,10 +1,29 @@
-# keryx
+# keryx: a test-first workflow plugin for Claude Code
 
 [![test](https://github.com/jacksnxly/keryx/actions/workflows/test.yml/badge.svg)](https://github.com/jacksnxly/keryx/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/jacksnxly/keryx)](https://github.com/jacksnxly/keryx/releases)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-keryx is one workflow for software work done by a coding agent: fixing a bug or a red CI job, building a feature from a spec, or reviewing and fixing a branch. A strong model plans, checks and reviews; a cheaper executor writes the code; nothing counts as done until a check that failed before the work now passes.
+**keryx makes a coding agent prove its work.** It is a [Claude Code](https://code.claude.com/docs) plugin for fixing bugs and red CI jobs, building features from a spec, and reviewing pull requests: the agent writes an acceptance check that fails first, locks the tests, lets a cheaper model write the code, checks the result mechanically, runs QA on the real app, breaks the change on purpose to see that the tests notice, and gets one fresh code review before anything counts as done.
 
-It is a [Claude Code](https://code.claude.com/docs) plugin. It needs nothing else: without any other tool, a Sonnet subagent writes the code. Cursor and a GLM Coding Plan can be added as cheaper executors.
+- **Test-driven by default**: the acceptance check fails before the work and passes after; locked tests cannot be edited by the agent that writes the code.
+- **Cheaper executors**: a Sonnet subagent ships with the plugin; the Cursor CLI, a GLM Coding Plan or Cursor Cloud can take over, with automatic fallback when one fails or hits a usage limit.
+- **Real QA and code review**: scripted and exploratory QA with kept evidence, mutation probes, and a review with a written bar (P0–P3), a production-reach question and two reviewers for risky changes.
+- **Guards architecture**: guard tests, import contracts, dependency rules and CI config changed by an executor are flagged; a domain-driven design lens applies wherever a change touches business rules.
+- **Stays inside your limits**: it asks once how far it may go (commit, push, PR, merge, deploy) and never goes further.
+
+```mermaid
+flowchart LR
+  A[Intake: one question at a time] --> B[Acceptance check fails on the base]
+  B --> C[Plan + locked tests]
+  C --> D[Executor: tests first, then code]
+  D --> E[Mechanical check: locks, bounds, gates]
+  E --> F[QA on the real surface + mutation probes]
+  F --> G[One fresh review]
+  G --> H[Finish within the autonomy given]
+  F -- finding --> D
+  G -- finding --> D
+```
 
 ## Install
 
@@ -38,6 +57,18 @@ The first time it needs an executor, keryx runs a short setup: it shows which ex
 | `cloud` | A Cursor API key and the repository on GitHub. |
 
 When an executor fails (an error, a stop, a dispatch that never starts), keryx moves the same work to the next one in your order, and writes the code itself after the last.
+
+## FAQ
+
+**How do I make Claude Code write tests first?** Install keryx and ask for the change with `/keryx:keryx`. Every M or L task starts with a check that fails on the current code, then locked tests the executor must make pass without editing them.
+
+**Can a cheaper model write the code?** Yes. Run the one-time setup and keryx uses your executors in order: the bundled Sonnet subagent, the Cursor CLI, a GLM Coding Plan or a Cursor Cloud Agent. If one errors or hits a usage limit, the next one continues on the same task.
+
+**Will it push, merge or deploy on its own?** Only as far as you allow at the start of the run, and never past your repository's own rules.
+
+**Does it work on Linux and macOS?** Yes; CI runs on Linux, and it is used daily on macOS.
+
+**Is it a code review tool?** It includes one: `/keryx:keryx review this PR` reviews, validates every finding against the code and fixes the confirmed ones with a failing test each; add "findings only" to change nothing.
 
 ## How a run goes
 

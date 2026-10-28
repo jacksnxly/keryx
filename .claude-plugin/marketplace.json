@@ -1,6 +1,6 @@
 {
   "name": "keryx",
-  "description": "keryx: one agent workflow for bugs, features and PR review",
+  "description": "keryx: a test-first workflow plugin for Claude Code",
   "owner": {
     "name": "Jackson Ly"
   },
@@ -8,7 +8,7 @@
     {
       "name": "keryx",
       "source": "./",
-      "description": "An acceptance check that fails first, cheap executors, mechanical checks, mutation probes, one fresh review"
+      "description": "Test-first workflow for bugs, CI repair, features and PR review: acceptance check first, locked tests, cheaper executors, QA, mutation probes, one fresh review"
     }
   ]
 }
