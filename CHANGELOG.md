@@ -2,7 +2,7 @@
 
 ## 1.0.1 — 2026-10-28
 
-- Linux: list processes with POSIX `ps` options, so leftover executor processes and test daemons are found and stopped (the BSD-style options listed nothing under procps).
+- Linux: list processes with POSIX `ps` options at unlimited width (`-ww`), so leftover executor processes and test daemons are found and stopped (the BSD-style options listed nothing under procps, and piped output was cut at 80 columns).
 - A benchmark test no longer depends on `~/.claude/projects` existing.
 
 ## 1.0.0 — 2026-10-28
