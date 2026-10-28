@@ -1,6 +1,6 @@
 {
   "name": "keryx",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "One agent workflow for bugs, features and PR review: an acceptance check that fails first, cheap executors, mechanical checks, mutation probes, one fresh review.",
   "author": {
     "name": "Jackson Ly"

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1 — 2026-10-28
+
+- Linux: list processes with POSIX `ps` options, so leftover executor processes and test daemons are found and stopped (the BSD-style options listed nothing under procps).
+- A benchmark test no longer depends on `~/.claude/projects` existing.
+
 ## 1.0.0 — 2026-10-28
 
 keryx is now an agent workflow for software work, published as a Claude Code plugin. It replaces the release-notes generator this repository held up to v0.6.2 (still available at the `v0.6.2` tag).

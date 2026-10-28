@@ -863,7 +863,7 @@ def redact(text: str) -> str:
 
 def process_snapshot(pid: int) -> str:
     """What was running under a run when it was stopped, for the record; credentials masked."""
-    listing = subprocess.run(["ps", "-axo", "pid=,ppid=,etime=,command="], capture_output=True, text=True).stdout
+    listing = subprocess.run(["ps", "-eo", "pid=,ppid=,etime=,args="], capture_output=True, text=True).stdout
     rows, children = {}, {}
     for line in listing.splitlines():
         parts = line.split(None, 3)
@@ -904,7 +904,7 @@ def stalled(events: list[dict], silent_s: float, after_s: float = STALL_S) -> bo
 def kill_tree(pid: int, grace_s: float = 5.0) -> list[int]:
     """Stops a process and everything below it, such as the dev servers an executor left running: they can sit
     in their own process groups, out of reach of a group kill."""
-    listing = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout
+    listing = subprocess.run(["ps", "-eo", "pid=,ppid="], capture_output=True, text=True).stdout
     children: dict[int, list[int]] = {}
     for line in listing.splitlines():
         parts = line.split()

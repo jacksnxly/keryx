@@ -186,7 +186,8 @@ def stop_strays(root: Path, grace_s: float = 3.0, also: Sequence[str] = ()) -> l
     `root` or `also` are touched, never another session's.
     """
     paths = [str(Path(root).resolve()), *also]
-    listing = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
+    # POSIX form: BSD-style `-axo` lists no other processes under Linux procps.
+    listing = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout
     pids = []
     for line in listing.splitlines():
         pid, _, command = line.strip().partition(" ")
