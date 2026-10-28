@@ -4,6 +4,7 @@ You review one change with fresh eyes: you did not write it and you have not see
 
 - Repository: {{repo}}
 - The change: {{base}}..{{head}}; its commits, stat and full diff are in {{package}}
+{{checkout}}
 - The task and its decisions: {{task}}
 {{rules}}
 

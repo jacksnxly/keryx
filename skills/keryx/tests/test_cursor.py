@@ -1201,3 +1201,41 @@ class FinishRowsAreTheCoordinators(unittest.TestCase):
             self.assertEqual(_cli(repo, ["log", "--slug", "sc", "finish", "branch sub/sc committed", "why", "ev",
                                          "committed"])[0], 0)
             self.assertEqual(_cli(repo, ["finish", "--slug", "sc"])[0], 0)
+
+
+class ReviewBriefNamesTheCheckout(unittest.TestCase):
+    """The reviewer reads the code at the reviewed head, not whatever the repository's own checkout holds (seen when
+    keryx reviewed its own release: the main checkout was still at the base)."""
+
+    def test_the_brief_names_where_the_head_is_checked_out_or_how_to_read_it(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            (Path(tmp) / "brief.md").write_text("Mode: IMPLEMENT\n")
+            self.assertEqual(_cli(repo, ["create", "--slug", "wt", "--runner", "subagent",
+                                         "--prompt-file", str(Path(tmp) / "brief.md"), "--ref", "main"])[0], 0)
+            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "wt"
+            wt = json.loads((state / "agent.json").read_text())["workspace"]
+            (Path(wt) / "app.py").write_text("def f():\n    return 3\n")
+            subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am",
+                            "fix: three"], check=True, capture_output=True)
+            sub_head = run("rev-parse", "sub/wt")
+            self.assertEqual(_cli(repo, ["fetch", "--slug", "wt"])[0], 0)
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "wt"])[0], 0)
+            text = (state / "review" / f"{head[:12]}..{sub_head[:12]}.brief.md").read_text()
+            self.assertIn(f"- The head is checked out in {Path(wt).resolve()}: read the surrounding code there.", text)
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "wt", "--base", base, "--head", head])[0], 0)
+            text = (state / "review" / f"{base[:12]}..{head[:12]}.brief.md").read_text()
+            top = Path(run("rev-parse", "--show-toplevel"))
+            self.assertIn(f"- The head is checked out in {top}: read the surrounding code there.", text)
+            run("checkout", "-q", "-b", "side")
+            (repo / "other.py").write_text("x = 1\n")
+            run("add", "other.py")
+            run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "side")
+            side = run("rev-parse", "HEAD")
+            run("checkout", "-q", "main")
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "wt", "--base", base, "--head", side])[0], 0)
+            text = (state / "review" / f"{base[:12]}..{side[:12]}.brief.md").read_text()
+            self.assertIn(f"- No checkout holds the head: read files with git show {side[:12]}:<path>, "
+                          "never from a working tree.", text)
+            self.assertNotIn("checked out in", text)

@@ -1814,12 +1814,23 @@ def cmd_review_brief(args) -> int:
     rules = (f"- Architecture rules of this repository: {', '.join(rules_paths)}. "
              "A break of one of them is a defect too: cite the rule and what it lets go wrong."
              if rules_paths else "")
+    # The reviewer reads code at the reviewed head: an executor's head lives in its own worktree, while the
+    # repository's own checkout may still be at the base.
+    checkout = f"- No checkout holds the head: read files with git show {head[:12]}:<path>, never from a working tree."
+    where = None
+    for line in git("worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            where = line[len("worktree "):]
+        elif where and line.startswith("HEAD ") and line[5:] == head:
+            checkout = f"- The head is checked out in {where}: read the surrounding code there."
+            break
     template = (PROMPTS / "reviewer.md").read_text()
 
     def brief_text(findings: Path, security: str) -> str:
         return (template.replace("{{repo}}", toplevel).replace("{{base}}", base).replace("{{head}}", head)
                 .replace("{{package}}", str(diff_path)).replace("{{task}}", task).replace("{{rules}}", rules)
-                .replace("{{findings}}", str(findings)).replace("{{security}}", security))
+                .replace("{{checkout}}", checkout).replace("{{findings}}", str(findings))
+                .replace("{{security}}", security))
 
     brief = rv / f"{name}.brief.md"
     brief.write_text(brief_text(rv / f"{name}.findings.md", ""))
