@@ -56,6 +56,8 @@ Usage (run from inside the target repository):
   cursor.py usage     --slug S                (cloud)
   cursor.py archive   --slug S                (cloud)
   cursor.py log       --slug S PHASE DECISION WHY EVIDENCE RESULT   (the coordinator's own row)
+  cursor.py review-brief --slug S [--base REF] [--head REF] [--risk]   (write the fresh reviewer's brief; print how to dispatch it)
+  cursor.py finish   --slug S [--head REF]   (the run is finished only when this prints FINISHED)
 
 Every command that changes loop state appends a row to <state>/decisions.tsv (one tab-separated row
 per decision); the coordinator adds its own rows with `cursor.py log`.
@@ -391,6 +393,58 @@ def locked_block_present(block: str, file_text: str) -> bool:
     return squash_ws(block) in squash_ws(file_text)
 
 
+# A finding's last fields: <sep> P<0-3> <sep> <confidence from 0 to 1>, where the separator is an em or en
+# dash or one or two hyphens, with optional spaces (`— P1 — 0.8`, `- P2 - .6`).
+FINDING_TAIL = re.compile(r"\s*(?:—|–|--|-)\s*(P[0-3])\s*(?:—|–|--|-)\s*(1(?:\.0+)?|0?\.\d+|0)\s*$")
+FINDING_HEADER = re.compile(r"^(Head|Reach|Spec|Findings|Tests):")
+
+
+def review_findings(text: str) -> dict:
+    """Parse a reviewer's findings file: the reviewed head, a count per grade, and every way the file is
+    not well-formed (the brief tells the reviewer the exact shape to write)."""
+    sections: dict[str, list[str]] = {}
+    current = None
+    for line in text.splitlines():
+        m = FINDING_HEADER.match(line)
+        if m:
+            current = m.group(1)
+            sections.setdefault(current, []).append(line[m.end():])
+        elif current is not None:
+            sections[current].append(line)
+    counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
+    problems = []
+    head = next((a.strip() for a in sections.get("Head", [])
+                 if re.fullmatch(r"[0-9a-f]{7,40}", a.strip())), None)
+    if head is None:
+        problems.append("no Head line with the reviewed commit")
+    for name in ("Reach", "Spec"):
+        if not "\n".join(sections.get(name, [])).strip():
+            problems.append(f"no {name} answer")
+    if "Findings" not in sections:
+        problems.append("no Findings section")
+    else:
+        answer = "\n".join(sections["Findings"]).strip()
+        if not answer:
+            problems.append("Findings is empty; write 'Findings: none'")
+        elif answer.lower() != "none":
+            findings = []
+            for line in answer.splitlines():
+                if line.startswith("- "):
+                    findings.append(line[2:].strip())
+                elif line.strip():
+                    if findings:  # a wrapped finding continues the line above it
+                        findings[-1] += " " + line.strip()
+                    else:  # a list that lost its dash is still a finding, so the grade check names it
+                        findings.append(line.strip())
+            for f in findings:
+                m = FINDING_TAIL.search(f)
+                if m:
+                    counts[m.group(1)] += 1
+                else:
+                    problems.append(f"finding without a P-grade and a confidence: {f[:80]}")
+    return {"head": head, "counts": counts, "problems": problems}
+
+
 def push_triggers_for(workflow: dict, branch: str) -> bool:
     """True when a GitHub Actions workflow runs on a push to `branch`."""
     on = workflow.get(True, workflow.get("on"))
@@ -497,6 +551,10 @@ DEFAULT_GATE_GLOBS = [
     "**/*archunit*", ".github/workflows/**", "**/eslint.config.*", "**/.eslintrc*",
     "**/deny.toml", "**/clippy.toml",
 ]
+
+# The reviewer's bar ships as files: the brief template, and where a repository keeps its architecture rules.
+PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
+RULE_FILES = ("CLAUDE.md", "AGENTS.md", "ARCHITECTURE.md", "docs/adr", "docs/decisions", "doc/adr", "adr")
 
 
 def config_path(environ: dict) -> Path:
@@ -1730,6 +1788,159 @@ def cmd_locked(args) -> int:
     return 1 if bad else 0
 
 
+def cmd_review_brief(args) -> int:
+    """Write the fresh reviewer's brief as a file (the bar, the paths, where to write the findings) and
+    print how to dispatch it; field run 10 retyped the prompt and lost half of it."""
+    d = slug_dir(args.slug, must_exist=False)
+    if args.base:
+        base = resolve_head(d, args.base)
+    elif (d / "agent.json").exists() and load_agent(d).get("baseSha"):
+        base = load_agent(d)["baseSha"]
+    else:
+        raise LoopError("--base is needed: this slug has no executor loop")
+    head = resolve_head(d, args.head)
+    name = f"{base[:12]}..{head[:12]}"
+    rv = d / "review"
+    rv.mkdir(parents=True, exist_ok=True)
+    diff_path = rv / f"{name}.diff"
+    diff_path.write_text(f"{git('log', '--format=%h %s', f'{base}..{head}')}\n\n"
+                         f"{git('diff', '--stat', base, head)}\n\n"
+                         f"{git('diff', base, head)}\n")
+    toplevel = git("rev-parse", "--show-toplevel")
+    task = (f"{d / 'PLAN.md'} (it holds the acceptance check)" if (d / "PLAN.md").exists()
+            else f"no plan file: take the commit messages (git log {base[:12]}..{head[:12]}) "
+                 f"and the PR description as the task")
+    rules_paths = [str(Path(toplevel) / entry) for entry in RULE_FILES if (Path(toplevel) / entry).exists()]
+    rules = (f"- Architecture rules of this repository: {', '.join(rules_paths)}. "
+             "A break of one of them is a defect too: cite the rule and what it lets go wrong."
+             if rules_paths else "")
+    template = (PROMPTS / "reviewer.md").read_text()
+
+    def brief_text(findings: Path, security: str) -> str:
+        return (template.replace("{{repo}}", toplevel).replace("{{base}}", base).replace("{{head}}", head)
+                .replace("{{package}}", str(diff_path)).replace("{{task}}", task).replace("{{rules}}", rules)
+                .replace("{{findings}}", str(findings)).replace("{{security}}", security))
+
+    brief = rv / f"{name}.brief.md"
+    brief.write_text(brief_text(rv / f"{name}.findings.md", ""))
+    print(f"package   {diff_path}")
+    print(f"dispatch  model={'opus' if args.risk else 'sonnet'}  "
+          f"prompt=\"Read {brief} and follow it exactly.\"")
+    paths = [brief]
+    if args.risk:  # a risk list diff gets a second finder with its own security pass
+        security_brief = rv / f"{name}.security.brief.md"
+        security_brief.write_text(brief_text(rv / f"{name}.security.findings.md",
+                                             (PROMPTS / "reviewer-security.md").read_text().strip()))
+        print(f"dispatch  model=sonnet  prompt=\"Read {security_brief} and follow it exactly.\"")
+        paths.append(security_brief)
+    append_log(d, "review", f"review brief for {name}",
+               "the reviewer gets keryx's bar from a file, not from memory",
+               " ".join(str(p) for p in paths), "2 finders" if args.risk else "1 finder")
+    return 0
+
+
+# scrub and archive log their own rows under the finish phase; they are adapter bookkeeping, never the run's
+# finish row (this also covers run logs written before this release).
+ADAPTER_FINISH_ROWS = ("scrubbed assistant attribution", "archived the cloud agent")
+
+
+def cmd_finish(args) -> int:
+    """The run is finished only when its log has a finish row and a fresh, well-formed review covers the
+    shipped head; the newest review on that line of history decides, and nothing older rescues it."""
+    d = slug_dir(args.slug, must_exist=False)
+    log = d / "decisions.tsv"
+    if not log.exists():
+        raise LoopError(f"no run log at {log}")
+    final = resolve_head(d, args.head)
+    rows = [c for c in (line.split("\t") for line in log.read_text().splitlines()[1:]) if len(c) >= 6]
+    finish_rows = [c for c in rows if c[1].split("-")[0] == "finish"
+                   and not c[2].startswith(ADAPTER_FINISH_ROWS)]
+    rulings = [c for c in rows if c[1] == "ruling" or c[2].lower().startswith("ruling")]
+    deferred = [c for c in rows if "deferred" in c[2].lower()]
+
+    def is_ancestor(sha: str) -> bool:
+        return subprocess.run(["git", "merge-base", "--is-ancestor", sha, final],
+                              capture_output=True).returncode == 0
+
+    def commits_behind(sha: str) -> int:
+        return int(git("rev-list", "--count", f"{sha}..{final}"))
+
+    parsed = []
+    if (d / "review").is_dir():
+        for p in sorted((d / "review").glob("*.findings.md")):
+            if not p.name.endswith(".security.findings.md"):
+                parsed.append((p, review_findings(p.read_text())))
+    covering = [(p, r) for p, r in parsed if r["head"] and is_ancestor(r["head"])]
+    review = min(covering,
+                 key=lambda pr: (commits_behind(pr[1]["head"]), -pr[0].stat().st_mtime),
+                 default=None)
+
+    problems = []
+    if not finish_rows:
+        problems.append(f"missing  a finish row: log one per PR or branch shipped with "
+                        f"cursor.py log --slug {args.slug} finish WHAT WHY EVIDENCE RESULT")
+    fresh = (f"missing  a fresh review of this head or an earlier commit of it: "
+             f"cursor.py review-brief --slug {args.slug}, then the reviewer writes its findings file")
+    if review is None:
+        problems.append(fresh)
+        problems += [f"bad      {p}: {'; '.join(r['problems'])}" for p, r in parsed if r["problems"]]
+    elif review[1]["problems"]:
+        problems.append(f"bad      {review[0]}: {'; '.join(review[1]['problems'])}")
+        problems.append(fresh)
+    second = None
+    if review is not None:
+        stem = review[0].name.removesuffix(".findings.md")
+        if review[0].with_name(f"{stem}.security.brief.md").exists():  # this review was dispatched with --risk
+            path = review[0].with_name(f"{stem}.security.findings.md")
+            parsed_second = review_findings(path.read_text()) if path.exists() else None
+            second = (path, parsed_second)
+            if parsed_second is None or parsed_second["problems"]:
+                if parsed_second is not None:
+                    problems.append(f"bad      {path}: {'; '.join(parsed_second['problems'])}")
+                problems.append(f"missing  the second finder's findings: {path}")
+    if problems:
+        print(f"NOT FINISHED  {args.slug}")
+        for line in problems:
+            print(line)
+        return 1
+
+    def review_line(path: Path, r: dict) -> str:
+        behind = commits_behind(r["head"])
+        where = "the final head" if behind == 0 else \
+            f"{behind} commit{'s' if behind != 1 else ''} before the final head"
+        c = r["counts"]
+        return (f"review    {path}  head {r['head'][:12]}, {where}  "
+                f"P0 {c['P0']} · P1 {c['P1']} · P2 {c['P2']} · P3 {c['P3']}")
+
+    started = dt.datetime.strptime(rows[0][0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    wall = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
+    print(f"FINISHED  {args.slug}  head {final[:12]}")
+    print(f"wall      {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m since {rows[0][0]}")
+    reviews = [str(review[0])]
+    print(review_line(review[0], review[1]))
+    if second is not None:
+        reviews.append(str(second[0]))
+        print(review_line(second[0], second[1]))
+    for c in finish_rows:
+        print(f"shipped   {c[2]} — {c[5]}")
+    for c in rulings:
+        print(f"ruling    {c[2]} — {c[4]} — {c[5]}")
+    for c in deferred:
+        print(f"deferred  {c[2]}")
+    rs = rounds(d)
+    if rs:
+        fixes = sum(1 for r in rs if (r / "prompt.md").exists()
+                    and any(line.startswith("Mode: FIX") for line in (r / "prompt.md").read_text().splitlines()))
+        print(f"rounds    {len(rs)} executor rounds, {fixes} of them FIX")
+    qa = d / "qa" / "QA.md"
+    print(f"qa        {qa}" if qa.exists() else f"qa        none (no {qa})")
+    save_json(d / "finished.json", {"slug": args.slug, "finishedAt": now(), "head": final,
+                                    "reviews": reviews, "finishRows": len(finish_rows)})
+    append_log(d, "done", "run finished", "a finish row and a fresh review cover the shipped head",
+               f"head {final[:12]}", f"{len(finish_rows)} finish rows")
+    return 0
+
+
 def record_status(run_path: Path, status: str) -> None:
     """Write a round's outcome into its run.json, recording when it ended; the other fields stay."""
     run = json.loads(run_path.read_text()) if run_path.exists() else {}
@@ -1948,11 +2159,20 @@ def main(argv=None) -> int:
     lg.add_argument("--slug", required=True)
     for col in ("phase", "decision", "why", "evidence", "result"):
         lg.add_argument(col)
+    rb = sub.add_parser("review-brief")
+    rb.add_argument("--slug", required=True)
+    rb.add_argument("--base", help="the commit the change starts from, when the slug has no executor loop")
+    rb.add_argument("--head", help="the commit to review (default: the head `fetch` recorded)")
+    rb.add_argument("--risk", action="store_true",
+                    help="auth, money, privacy or outside calls: dispatch a second finder with a security pass")
+    fn = sub.add_parser("finish")
+    fn.add_argument("--slug", required=True)
+    fn.add_argument("--head", help="the shipped commit (default: the head `fetch` recorded)")
     a = sub.add_parser("artifacts")
     a.add_argument("--slug", required=True)
     a.add_argument("--download", action="store_true")
     args = p.parse_args(argv)
-    handler = globals()[f"cmd_{args.cmd}"]
+    handler = globals()[f"cmd_{args.cmd.replace('-', '_')}"]
     try:
         return handler(args)
     except LoopError as exc:
