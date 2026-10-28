@@ -1239,3 +1239,34 @@ class ReviewBriefNamesTheCheckout(unittest.TestCase):
             self.assertIn(f"- No checkout holds the head: read files with git show {side[:12]}:<path>, "
                           "never from a working tree.", text)
             self.assertNotIn("checked out in", text)
+
+
+class FinishWithoutALoop(unittest.TestCase):
+    """A PR or branch review has no executor loop and no fetched head: the refusal must say to pass --head, not to
+    run fetch (which needs a loop)."""
+
+    def test_the_message_names_head_when_there_is_no_loop(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            self.assertEqual(_cli(repo, ["log", "--slug", "nh", "finish", "PR #1 reviewed", "why", "ev", "reported"])[0], 0)
+            for argv in (["finish", "--slug", "nh"], ["review-brief", "--slug", "nh", "--base", base]):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(_cli(repo, argv)[0], 1, argv)
+                self.assertIn("--head", err.getvalue(), argv)
+
+
+class FindingsAsReviewersWriteThem(unittest.TestCase):
+    """Real findings files: CRLF line ends, a short head, a blank line after Findings:, a finding wrapped over two
+    lines, and a reach answer that continues on the next line."""
+
+    def test_a_real_reviewers_file_parses(self):
+        text = ("Head: 1a2b3c4d5\r\nReach: the CLI entry point\r\n  calls f directly\r\nSpec: matches\r\n"
+                "Findings:\r\n\r\n- app.py:2 — returns 2 — f() gives 2 where\r\n  the plan says 1 — P1 — 0.7\r\n"
+                "- app.py:9 – a dead branch – any input – P3 – .5\r\nTests: none\r\n")
+        got = cloud.review_findings(text)
+        self.assertEqual(got["problems"], [])
+        self.assertEqual(got["head"], "1a2b3c4d5")
+        self.assertEqual(got["counts"], {"P0": 0, "P1": 1, "P2": 0, "P3": 1})
