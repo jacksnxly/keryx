@@ -167,10 +167,16 @@ def find_subagent_leaks(transcripts: Iterable[Path], forbidden: Sequence[str], a
 
 def find_executor_leaks(repo: Path, forbidden: Sequence[str], allow: str | None = None,
                         logs: Path | None = None, runs_root: str | None = None) -> list[str]:
-    """The forbidden paths in the Cursor executor's own tool calls, read from its cursor-loop event logs: in the
-    repo's .git folder, or in `logs` once they were kept outside the workspace."""
+    """The forbidden paths in the Cursor executor's own tool calls, read from its event logs: in the
+    repo's .git/cursor-loop and .keryx/runs folders, or in `logs` once they were kept outside the workspace."""
     found: set[str] = set()
-    for events in (Path(logs) if logs else Path(repo) / ".git").glob("cursor-loop/*/rounds/*/events.ndjson"):
+    if logs:
+        found_logs = [*Path(logs).glob("cursor-loop/*/rounds/*/events.ndjson"),
+                      *Path(logs).glob("runs/*/rounds/*/events.ndjson")]
+    else:
+        found_logs = [*(Path(repo) / ".git").glob("cursor-loop/*/rounds/*/events.ndjson"),
+                      *(Path(repo) / ".keryx").glob("runs/*/rounds/*/events.ndjson")]
+    for events in found_logs:
         for line in events.read_text(errors="replace").splitlines():
             try:
                 event = json.loads(line)

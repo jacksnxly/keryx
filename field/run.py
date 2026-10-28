@@ -1,7 +1,7 @@
 """One real keryx run as one result: the same numbers a bench run gives, read from what the run leaves behind.
 
 Sources, all local and read-only: the coordinator's session transcript and its subagents' transcripts
-(`~/.claude/projects/...`), the Cursor executor's event logs and the keryx run log (`<git-common-dir>/cursor-loop/`).
+(`~/.claude/projects/...`), the Cursor executor's event logs and the keryx run log (`<main checkout>/.keryx/runs/`, or `<git-common-dir>/cursor-loop/` for runs started before 1.2).
 No model calls; no message text is kept. Re-run it at any time: mid-run it is a snapshot, and defects found after
 "done" are added with `defect` and survive later snapshots.
 
@@ -95,14 +95,19 @@ def _busy_min(times: list[float]) -> float:
     return round(sum(b - a for a, b in zip(times, times[1:]) if b - a <= IDLE_GAP_S) / 60, 1)
 
 
-def _loops_dir(repo: Path) -> Path:
-    git = Path(repo) / ".git"
-    if git.is_dir():
-        return git / "cursor-loop"
-    common = subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-common-dir"],
-                            capture_output=True, text=True).stdout.strip()
-    common_path = Path(common) if Path(common).is_absolute() else Path(repo) / common
-    return common_path.resolve() / "cursor-loop"
+def _loops_dir(repo: Path, prefixes: list[str]) -> Path:
+    repo = Path(repo)
+    if (repo / ".git").is_dir():
+        main, common_path = repo, repo / ".git"
+    else:
+        common = subprocess.run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                capture_output=True, text=True).stdout.strip()
+        common_path = (Path(common) if Path(common).is_absolute() else repo / common).resolve()
+        main = common_path.parent
+    new = main / ".keryx" / "runs"
+    if new.is_dir() and any(p.is_dir() and p.name.startswith(prefix) for prefix in prefixes for p in new.iterdir()):
+        return new
+    return common_path / "cursor-loop"
 
 
 def _started(run_json: Path, default: float) -> float:
@@ -246,7 +251,7 @@ def record(session: Path, repo: Path, slug: str, now: datetime | None = None, si
                 _usage(subs, e.get("message") or {}, sub_seen)
                 used = True
         sub_files += used
-    loops_dir = _loops_dir(repo)
+    loops_dir = _loops_dir(repo, loops or [slug])
     runs = _executor_runs(loops_dir, loops or [slug], now_s)
     last = max(times) if times else _t(start)
     return {

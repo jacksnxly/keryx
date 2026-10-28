@@ -46,11 +46,17 @@ def _keep_executor_logs(ws, out: Path) -> None:
             dest = out / "executor" / name
             shutil.rmtree(dest, ignore_errors=True)
             shutil.copytree(source, dest, ignore=shutil.ignore_patterns("cursor-config", "*.lock"))
+    runs = ws.repo / ".keryx" / "runs"
+    if runs.is_dir():
+        dest = out / "executor" / "runs"
+        shutil.rmtree(dest, ignore_errors=True)
+        shutil.copytree(runs, dest, ignore=shutil.ignore_patterns("cursor-config", "*.lock"))
 
 
 def _scratch_logs(ws, out: Path) -> list[Path]:
     return [out / "transcript.jsonl", *sorted((out / "subagents").glob("*.jsonl")),
-            *sorted(ws.repo.glob(".git/cursor-loop/*/rounds/*/events.ndjson"))]
+            *sorted(ws.repo.glob(".git/cursor-loop/*/rounds/*/events.ndjson")),
+            *sorted(ws.repo.glob(".keryx/runs/*/rounds/*/events.ndjson"))]
 
 
 def _tidy_scratch(record: RunRecord, ws, out: Path, before: set[str]) -> None:
