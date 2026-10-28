@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""keryx Cursor adapter: drive one Cursor implementer per slice from the coordinator's session.
+"""keryx adapter: start and follow the executor of each slice (the Cursor CLI, a GLM Coding Plan, a Claude subagent, a Cursor Cloud Agent) from the coordinator's session.
 
 Claude Code is the coordinator. This script starts and follows the implementer
 and reads its git output; every judgement (plan, review, QA, merge) stays with
@@ -25,42 +25,45 @@ The ladder of executors a machine has, in the order to try them, is saved once w
 after a failed run, `create` on the same slug hands it to the next executor (the last rung is
 "inline": the coordinator writes the code itself).
 
-State lives in <git-common-dir>/cursor-loop/<slug>/ so it is per repository,
-shared by its worktrees, and never committed.
+State lives in <main checkout>/.keryx/runs/<slug>/: per repository, shared by its worktrees,
+ignored by git through .keryx/.gitignore, and outside .git, a protected path where an agent's
+writes prompt or are denied. Runs started before 1.2 keep <git-common-dir>/cursor-loop/<slug>/.
 
 Usage (run from inside the target repository):
-  cursor.py preflight [--runner cli|cloud|glm|subagent]
-  cursor.py setup     [--executors LIST] [--detect]   (save this machine's ladder; probe what works here)
-  cursor.py executors [--after RUNNER]                (the saved ladder; the next executor after a runner)
-  cursor.py remember [--repo] NOTE                   (keep a choice or trap for later runs; never a secret)
-  cursor.py recall                                   (print the user's and this repository's keryx memory)
-  cursor.py mark --slug S --status STATUS            (close a subagent round: FINISHED, ERROR, STALLED, CANCELLED)
-  cursor.py models    [--runner cli|cloud|glm]
-  cursor.py create    --slug S --prompt-file F [--runner cli|cloud|glm|subagent] [--model ID] [--ref REF]
+  keryx.py preflight [--runner cli|cloud|glm|subagent]
+  keryx.py setup     [--executors LIST] [--detect]   (save this machine's ladder; probe what works here)
+  keryx.py executors [--after RUNNER]                (the saved ladder; the next executor after a runner)
+  keryx.py remember [--repo] NOTE                   (keep a choice or trap for later runs; never a secret)
+  keryx.py recall                                   (print the user's and this repository's keryx memory)
+  keryx.py mark --slug S --status STATUS            (close a subagent round: FINISHED, ERROR, STALLED, CANCELLED)
+  keryx.py models    [--runner cli|cloud|glm]
+  keryx.py create    --slug S --prompt-file F [--runner cli|cloud|glm|subagent] [--model ID] [--ref REF]
                     [--env NAME=value]... [--param id=value]... [--mode agent|plan] [--image P]...
                     [--escalate]
                     (local runners only: --env; cloud-only: --param --image; on a failed run,
                     re-create switches to the new executor on the same slug; --escalate also takes
                     over a finished one)
-  cursor.py followup  --slug S --prompt-file F [--mode agent|plan]
-  cursor.py wait      --slug S [--timeout SECONDS]
-  cursor.py status    --slug S
-  cursor.py fetch     --slug S
-  cursor.py gates     --slug S [--ref REF]  (did the run touch an architecture or CI gate file?)
-  cursor.py locked    --slug S [--ref REF]  (check locked test blocks against the implementer's head;
+  keryx.py followup  --slug S --prompt-file F [--mode agent|plan]
+  keryx.py wait      --slug S [--timeout SECONDS]
+  keryx.py status    --slug S
+  keryx.py fetch     --slug S
+  keryx.py gates     --slug S [--ref REF]  (did the run touch an architecture or CI gate file?)
+  keryx.py locked    --slug S [--ref REF]  (check locked test blocks against the implementer's head;
                     --ref checks a commit `fetch` cannot read, e.g. a subagent's branch)
-  cursor.py mark      --slug S --status FINISHED|ERROR|STALLED|CANCELLED   (record a subagent round's outcome)
-  cursor.py cancel    --slug S
-  cursor.py scrub     --slug S                (cli: strip Cursor's attribution trailer from local commits)
-  cursor.py artifacts --slug S [--download]   (cloud)
-  cursor.py usage     --slug S                (cloud)
-  cursor.py archive   --slug S                (cloud)
-  cursor.py log       --slug S PHASE DECISION WHY EVIDENCE RESULT   (the coordinator's own row)
-  cursor.py review-brief --slug S [--base REF] [--head REF] [--risk]   (write the fresh reviewer's brief; print how to dispatch it)
-  cursor.py finish   --slug S [--head REF]   (the run is finished only when this prints FINISHED)
+  keryx.py mark      --slug S --status FINISHED|ERROR|STALLED|CANCELLED   (record a subagent round's outcome)
+  keryx.py cancel    --slug S
+  keryx.py scrub     --slug S                (cli: strip Cursor's attribution trailer from local commits)
+  keryx.py artifacts --slug S [--download]   (cloud)
+  keryx.py usage     --slug S                (cloud)
+  keryx.py archive   --slug S                (cloud)
+  keryx.py log       --slug S PHASE DECISION WHY EVIDENCE RESULT   (the coordinator's own row)
+  keryx.py review-brief --slug S [--base REF] [--head REF] [--risk]   (write the fresh reviewer's brief; print how to dispatch it)
+  keryx.py report    --slug S [--head REF]   (draft docs/keryx/<date>-<slug>.md, the run report the coordinator fills in)
+  keryx.py finish   --slug S [--head REF] [--findings-only]   (the run is finished only when this prints FINISHED;
+                    --findings-only: a findings-only review changes nothing, so no run report)
 
 Every command that changes loop state appends a row to <state>/decisions.tsv (one tab-separated row
-per decision); the coordinator adds its own rows with `cursor.py log`.
+per decision); the coordinator adds its own rows with `keryx.py log`.
 
 Cloud runner: the API key comes from $CURSOR_API_KEY or the macOS keychain item
 "cursor-api-key"; it is never printed or written to disk by this script.
@@ -88,7 +91,7 @@ import urllib.request
 from pathlib import Path
 
 API = os.environ.get("CURSOR_API_BASE", "https://api.cursor.com")
-USER_AGENT = "cursor-loop/0.2"
+USER_AGENT = "keryx/1.2"
 TERMINAL_RUN_STATES = {"FINISHED", "ERROR", "CANCELLED", "EXPIRED"}
 KEYCHAIN_SERVICE = "cursor-api-key"
 DEFAULT_CLI_MODEL = "grok-4.7-xhigh"
@@ -106,7 +109,7 @@ CLI_DENY = [
 NO_PUSH_ENV = {
     "GIT_CONFIG_COUNT": "1",
     "GIT_CONFIG_KEY_0": "remote.origin.pushurl",
-    "GIT_CONFIG_VALUE_0": "https://push-disabled.invalid/cursor-loop",
+    "GIT_CONFIG_VALUE_0": "https://push-disabled.invalid/keryx",
 }
 
 # Runners that work in a local worktree on this machine, and each one's worktree and branch prefix
@@ -137,6 +140,8 @@ GLM_DENY = [f"Bash({c} *)" for c in (
 )] + [f"Bash({c})" for c in ("kubectl", "ssh", "gh", "vercel", "env", "printenv")] + [
     "Read(~/.ssh/**)", "Read(~/.config/glm/**)", "Read(~/.kube/**)", "Read(~/.cursor/**)",
     "Read(~/Library/Application Support/com.vercel.cli/**)",
+    # keryx's own folder holds QA screenshots of real people and other runs' logs; an executor never reads it.
+    "Read(**/.keryx/**)", "Read(//**/.keryx/**)",
     # Seen 2026-10-25: a GLM run printed the non-secret lines of a checkout's .env.local while debugging.
     "Read(**/.env)", "Read(**/.env.*)", "Read(//**/.env)", "Read(//**/.env.*)", "Edit(**/.env*)", "Edit(//**/.env*)",
     "Bash(cp *.env*)", "Bash(cat *.env*)", "Bash(grep *.env*)", "Bash(source *.env*)",
@@ -224,17 +229,53 @@ def common_dir() -> Path:
     return common if common.is_absolute() else (Path.cwd() / common).resolve()
 
 
+def main_worktree() -> Path:
+    """The repository's main checkout: the worktree the git common dir belongs to, where .keryx/ lives."""
+    return Path(git("rev-parse", "--show-toplevel", cwd=common_dir().parent))
+
+
 def state_root() -> Path:
+    return main_worktree() / ".keryx" / "runs"
+
+
+def legacy_root() -> Path:
+    """Where a run started before 1.2 lives: under the git common dir, which nothing writes to now."""
     return common_dir() / "cursor-loop"
 
 
 def slug_dir(slug: str, *, must_exist: bool = True) -> Path:
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,60}", slug):
-        raise LoopError("slug must be lowercase letters, digits and dashes (2-61 chars)")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,60}", slug):
+        raise LoopError("slug must be lowercase letters, digits and dashes (1-61 chars)")
     d = state_root() / slug
+    try:
+        legacy = legacy_root() / slug
+    except LoopError:  # no repository here (state_root may be pointed elsewhere): no legacy run either
+        pass
+    else:
+        if legacy.is_dir() and not d.is_dir():
+            d = legacy
     if must_exist and not (d / "agent.json").exists():
         raise LoopError(f"no loop state for {slug!r} at {d} (run `create` first)")
     return d
+
+
+def ensure_ignored(path: Path) -> None:
+    """Before anything is written under <main>/.keryx/, its .gitignore exists with exactly `*` (created if
+    missing, never overwritten), so git status never shows a run's files. A legacy run under the git
+    common dir, or a path outside the folder, is left alone."""
+    keryx = main_worktree() / ".keryx"
+    if path != keryx and keryx not in path.parents:
+        return
+    ignore = keryx / ".gitignore"
+    if not ignore.exists():
+        keryx.mkdir(parents=True, exist_ok=True)
+        ignore.write_text("*\n")
+
+
+def repo_relative(path: Path) -> str:
+    """A path as the repository's main checkout holds it: .keryx/runs/<slug>/… for a run, or
+    .git/cursor-loop/<slug>/… for one started before 1.2."""
+    return str(path.relative_to(main_worktree()))
 
 
 def load_agent(d: Path) -> dict:
@@ -608,12 +649,12 @@ def report_usage_limit(d: Path, r: Path, limit: dict) -> None:
     when = f"resets at {limit['resetsAt']}" if limit.get("resetsAt") else f"resets in {limit['resetsIn']}"
     print(f"USAGE_LIMIT  {limit['kind']} limit; {when}")
     print("      reset within ~45 min: wait, then followup on this slug (or create on it again if followup finds "
-          "no session); later: the next rung (cursor.py executors --after RUNNER; inline means you)")
+          "no session); later: the next rung (keryx.py executors --after RUNNER; inline means you)")
     append_log(d, "dispatch", f"round {r.name}: usage limit ({limit['kind']})", "the executor reported its limit",
                f"{r / 'result.md'}", when)
 
 
-SETUP_NOTE = ("keryx is not set up on this machine: run `cursor.py setup --detect`, then ask the owner "
+SETUP_NOTE = ("keryx is not set up on this machine: run `keryx.py setup --detect`, then ask the owner "
               "which executors to use, in which order")
 
 
@@ -636,7 +677,15 @@ def memory_file(scope: str, environ: dict) -> Path | None:
     if scope == "user":
         return config_path(environ).parent / "memory.md"
     try:
-        return state_root() / "memory.md"
+        return main_worktree() / ".keryx" / "memory.md"
+    except LoopError:
+        return None
+
+
+def legacy_memory_file() -> Path | None:
+    """The repository's memory as a pre-1.2 run left it, under the git common dir; None outside a repository."""
+    try:
+        return legacy_root() / "memory.md"
     except LoopError:
         return None
 
@@ -796,8 +845,7 @@ def cli_outcome(events: list[dict], exit_code: int | None) -> dict:
 
 
 def worktree_path(slug: str, runner: str = "cli") -> Path:
-    top = Path(git("rev-parse", "--show-toplevel", cwd=common_dir().parent))
-    return top / ".worktrees" / f"{WORKTREE_PREFIX.get(runner, 'cursor')}-{slug}"
+    return main_worktree() / ".worktrees" / f"{WORKTREE_PREFIX.get(runner, 'cursor')}-{slug}"
 
 
 def ensure_excluded(pattern: str) -> None:
@@ -1151,6 +1199,7 @@ def _preflight_glm() -> int:
     print(f"ok    endpoint {url} (the plan's own, not the pay-as-you-go API)")
     print(f"ok    worktrees go to {worktree_path('example', 'glm').parent}/glm-<slug>, branches glm/<slug>")
     probe = state_root() / "_glm-preflight"
+    ensure_ignored(probe)  # the probe's config is written under .keryx/, which ignores itself first
     cfg = write_glm_config(probe)
     res = subprocess.run(["claude", "-p", "--output-format", "json", "--model", DEFAULT_GLM_MODEL, "--settings",
                           str(cfg / "settings.json"), "--strict-mcp-config", "--", "Reply with exactly the word OK."],
@@ -1359,6 +1408,7 @@ def cmd_create(args) -> int:
             write_cli_permissions(wt)
         if sub:
             block_pushes(wt)
+        ensure_ignored(d)  # the run's files are about to be written under .keryx/, which ignores itself first
         if switch:
             # Everything that can fail has succeeded; only now does the loop change hands.
             _archive_switch(d, switch, args.runner)
@@ -1370,7 +1420,7 @@ def cmd_create(args) -> int:
             r = new_round(d, args.prompt_file)
             save_json(r / "run.json", {"status": "DISPATCHED", "startedAt": now()})
             append_log(d, "dispatch", f"run {r.name}: prepared a Claude subagent "
-                                      f"(dispatch keryx:executor with worktree {wt})", "cursor-loop create",
+                                      f"(dispatch keryx:executor with worktree {wt})", "keryx create",
                        f"branch {branch}, base {start[:12]}", "DISPATCHED")
             print(f"run {r.name} prepared: dispatch keryx:executor with worktree {wt}\nbranch   {branch}")
             return 0
@@ -1382,7 +1432,7 @@ def cmd_create(args) -> int:
         r = new_round(d, args.prompt_file)
         pid = cli_launch(d, r, agent, read_prompt(args.prompt_file), args.mode)
         who = "GLM (Claude Code on the GLM Coding Plan)" if glm else "Cursor CLI"
-        append_log(d, "dispatch", f"run {r.name}: started {who} ({args.mode} mode, model {model})", "cursor-loop create",
+        append_log(d, "dispatch", f"run {r.name}: started {who} ({args.mode} mode, model {model})", "keryx create",
                    f"pid {pid}, worktree {wt}, branch {branch}, base {start[:12]}", "RUNNING")
         print(f"run {r.name} started: pid {pid}\nworktree {wt}\nbranch   {branch}\nevents   {r / 'events.ndjson'}")
         return 0
@@ -1392,7 +1442,7 @@ def cmd_create(args) -> int:
         "workOnCurrentBranch": False,
         "autoCreatePR": False,
         "mode": args.mode,
-        "name": f"cursor-loop: {args.slug}"[:100],
+        "name": f"keryx: {args.slug}"[:100],
     }
     if args.model:
         body["model"] = {"id": args.model}
@@ -1411,6 +1461,7 @@ def cmd_create(args) -> int:
     agent, run = resp.get("agent", {}), resp.get("run", {})
     if not agent.get("id") or not run.get("id"):
         raise LoopError(f"unexpected create response: {json.dumps(resp)[:500]}")
+    ensure_ignored(d)  # the run's files are about to be written under .keryx/, which ignores itself first
     if switch:
         _archive_switch(d, switch, args.runner)
     save_json(d / "agent.json", {
@@ -1422,7 +1473,7 @@ def cmd_create(args) -> int:
     r = new_round(d, args.prompt_file)
     save_json(r / "run.json", run)
     append_log(d, "dispatch", f"run {r.name}: created cloud agent ({args.mode} mode, model {args.model or 'default'})",
-               "cursor-loop create", f"agent {agent['id']} run {run['id']} base {base_sha[:12]} {agent.get('url', '')}",
+               "keryx create", f"agent {agent['id']} run {run['id']} base {base_sha[:12]} {agent.get('url', '')}",
                str(run.get("status")))
     print(f"agent {agent['id']}  run {run['id']}  status {run.get('status')}\n{agent.get('url', '')}")
     return 0
@@ -1441,7 +1492,7 @@ def cmd_followup(args) -> int:
         save_json(r / "run.json", {"status": "DISPATCHED", "startedAt": now()})
         append_log(d, "dispatch", f"run {r.name}: prepared a Claude subagent follow-up "
                                   f"(dispatch keryx:executor with worktree {agent['workspace']})",
-                   "cursor-loop followup", f"round {r.name}, branch {agent['branch']}", "DISPATCHED")
+                   "keryx followup", f"round {r.name}, branch {agent['branch']}", "DISPATCHED")
         print(f"run {r.name} prepared: dispatch keryx:executor with worktree {agent['workspace']}")
         return 0
     if agent.get("runner") in LOCAL_RUNNERS:
@@ -1452,7 +1503,7 @@ def cmd_followup(args) -> int:
             raise LoopError("no session id recorded yet; run `wait` on the previous run first")
         r = new_round(d, args.prompt_file)
         pid = cli_launch(d, r, agent, read_prompt(args.prompt_file), args.mode)
-        append_log(d, "dispatch", f"run {r.name}: follow-up ({args.mode} mode)", "cursor-loop followup",
+        append_log(d, "dispatch", f"run {r.name}: follow-up ({args.mode} mode)", "keryx followup",
                    f"pid {pid}, session {agent['sessionId']}", "RUNNING")
         print(f"run {r.name} started: pid {pid} (resuming session {agent['sessionId']})")
         return 0
@@ -1463,7 +1514,7 @@ def cmd_followup(args) -> int:
         raise LoopError(f"unexpected follow-up response: {json.dumps(resp)[:500]}")
     r = new_round(d, args.prompt_file)
     save_json(r / "run.json", run)
-    append_log(d, "dispatch", f"run {r.name}: follow-up ({args.mode} mode)", "cursor-loop followup",
+    append_log(d, "dispatch", f"run {r.name}: follow-up ({args.mode} mode)", "keryx followup",
                f"run {run['id']}", str(run.get("status")))
     print(f"run {r.name}: run {run['id']}  status {run.get('status')}")
     return 0
@@ -1706,7 +1757,7 @@ def cmd_fetch(args) -> int:
     if agent.get("runner") in LOCAL_RUNNERS:
         branch = agent["branch"]
         head = git("rev-parse", "HEAD", cwd=agent["workspace"])
-        git("update-ref", f"refs/cursor-loop/{args.slug}", head)
+        git("update-ref", f"refs/keryx/{args.slug}", head)
         dirty = git("status", "--porcelain", cwd=agent["workspace"])
         if dirty:
             print("WARN  the worktree has uncommitted changes; only commits are reviewed:\n" + dirty)
@@ -1714,13 +1765,13 @@ def cmd_fetch(args) -> int:
         branch = branch_of(d)
         if branch in ("main", "master") or not branch.startswith("cursor/"):
             print(f"WARN  agent branch is {branch!r}, not a cursor/* branch")
-        git("fetch", "--quiet", "origin", f"+refs/heads/{branch}:refs/cursor-loop/{args.slug}")
-        head = git("rev-parse", f"refs/cursor-loop/{args.slug}")
+        git("fetch", "--quiet", "origin", f"+refs/heads/{branch}:refs/keryx/{args.slug}")
+        head = git("rev-parse", f"refs/keryx/{args.slug}")
     (d / "head.txt").write_text(head + "\n")
-    print(f"branch {branch}\nhead   {head}\nbase   {agent['baseSha']}\nref    refs/cursor-loop/{args.slug}")
+    print(f"branch {branch}\nhead   {head}\nbase   {agent['baseSha']}\nref    refs/keryx/{args.slug}")
     print(git("diff", "--stat", f"{agent['baseSha']}...{head}"))
     append_log(d, "review", f"round {current_round(d).name}: read the implementer's head on {branch}",
-               "review needs the implementer's head", f"refs/cursor-loop/{args.slug} = {head}", "fetched")
+               "review needs the implementer's head", f"refs/keryx/{args.slug} = {head}", "fetched")
     return 0
 
 
@@ -1802,6 +1853,7 @@ def cmd_review_brief(args) -> int:
     head = resolve_head(d, args.head)
     name = f"{base[:12]}..{head[:12]}"
     rv = d / "review"
+    ensure_ignored(d)  # the brief and the diff are about to be written under .keryx/, which ignores itself first
     rv.mkdir(parents=True, exist_ok=True)
     diff_path = rv / f"{name}.diff"
     diff_path.write_text(f"{git('log', '--format=%h %s', f'{base}..{head}')}\n\n"
@@ -1856,6 +1908,116 @@ def cmd_review_brief(args) -> int:
 ADAPTER_FINISH_ROWS = ("scrubbed assistant attribution", "archived the cloud agent")
 
 
+def parsed_reviews(d: Path) -> list[tuple[Path, dict]]:
+    """Every first finder's findings file in the run's review folder, parsed, oldest name first."""
+    parsed = []
+    if (d / "review").is_dir():
+        for p in sorted((d / "review").glob("*.findings.md")):
+            if not p.name.endswith(".security.findings.md"):
+                parsed.append((p, review_findings(p.read_text())))
+    return parsed
+
+
+def covering_review(parsed: list[tuple[Path, dict]], final: str) -> tuple[Path, dict] | None:
+    """The review that counts for `final`: among the well-formed ones whose reviewed head is an ancestor
+    of it, the closest to it (ties: the file written last). Another line of history never counts."""
+    def is_ancestor(sha: str) -> bool:
+        return subprocess.run(["git", "merge-base", "--is-ancestor", sha, final],
+                              capture_output=True).returncode == 0
+
+    covering = [(p, r) for p, r in parsed if r["head"] and is_ancestor(r["head"])]
+    return min(covering,
+               key=lambda pr: (int(git("rev-list", "--count", f"{pr[1]['head']}..{final}")),
+                               -pr[0].stat().st_mtime),
+               default=None)
+
+
+def committed_report(final: str, slug: str) -> str | None:
+    """The run report the change ships: the newest docs/keryx/<date>-<slug>.md committed at `final`
+    (newest by name, so a later day's report for the same slug wins)."""
+    listed = [p for p in git("ls-tree", "-r", "--name-only", final, "--", "docs/keryx").splitlines()
+              if re.fullmatch(rf"docs/keryx/\d{{4}}-\d{{2}}-\d{{2}}-{re.escape(slug)}\.md", p)]
+    return max(listed) if listed else None
+
+
+def cmd_report(args) -> int:
+    """Draft the run report docs/keryx/<date>-<slug>.md from the run's own record; what only the
+    coordinator knows stays as <!-- --> placeholders, which `finish` refuses until they are gone.
+    The file is never overwritten once it exists."""
+    d = slug_dir(args.slug, must_exist=False)
+    log = d / "decisions.tsv"
+    if not log.exists():
+        raise LoopError(f"no run log at {log}")
+    if args.head:
+        final = git("rev-parse", "--verify", "--quiet", f"{args.head}^{{commit}}", check=False)
+        if not final:
+            raise LoopError(f"cannot resolve {args.head!r}")
+    else:
+        final = git("rev-parse", "HEAD")  # the branch that ships, where the report gets committed
+    top = Path(git("rev-parse", "--show-toplevel"))
+    date = dt.date.today().isoformat()
+    name = f"docs/keryx/{date}-{args.slug}.md"
+    if (top / name).exists():
+        raise LoopError(f"{name} already exists; the coordinator's prose is never overwritten")
+    rows = [c for c in (line.split("\t") for line in log.read_text().splitlines()[1:]) if len(c) >= 6]
+    shown = [c for c in rows if not any(looks_secret(c[i]) for i in (2, 3, 5))]
+    if len(shown) != len(rows):
+        print("a row of the log was left out of the report: it looks like a credential", file=sys.stderr)
+    rulings = [c for c in shown if c[1] == "ruling" or c[2].lower().startswith("ruling")]
+    deferred = [c for c in shown if "deferred" in c[2].lower()]
+    review = covering_review(parsed_reviews(d), final)
+    plan = (d / "PLAN.md").read_text() if (d / "PLAN.md").exists() else ""
+    title = next((re.sub(r"^#{1,6}\s+", "", line).strip() for line in plan.splitlines() if line.strip()),
+                 args.slug)
+    acceptance, inside = "", False
+    for line in plan.splitlines():
+        if line.startswith("## "):
+            inside = line.strip() == "## Acceptance check"
+        elif inside and line.strip():
+            acceptance = line.strip()
+            break
+    qa = d / "qa" / "QA.md"
+    counts = review[1]["counts"] if review is not None else None
+    rs = rounds(d)
+    fixes = sum(1 for r in rs if (r / "prompt.md").exists()
+                and any(line.startswith("Mode: FIX") for line in (r / "prompt.md").read_text().splitlines()))
+    started = dt.datetime.strptime(rows[0][0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc) \
+        if rows else dt.datetime.now(dt.timezone.utc)
+    wall = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
+    text = (
+        f"# {title}\n"
+        "\n"
+        f"{date} · keryx run `{args.slug}`\n"
+        "\n"
+        "## What changed\n"
+        "<!-- For the person who uses it: what is different now, and where it lives (branch, commits, PR). -->\n"
+        "\n"
+        "## Proof\n"
+        + (f"- Acceptance check: {acceptance}\n" if acceptance
+           else "- Acceptance check: <!-- the check, failing on the base and passing now -->\n")
+        + (f"- Fresh review: `{repo_relative(review[0])}`: "
+           f"P0 {counts['P0']} · P1 {counts['P1']} · P2 {counts['P2']} · P3 {counts['P3']}\n"
+           if review is not None else "- Fresh review: <!-- none yet -->\n")
+        + (f"- QA: `{repo_relative(qa)}` (kept where the run ran, not committed)\n" if qa.exists()
+           else "- QA: <!-- what QA covered -->\n")
+        + "<!-- Anything else that proves it: mutation probes, CI runs. -->\n"
+        "\n"
+        "## Open\n"
+        "<!-- What was not verified, and why. -->\n"
+        + "".join(f"- Deferred: {c[2]}\n" for c in deferred)
+        + "\n"
+        "## Rulings\n"
+        + ("".join(f"- {c[2]} — {c[3]} — {c[5]}\n" for c in rulings) or "- none\n")
+        + "\n"
+        "## Run\n"
+        f"- {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m wall clock, {len(rs)} executor rounds ({fixes} FIX)\n"
+    )
+    (top / name).parent.mkdir(parents=True, exist_ok=True)
+    (top / name).write_text(text)
+    print(name)
+    return 0
+
+
 def cmd_finish(args) -> int:
     """The run is finished only when its log has a finish row and a fresh, well-formed review covers the
     shipped head; the newest review on that line of history decides, and nothing older rescues it."""
@@ -1870,29 +2032,18 @@ def cmd_finish(args) -> int:
     rulings = [c for c in rows if c[1] == "ruling" or c[2].lower().startswith("ruling")]
     deferred = [c for c in rows if "deferred" in c[2].lower()]
 
-    def is_ancestor(sha: str) -> bool:
-        return subprocess.run(["git", "merge-base", "--is-ancestor", sha, final],
-                              capture_output=True).returncode == 0
-
     def commits_behind(sha: str) -> int:
         return int(git("rev-list", "--count", f"{sha}..{final}"))
 
-    parsed = []
-    if (d / "review").is_dir():
-        for p in sorted((d / "review").glob("*.findings.md")):
-            if not p.name.endswith(".security.findings.md"):
-                parsed.append((p, review_findings(p.read_text())))
-    covering = [(p, r) for p, r in parsed if r["head"] and is_ancestor(r["head"])]
-    review = min(covering,
-                 key=lambda pr: (commits_behind(pr[1]["head"]), -pr[0].stat().st_mtime),
-                 default=None)
+    parsed = parsed_reviews(d)
+    review = covering_review(parsed, final)
 
     problems = []
     if not finish_rows:
         problems.append(f"missing  a finish row: log one per PR or branch shipped with "
-                        f"cursor.py log --slug {args.slug} finish WHAT WHY EVIDENCE RESULT")
+                        f"keryx.py log --slug {args.slug} finish WHAT WHY EVIDENCE RESULT")
     fresh = (f"missing  a fresh review of this head or an earlier commit of it: "
-             f"cursor.py review-brief --slug {args.slug}, then the reviewer writes its findings file")
+             f"keryx.py review-brief --slug {args.slug}, then the reviewer writes its findings file")
     if review is None:
         problems.append(fresh)
         problems += [f"bad      {p}: {'; '.join(r['problems'])}" for p, r in parsed if r["problems"]]
@@ -1910,6 +2061,14 @@ def cmd_finish(args) -> int:
                 if parsed_second is not None:
                     problems.append(f"bad      {path}: {'; '.join(parsed_second['problems'])}")
                 problems.append(f"missing  the second finder's findings: {path}")
+    report = None
+    if not args.findings_only:  # a findings-only review changes nothing, so it ships no report
+        report = committed_report(final, args.slug)
+        if report is None:
+            problems.append(f"missing  the run report: keryx.py report --slug {args.slug}, "
+                            "fill it in and commit it with the change")
+        elif "<!--" in git("show", f"{final}:{report}"):
+            problems.append(f"missing  the run report: {report} still has <!-- --> placeholders")
     if problems:
         print(f"NOT FINISHED  {args.slug}")
         for line in problems:
@@ -1933,6 +2092,8 @@ def cmd_finish(args) -> int:
     if second is not None:
         reviews.append(str(second[0]))
         print(review_line(second[0], second[1]))
+    if report is not None:
+        print(f"report    {report}")
     for c in finish_rows:
         print(f"shipped   {c[2]} — {c[5]}")
     for c in rulings:
@@ -1946,8 +2107,11 @@ def cmd_finish(args) -> int:
         print(f"rounds    {len(rs)} executor rounds, {fixes} of them FIX")
     qa = d / "qa" / "QA.md"
     print(f"qa        {qa}" if qa.exists() else f"qa        none (no {qa})")
-    save_json(d / "finished.json", {"slug": args.slug, "finishedAt": now(), "head": final,
-                                    "reviews": reviews, "finishRows": len(finish_rows)})
+    finished = {"slug": args.slug, "finishedAt": now(), "head": final,
+                "reviews": reviews, "finishRows": len(finish_rows)}
+    if report is not None:
+        finished["report"] = report
+    save_json(d / "finished.json", finished)
     append_log(d, "done", "run finished", "a finish row and a fresh review cover the shipped head",
                f"head {final[:12]}", f"{len(finish_rows)} finish rows")
     return 0
@@ -2083,8 +2247,10 @@ def cmd_archive(args) -> int:
 
 
 def cmd_log(args) -> int:
-    append_log(state_root() / args.slug, args.phase, args.decision, args.why, args.evidence, args.result)
-    print(state_root() / args.slug / "decisions.tsv")
+    d = slug_dir(args.slug, must_exist=False)
+    ensure_ignored(d)
+    append_log(d, args.phase, args.decision, args.why, args.evidence, args.result)
+    print(d / "decisions.tsv")
     return 0
 
 
@@ -2094,6 +2260,12 @@ def cmd_remember(args) -> int:
     path = memory_file("repo" if args.repo else "user", dict(os.environ))
     if path is None:
         raise LoopError("--repo needs a git repository")
+    if args.repo:
+        ensure_ignored(path)  # the note is about to live in .keryx/, which ignores itself first
+        legacy = legacy_memory_file()
+        if legacy is not None and legacy.is_file() and not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            legacy.replace(path)  # a pre-1.2 memory moves in whole, so its notes are kept once
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text().splitlines() if path.exists() else []
     if not any(line.partition(" ")[2].partition(" ")[2] == args.note for line in existing if line.startswith("- ")):
@@ -2107,6 +2279,10 @@ def cmd_recall(args) -> int:
     env = dict(os.environ)
     for scope, title in (("user", "user"), ("repo", "this repository")):
         path = memory_file(scope, env)
+        if scope == "repo" and path is not None and not path.exists():
+            legacy = legacy_memory_file()
+            if legacy is not None and legacy.exists():
+                path = legacy
         if path is None or not path.exists():
             continue
         print(f"# keryx memory ({title})")
@@ -2115,7 +2291,7 @@ def cmd_recall(args) -> int:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="cursor.py", description=__doc__.split("\n\n")[0])
+    p = argparse.ArgumentParser(prog="keryx.py", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     pf = sub.add_parser("preflight")
     pf.add_argument("--runner", choices=["cli", "cloud", "glm", "subagent"], default="cli")
@@ -2177,9 +2353,14 @@ def main(argv=None) -> int:
     rb.add_argument("--head", help="the commit to review (default: the head `fetch` recorded)")
     rb.add_argument("--risk", action="store_true",
                     help="auth, money, privacy or outside calls: dispatch a second finder with a security pass")
+    rep = sub.add_parser("report")
+    rep.add_argument("--slug", required=True)
+    rep.add_argument("--head", help="the shipped commit (default: HEAD of this checkout, the branch that ships)")
     fn = sub.add_parser("finish")
     fn.add_argument("--slug", required=True)
     fn.add_argument("--head", help="the shipped commit (default: the head `fetch` recorded)")
+    fn.add_argument("--findings-only", action="store_true",
+                    help="a findings-only review changes nothing, so no run report is needed")
     a = sub.add_parser("artifacts")
     a.add_argument("--slug", required=True)
     a.add_argument("--download", action="store_true")
@@ -2188,7 +2369,7 @@ def main(argv=None) -> int:
     try:
         return handler(args)
     except LoopError as exc:
-        print(f"cursor-loop: {exc}", file=sys.stderr)
+        print(f"keryx: {exc}", file=sys.stderr)
         return 1
 
 
