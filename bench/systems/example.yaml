@@ -1,0 +1,15 @@
+# Template for a system under test. Real system files live in ~/.config/keryx/systems/
+# and are never committed. Paths may start with ~.
+name: example-YYYY-MM
+model: claude-opus-5-5              # the coordinator model
+plugins: []                         # plugin directories used as they are
+assemble:                           # optional: one plugin built at run time from skill folders
+  name: example-assembled           # must not start with claude-, anthropic- or cc-plugin-
+  skills:
+    - ~/path/to/a/skill-folder      # each folder holds a SKILL.md
+  session_start_text: ~/path/to/always-on-policy.md   # optional: injected at every session start
+entry:                              # how the owner starts each kind of work; {prompt} is the case prompt
+  bug: "{prompt}"
+  review: "{prompt}"
+  feature: "{prompt}"
+env: {}                             # extra environment for the coordinator and its tools

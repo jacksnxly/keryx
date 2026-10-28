@@ -1,11 +1,6 @@
-# Rust build artifacts
-/target
-
-# Backup files from rustfmt
-**/*.rs.bk
-
-# MSVC Windows debugging info
-*.pdb
-
-# Changelog backups
-*.bak
+.venv/
+__pycache__/
+.pytest_cache/
+.DS_Store
+bench/results/
+.worktrees/

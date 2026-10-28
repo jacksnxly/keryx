@@ -1,0 +1,14 @@
+{
+  "name": "keryx",
+  "description": "keryx: one agent workflow for bugs, features and PR review",
+  "owner": {
+    "name": "Jackson Ly"
+  },
+  "plugins": [
+    {
+      "name": "keryx",
+      "source": "./",
+      "description": "An acceptance check that fails first, cheap executors, mechanical checks, mutation probes, one fresh review"
+    }
+  ]
+}
