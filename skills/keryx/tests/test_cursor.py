@@ -1170,3 +1170,34 @@ class FinishGate(unittest.TestCase):
             self.assertIn(f"{name}.security.findings.md", out)
             (state / "review" / f"{name}.security.findings.md").write_text(self.GOOD.format(head=head))
             self.assertEqual(_cli(repo, ["finish", "--slug", "fg", "--head", head])[0], 0)
+
+
+class FinishRowsAreTheCoordinators(unittest.TestCase):
+    """scrub and archive log their own rows under the finish phase; those never stand in for the run's finish row."""
+
+    def test_a_scrubbed_branch_is_not_a_finished_run(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            (Path(tmp) / "brief.md").write_text("Mode: IMPLEMENT\n")
+            self.assertEqual(_cli(repo, ["create", "--slug", "sc", "--runner", "subagent",
+                                         "--prompt-file", str(Path(tmp) / "brief.md"), "--ref", "main"])[0], 0)
+            state = Path(run("rev-parse", "--absolute-git-dir")) / "cursor-loop" / "sc"
+            wt = json.loads((state / "agent.json").read_text())["workspace"]
+            (Path(wt) / "app.py").write_text("def f():\n    return 3\n")
+            subprocess.run(["git", "-C", wt, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am",
+                            "fix: three\n\nCo-authored-by: Cursor <cursoragent@cursor.com>"], check=True,
+                           capture_output=True)
+            self.assertEqual(_cli(repo, ["scrub", "--slug", "sc"])[0], 0)
+            self.assertIn("scrubbed", (state / "decisions.tsv").read_text())
+            self.assertEqual(_cli(repo, ["fetch", "--slug", "sc"])[0], 0)
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "sc"])[0], 0)
+            sub_head = (state / "head.txt").read_text().strip()
+            (state / "review" / f"{head[:12]}..{sub_head[:12]}.findings.md").write_text(
+                FinishGate.GOOD.format(head=sub_head))
+            code, out = _cli(repo, ["finish", "--slug", "sc"])
+            self.assertEqual(code, 1, out)
+            self.assertIn("missing  a finish row", out)
+            self.assertEqual(_cli(repo, ["log", "--slug", "sc", "finish", "branch sub/sc committed", "why", "ev",
+                                         "committed"])[0], 0)
+            self.assertEqual(_cli(repo, ["finish", "--slug", "sc"])[0], 0)
