@@ -140,8 +140,10 @@ GLM_DENY = [f"Bash({c} *)" for c in (
 )] + [f"Bash({c})" for c in ("kubectl", "ssh", "gh", "vercel", "env", "printenv")] + [
     "Read(~/.ssh/**)", "Read(~/.config/glm/**)", "Read(~/.kube/**)", "Read(~/.cursor/**)",
     "Read(~/Library/Application Support/com.vercel.cli/**)",
-    # keryx's own folder holds QA screenshots of real people and other runs' logs; an executor never reads it.
-    "Read(**/.keryx/**)", "Read(//**/.keryx/**)",
+    # A run's QA evidence and reproductions can show real people; an executor never reads those. The rest of
+    # .keryx/ stays readable to it: its own Claude Code config lives there, and it reads large tool outputs back.
+    "Read(**/.keryx/runs/*/qa/**)", "Read(//**/.keryx/runs/*/qa/**)",
+    "Read(**/.keryx/runs/*/repro/**)", "Read(//**/.keryx/runs/*/repro/**)",
     # Seen 2026-10-25: a GLM run printed the non-secret lines of a checkout's .env.local while debugging.
     "Read(**/.env)", "Read(**/.env.*)", "Read(//**/.env)", "Read(//**/.env.*)", "Edit(**/.env*)", "Edit(//**/.env*)",
     "Bash(cp *.env*)", "Bash(cat *.env*)", "Bash(grep *.env*)", "Bash(source *.env*)",
@@ -230,8 +232,24 @@ def common_dir() -> Path:
 
 
 def main_worktree() -> Path:
-    """The repository's main checkout: the worktree the git common dir belongs to, where .keryx/ lives."""
-    return Path(git("rev-parse", "--show-toplevel", cwd=common_dir().parent))
+    """The repository's main checkout, where .keryx/ lives, in every layout: this checkout when its git
+    dir is the common dir (the main checkout itself, a separate git dir, a submodule), the folder above
+    a .git common dir (a linked worktree), the checkout the common dir's config names (a submodule's
+    worktree: core.worktree), else the folder that holds a bare repository, which its worktrees share.
+    Paths are compared resolved, because git prints each one as it found it."""
+    common = common_dir().resolve()
+    current = Path(git("rev-parse", "--absolute-git-dir")).resolve()
+    if current == common:
+        top = git("rev-parse", "--show-toplevel", check=False)
+        if top:
+            return Path(top).resolve()
+    if common.name == ".git":
+        return common.parent.resolve()
+    worktree = git("config", "--file", str(common / "config"), "--get", "core.worktree", check=False)
+    if worktree:
+        named = Path(worktree)
+        return (common / named).resolve() if not named.is_absolute() else named.resolve()
+    return common.parent.resolve()
 
 
 def state_root() -> Path:
@@ -259,16 +277,13 @@ def slug_dir(slug: str, *, must_exist: bool = True) -> Path:
     return d
 
 
-def ensure_ignored(path: Path) -> None:
-    """Before anything is written under <main>/.keryx/, its .gitignore exists with exactly `*` (created if
-    missing, never overwritten), so git status never shows a run's files. A legacy run under the git
-    common dir, or a path outside the folder, is left alone."""
-    keryx = main_worktree() / ".keryx"
-    if path != keryx and keryx not in path.parents:
-        return
-    ignore = keryx / ".gitignore"
+def ensure_ignored(folder: Path) -> None:
+    """Before anything is written into `folder` (the .keryx folder the run root sits in), its .gitignore
+    exists with exactly `*` (created if missing, never overwritten), so git status never shows a run's
+    files. The folder itself is passed in, so this needs no repository around the current directory."""
+    ignore = folder / ".gitignore"
     if not ignore.exists():
-        keryx.mkdir(parents=True, exist_ok=True)
+        folder.mkdir(parents=True, exist_ok=True)
         ignore.write_text("*\n")
 
 
@@ -276,6 +291,14 @@ def repo_relative(path: Path) -> str:
     """A path as the repository's main checkout holds it: .keryx/runs/<slug>/… for a run, or
     .git/cursor-loop/<slug>/… for one started before 1.2."""
     return str(path.relative_to(main_worktree()))
+
+
+def strip_local_paths(text: str, checkout: Path, home: Path) -> str:
+    """Text as a committed report may hold it: the main checkout's path becomes repo-relative (its bare
+    form becomes "."), then the home directory becomes "~" — a report names no local path."""
+    for path, inside, bare in ((checkout, "", "."), (home, "~/", "~")):
+        text = text.replace(f"{path}/", inside).replace(str(path), bare)
+    return text
 
 
 def load_agent(d: Path) -> dict:
@@ -1198,8 +1221,9 @@ def _preflight_glm() -> int:
         problems += 1
     print(f"ok    endpoint {url} (the plan's own, not the pay-as-you-go API)")
     print(f"ok    worktrees go to {worktree_path('example', 'glm').parent}/glm-<slug>, branches glm/<slug>")
-    probe = state_root() / "_glm-preflight"
-    ensure_ignored(probe)  # the probe's config is written under .keryx/, which ignores itself first
+    runs = state_root()
+    probe = runs / "_glm-preflight"
+    ensure_ignored(runs.parent)  # the probe's config is written under .keryx/, which ignores itself first
     cfg = write_glm_config(probe)
     res = subprocess.run(["claude", "-p", "--output-format", "json", "--model", DEFAULT_GLM_MODEL, "--settings",
                           str(cfg / "settings.json"), "--strict-mcp-config", "--", "Reply with exactly the word OK."],
@@ -1408,7 +1432,9 @@ def cmd_create(args) -> int:
             write_cli_permissions(wt)
         if sub:
             block_pushes(wt)
-        ensure_ignored(d)  # the run's files are about to be written under .keryx/, which ignores itself first
+        runs = state_root()
+        if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
+            ensure_ignored(runs.parent)
         if switch:
             # Everything that can fail has succeeded; only now does the loop change hands.
             _archive_switch(d, switch, args.runner)
@@ -1461,7 +1487,9 @@ def cmd_create(args) -> int:
     agent, run = resp.get("agent", {}), resp.get("run", {})
     if not agent.get("id") or not run.get("id"):
         raise LoopError(f"unexpected create response: {json.dumps(resp)[:500]}")
-    ensure_ignored(d)  # the run's files are about to be written under .keryx/, which ignores itself first
+    runs = state_root()
+    if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
+        ensure_ignored(runs.parent)
     if switch:
         _archive_switch(d, switch, args.runner)
     save_json(d / "agent.json", {
@@ -1853,7 +1881,9 @@ def cmd_review_brief(args) -> int:
     head = resolve_head(d, args.head)
     name = f"{base[:12]}..{head[:12]}"
     rv = d / "review"
-    ensure_ignored(d)  # the brief and the diff are about to be written under .keryx/, which ignores itself first
+    runs = state_root()
+    if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
+        ensure_ignored(runs.parent)
     rv.mkdir(parents=True, exist_ok=True)
     diff_path = rv / f"{name}.diff"
     diff_path.write_text(f"{git('log', '--format=%h %s', f'{base}..{head}')}\n\n"
@@ -1934,8 +1964,9 @@ def covering_review(parsed: list[tuple[Path, dict]], final: str) -> tuple[Path, 
 
 def committed_report(final: str, slug: str) -> str | None:
     """The run report the change ships: the newest docs/keryx/<date>-<slug>.md committed at `final`
-    (newest by name, so a later day's report for the same slug wins)."""
-    listed = [p for p in git("ls-tree", "-r", "--name-only", final, "--", "docs/keryx").splitlines()
+    (newest by name, so a later day's report for the same slug wins). --full-tree reads the pathspec
+    from the tree's root, wherever the command runs from."""
+    listed = [p for p in git("ls-tree", "-r", "--full-tree", "--name-only", final, "--", "docs/keryx").splitlines()
               if re.fullmatch(rf"docs/keryx/\d{{4}}-\d{{2}}-\d{{2}}-{re.escape(slug)}\.md", p)]
     return max(listed) if listed else None
 
@@ -1960,15 +1991,28 @@ def cmd_report(args) -> int:
     if (top / name).exists():
         raise LoopError(f"{name} already exists; the coordinator's prose is never overwritten")
     rows = [c for c in (line.split("\t") for line in log.read_text().splitlines()[1:]) if len(c) >= 6]
-    shown = [c for c in rows if not any(looks_secret(c[i]) for i in (2, 3, 5))]
-    if len(shown) != len(rows):
-        print("a row of the log was left out of the report: it looks like a credential", file=sys.stderr)
+    left_out = 0
+    shown = []
+    for c in rows:
+        if any(looks_secret(c[i]) for i in (2, 3, 5)):
+            left_out += 1
+        else:
+            shown.append(c)
     rulings = [c for c in shown if c[1] == "ruling" or c[2].lower().startswith("ruling")]
     deferred = [c for c in shown if "deferred" in c[2].lower()]
     review = covering_review(parsed_reviews(d), final)
     plan = (d / "PLAN.md").read_text() if (d / "PLAN.md").exists() else ""
+
+    def committed(text: str) -> str:
+        """The report is committed, often to a public repository: nothing it copies names a local path."""
+        return strip_local_paths(text, main_worktree(), Path.home())
+
     title = next((re.sub(r"^#{1,6}\s+", "", line).strip() for line in plan.splitlines() if line.strip()),
                  args.slug)
+    if looks_secret(title):
+        title, left_out = args.slug, left_out + 1
+    else:
+        title = committed(title)
     acceptance, inside = "", False
     for line in plan.splitlines():
         if line.startswith("## "):
@@ -1976,6 +2020,10 @@ def cmd_report(args) -> int:
         elif inside and line.strip():
             acceptance = line.strip()
             break
+    if looks_secret(acceptance):
+        acceptance, left_out = "", left_out + 1
+    if left_out:
+        print("a row of the log was left out of the report: it looks like a credential", file=sys.stderr)
     qa = d / "qa" / "QA.md"
     counts = review[1]["counts"] if review is not None else None
     rs = rounds(d)
@@ -1993,7 +2041,7 @@ def cmd_report(args) -> int:
         "<!-- For the person who uses it: what is different now, and where it lives (branch, commits, PR). -->\n"
         "\n"
         "## Proof\n"
-        + (f"- Acceptance check: {acceptance}\n" if acceptance
+        + (f"- Acceptance check: {committed(acceptance)}\n" if acceptance
            else "- Acceptance check: <!-- the check, failing on the base and passing now -->\n")
         + (f"- Fresh review: `{repo_relative(review[0])}`: "
            f"P0 {counts['P0']} · P1 {counts['P1']} · P2 {counts['P2']} · P3 {counts['P3']}\n"
@@ -2004,10 +2052,11 @@ def cmd_report(args) -> int:
         "\n"
         "## Open\n"
         "<!-- What was not verified, and why. -->\n"
-        + "".join(f"- Deferred: {c[2]}\n" for c in deferred)
+        + "".join(f"- Deferred: {committed(c[2])}\n" for c in deferred)
         + "\n"
         "## Rulings\n"
-        + ("".join(f"- {c[2]} — {c[3]} — {c[5]}\n" for c in rulings) or "- none\n")
+        + ("".join(f"- {committed(c[2])} — {committed(c[3])} — {committed(c[5])}\n" for c in rulings)
+           or "- none\n")
         + "\n"
         "## Run\n"
         f"- {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m wall clock, {len(rs)} executor rounds ({fixes} FIX)\n"
@@ -2065,10 +2114,12 @@ def cmd_finish(args) -> int:
     if not args.findings_only:  # a findings-only review changes nothing, so it ships no report
         report = committed_report(final, args.slug)
         if report is None:
-            problems.append(f"missing  the run report: keryx.py report --slug {args.slug}, "
-                            "fill it in and commit it with the change")
+            problems.append(f"missing  the run report at head {final[:12]}: keryx.py report --slug {args.slug}, "
+                            "fill it in and commit it with the change (pass --head <the shipped commit> "
+                            "when it ships from another branch)")
         elif "<!--" in git("show", f"{final}:{report}"):
-            problems.append(f"missing  the run report: {report} still has <!-- --> placeholders")
+            problems.append(f"missing  the run report at head {final[:12]}: {report} still has <!-- --> "
+                            "placeholders (pass --head <the shipped commit> when it ships from another branch)")
     if problems:
         print(f"NOT FINISHED  {args.slug}")
         for line in problems:
@@ -2248,7 +2299,9 @@ def cmd_archive(args) -> int:
 
 def cmd_log(args) -> int:
     d = slug_dir(args.slug, must_exist=False)
-    ensure_ignored(d)
+    runs = state_root()
+    if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
+        ensure_ignored(runs.parent)
     append_log(d, args.phase, args.decision, args.why, args.evidence, args.result)
     print(d / "decisions.tsv")
     return 0
@@ -2261,7 +2314,7 @@ def cmd_remember(args) -> int:
     if path is None:
         raise LoopError("--repo needs a git repository")
     if args.repo:
-        ensure_ignored(path)  # the note is about to live in .keryx/, which ignores itself first
+        ensure_ignored(path.parent)  # the note is about to live in .keryx/, which ignores itself first
         legacy = legacy_memory_file()
         if legacy is not None and legacy.is_file() and not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
