@@ -313,3 +313,30 @@ def test_a_run_in_a_bare_repositorys_worktree_is_recorded(tmp_path):
     log.parent.mkdir(parents=True)
     log.write_text("ts\tphase\tdecision\twhy\tevidence\tresult\nt\tintake\tsize M\tw\te\tM\n")
     assert run.record(session, tmp_path / "wt", slug="tf", now=BASE)["log"]["rows"] == 1
+
+
+def test_a_submodules_linked_worktree_is_recorded_after_its_settings_moved(tmp_path):
+    # A subagent round (keryx 1.2.1) moves the submodule's core.worktree into the main worktree's config.worktree; the
+    # recorder still finds the submodule's checkout from its linked worktree.
+    import subprocess
+    session, _ = _setup(tmp_path)
+
+    def g(*a, cwd=tmp_path):
+        return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.file.allow=always",
+                               *a], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+    g("init", "-q", "-b", "main", "sub")
+    g("commit", "-q", "--allow-empty", "-m", "b", cwd=tmp_path / "sub")
+    g("init", "-q", "-b", "main", "sup")
+    g("submodule", "-q", "add", str(tmp_path / "sub"), "mod", cwd=tmp_path / "sup")
+    mod = tmp_path / "sup" / "mod"
+    g("worktree", "add", "-q", "-b", "side", str(tmp_path / "mod-wt"), cwd=mod)
+    common = tmp_path / "sup" / ".git" / "modules" / "mod"
+    g("config", "extensions.worktreeConfig", "true", cwd=mod)
+    g("config", "--file", str(common / "config.worktree"), "core.worktree",
+      g("config", "--file", str(common / "config"), "core.worktree"))
+    g("config", "--file", str(common / "config"), "--unset", "core.worktree")
+    log = mod / ".keryx" / "runs" / "tf" / "decisions.tsv"
+    log.parent.mkdir(parents=True)
+    log.write_text("ts\tphase\tdecision\twhy\tevidence\tresult\nt\tintake\tsize M\tw\te\tM\n")
+    assert run.record(session, tmp_path / "mod-wt", slug="tf", now=BASE)["log"]["rows"] == 1

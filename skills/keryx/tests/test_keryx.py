@@ -1479,7 +1479,8 @@ class ExecutorsAndTheKeryxFolder(unittest.TestCase):
             finally:
                 os.chdir(old)
             deny = json.loads((wt / ".cursor" / "cli.json").read_text())["permissions"]["deny"]
-            for rule in (f"Read({top}/.keryx/runs/*/qa/**)", f"Read({top}/.keryx/runs/*/repro/**)"):
+            for rule in (f"Read({top}/.keryx/runs/*/qa/**)", f"Read({top}/.keryx/runs/*/repro/**)",
+                         f"Read({top}/.keryx/memory.md)"):
                 self.assertIn(rule, deny)
 
 
@@ -1685,12 +1686,12 @@ class ReportPathsAtTheEndOfASentence(unittest.TestCase):
     names neither."""
 
     def test_a_path_before_a_full_stop_is_stripped(self):
-        w, h = Path("/w/proj"), Path("/h")
-        self.assertEqual(cloud.strip_local_paths("run it from /w/proj.", w, h), "run it from ..")
-        self.assertEqual(cloud.strip_local_paths("see /w/proj/app.py.", w, h), "see app.py.")
-        self.assertEqual(cloud.strip_local_paths("notes in /h/notes.", w, h), "notes in ~/notes.")
-        self.assertEqual(cloud.strip_local_paths("/w/proj.v2 and /w/proj-other stay", w, h),
-                         "/w/proj.v2 and /w/proj-other stay")
+        w, h = Path("/no-such-root-w/proj"), Path("/no-such-root-h")
+        self.assertEqual(cloud.strip_local_paths("run it from /no-such-root-w/proj.", w, h), "run it from ..")
+        self.assertEqual(cloud.strip_local_paths("see /no-such-root-w/proj/app.py.", w, h), "see app.py.")
+        self.assertEqual(cloud.strip_local_paths("notes in /no-such-root-h/notes.", w, h), "notes in ~/notes.")
+        kept = "/no-such-root-w/proj.v2 and /no-such-root-w/proj-other stay"
+        self.assertEqual(cloud.strip_local_paths(kept, w, h), kept)
 
     def test_a_bare_repositorys_worktree_report_names_no_local_path(self):
         import subprocess
@@ -1829,7 +1830,9 @@ class RunReportFromTheWholeRun(unittest.TestCase):
             (runs / "sl-old" / "decisions.tsv").write_text("ts\tphase\tdecision\twhy\tevidence\tresult\n"
                                                            "2020-01-01T00:00:00Z\tintake\tan older run\tw\te\tM\n")
             self.assertEqual(_cli(repo, ["log", "--slug", "sl", "intake", "size L", "why", "ev", "L"])[0], 0)
-            for name, modes in (("sl-a", ("IMPLEMENT", "FIX")), ("sl-b", ("IMPLEMENT",)), ("sl-old", ("FIX",) * 5)):
+            (runs / "sl" / "PLAN.md").write_text("# sl: slices\n\n## Slices\n- sl-a: owns a.py\n- sl-b: owns b.py\n")
+            for name, modes in (("sl-a", ("IMPLEMENT", "FIX")), ("sl-b", ("IMPLEMENT",)), ("sl-old", ("FIX",) * 5),
+                                ("sl-later", ("FIX",) * 4)):  # a later run the plan does not name is no slice
                 if name != "sl-old":
                     self.assertEqual(_cli(repo, ["log", "--slug", name, "dispatch", "slice", "w", "e", "ok"])[0], 0)
                 for i, mode in enumerate(modes, 1):
@@ -1840,6 +1843,7 @@ class RunReportFromTheWholeRun(unittest.TestCase):
             for part in ("3 executor rounds (1 FIX)", "sl-a 2", "sl-b 1"):
                 self.assertIn(part, text)
             self.assertNotIn("sl-old", text)
+            self.assertNotIn("sl-later", text)
             self._reviewed(repo, base, head, "sl", runs / "sl")
             code, out = _cli(repo, ["finish", "--slug", "sl", "--head", head, "--findings-only"])
             self.assertEqual(code, 0, out)
@@ -1909,8 +1913,9 @@ class ReportNamesNoLocalPath(unittest.TestCase):
             self.assertIn("`python3 <!-- a local path was here -->`", text)
 
     def test_a_sibling_with_a_non_ascii_name_is_not_garbled(self):
-        w, h = Path("/w/proj"), Path("/h")
-        self.assertEqual(cloud.strip_local_paths("/w/proj/a.py and /w/projé/b.py", w, h), "a.py and /w/projé/b.py")
+        w, h = Path("/no-such-root-w/proj"), Path("/no-such-root-h")
+        self.assertEqual(cloud.strip_local_paths("/no-such-root-w/proj/a.py and /no-such-root-w/projé/b.py", w, h),
+                         "a.py and /no-such-root-w/projé/b.py")
 
     def test_a_path_through_a_symlinked_folder_is_named_from_the_checkout(self):
         import os
@@ -1937,3 +1942,137 @@ class ReportNamesNoLocalPath(unittest.TestCase):
             self.assertEqual(_cli(wt, ["report", "--slug", "wo"])[0], 0)
             text = next((wt / "docs" / "keryx").glob("*-wo.md")).read_text()
             self.assertIn("Ruling: change app.py, keep CLAUDE.md", text)
+
+
+class KeryxAfterASubagentRoundInASubmodule(unittest.TestCase):
+    """The settings move puts a submodule's core.worktree into the main worktree's config.worktree, so keryx must look
+    for it there too. 1.2.1's first cut read only the shared config: from the submodule's linked worktree a log row
+    went into a second log inside .git/modules, `mark` found no loop, and a create left .keryx without its
+    .gitignore (found by the fresh review)."""
+
+    def test_commands_from_the_submodules_linked_worktree_find_its_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+            g = WorktreesOfABareRepositoryOrASubmodule._g(t)
+            g("init", "-q", "-b", "main", "sub")
+            g("commit", "-q", "--allow-empty", "-m", "b", cwd=t / "sub")
+            g("init", "-q", "-b", "main", "sup")
+            g("submodule", "-q", "add", str(t / "sub"), "mod", cwd=t / "sup")
+            mod, linked = t / "sup" / "mod", t / "mod-wt"
+            g("worktree", "add", "-q", "-b", "side", str(linked), cwd=mod)
+            (t / "brief.md").write_text("Mode: IMPLEMENT\n")
+            create = ["--runner", "subagent", "--prompt-file", str(t / "brief.md"), "--ref", "main"]
+            self.assertEqual(_cli(mod, ["create", "--slug", "ms", *create])[0], 0)
+            self.assertEqual(_cli(linked, ["log", "--slug", "ms", "check", "from the linked worktree", "w", "e",
+                                           "ok"])[0], 0)
+            self.assertIn("from the linked worktree", (mod / ".keryx" / "runs" / "ms" / "decisions.tsv").read_text())
+            self.assertFalse((t / "sup" / ".git" / "modules" / "mod" / ".keryx").exists())
+            self.assertEqual(_cli(linked, ["mark", "--slug", "ms", "--status", "FINISHED"])[0], 0)
+            code, out = _cli(linked, ["create", "--slug", "fw", *create])
+            self.assertEqual(code, 0, out)
+            self.assertEqual((mod / ".keryx" / ".gitignore").read_text(), "*\n")
+            self.assertNotIn(".keryx", g("status", "--porcelain", cwd=mod).stdout)
+
+
+class GlmConfigNeedsNoRepository(unittest.TestCase):
+    """Where a GLM run's config goes follows from the run's folder alone, so it needs no repository around the current
+    directory (seen on Linux: the suite runs from an export without .git, and 1.2.1's first cut asked git)."""
+
+    def test_the_config_dir_follows_the_run_folder(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            old = os.getcwd()
+            os.chdir(tmp)
+            try:
+                plain = cloud.write_glm_config(t / "loops" / "s")
+                beside = cloud.write_glm_config(t / "x" / ".keryx" / "runs" / "s")
+            finally:
+                os.chdir(old)
+            self.assertEqual(plain, t / "loops" / "s" / "claude-config")
+            self.assertEqual(beside, t / "x" / ".keryx" / "glm" / "s")
+            self.assertEqual((t / "x" / ".keryx" / ".gitignore").read_text(), "*\n")
+
+
+class RunReportDraftDetails(unittest.TestCase):
+    """Found by the fresh review and by re-drafting 1.2.0's report from its own log: indentation inside the acceptance
+    check, a Run line with nothing after its colon, an unrelated later <slug>-<name> run counted as a slice, a
+    two-finder review showing one finder's counts, and two rulings replacing the same row."""
+
+    def test_indentation_inside_the_acceptance_check_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "in"
+            self.assertEqual(_cli(repo, ["log", "--slug", "in", "intake", "size M", "why", "ev", "M"])[0], 0)
+            (state / "PLAN.md").write_text("# in\n\n## Acceptance check\nAt base:\n  - nested\n    - deeper\n")
+            text = RunReportFromTheWholeRun._draft(repo, run, "in")
+            self.assertIn("- Acceptance check:\n  At base:\n    - nested\n      - deeper\n", text)
+
+    def test_a_run_line_without_rounds_ends_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "big"
+            self.assertEqual(_cli(repo, ["log", "--slug", "big", "intake", "size L", "why", "ev", "L"])[0], 0)
+            (state / "PLAN.md").write_text("# big\n\n## Slices\n- big-a: done inline\n")
+            self.assertEqual(_cli(repo, ["log", "--slug", "big-a", "dispatch", "inline", "w", "e", "ok"])[0], 0)
+            text = RunReportFromTheWholeRun._draft(repo, run, "big")
+            self.assertRegex(text, r"wall clock, 0 executor rounds \(0 FIX\)\n")
+
+    def test_a_slice_counts_when_the_runs_log_names_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            runs = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs"
+            self.assertEqual(_cli(repo, ["log", "--slug", "nm", "plan", "slice nm-a to GLM", "why", "ev", "ok"])[0], 0)
+            for name in ("nm-a", "nm-other"):
+                self.assertEqual(_cli(repo, ["log", "--slug", name, "dispatch", "x", "w", "e", "ok"])[0], 0)
+                (runs / name / "rounds" / "01").mkdir(parents=True)
+                (runs / name / "rounds" / "01" / "prompt.md").write_text("Mode: IMPLEMENT\n")
+            text = RunReportFromTheWholeRun._draft(repo, run, "nm")
+            self.assertIn("1 executor rounds (0 FIX): nm-a 1", text)
+            self.assertNotIn("nm-other", text)
+
+    def test_the_second_finders_counts_are_shown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "two"
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "two", "--base", base, "--head", head,
+                                         "--risk"])[0], 0)
+            stem = f"{base[:12]}..{head[:12]}"
+            (state / "review" / f"{stem}.findings.md").write_text(FinishGate.GOOD.format(head=head))
+            (state / "review" / f"{stem}.security.findings.md").write_text(
+                f"Head: {head}\nReach: one caller\nSpec: matches\nFindings:\n"
+                "- app.py:2 — f() leaks a path — any call — P2 — 0.6\nTests: none\n")
+            self.assertEqual(_cli(repo, ["log", "--slug", "two", "finish", "x", "w", "e", "ok"])[0], 0)
+            text = RunReportFromTheWholeRun._draft(repo, run, "two")
+            self.assertIn(f"- Fresh review: `.keryx/runs/two/review/{stem}.findings.md`: P0 0 · P1 1 · P2 0 · P3 1\n",
+                          text)
+            self.assertIn(f"- Second finder: `.keryx/runs/two/review/{stem}.security.findings.md`: "
+                          "P0 0 · P1 0 · P2 1 · P3 0\n", text)
+
+    def test_a_replaced_ruling_cannot_be_replaced_a_second_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            for decision in ("Ruling: A", "Ruling (replaces row 1): B"):
+                self.assertEqual(_cli(repo, ["log", "--slug", "tw", "ruling", decision, "w", "e", "r"])[0], 0)
+            self.assertEqual(_cli(repo, ["log", "--slug", "tw", "ruling", "Ruling (replaces row 1): C", "w", "e",
+                                         "r"])[0], 1, "row 1 already stands replaced: replace row 2")
+            self.assertEqual(_cli(repo, ["log", "--slug", "tw", "ruling", "Ruling (replaces row 2): C", "w", "e",
+                                         "r"])[0], 0)
+
+
+class ReportPathShapes(unittest.TestCase):
+    """Local paths in the shapes reports quote them: after a colon (a compiler's location, the second entry of a PATH),
+    after a flag, in a file:// URL. System folders that say nothing about the person (/dev, /usr, /bin, /etc …)
+    stay, so `2>/dev/null` needs no rewrite (found by the fresh review)."""
+
+    def test_paths_in_quoted_shapes(self):
+        w, h = Path("/no-such-root-w/proj"), Path("/no-such-root-h")
+        hidden = cloud.LOCAL_PATH
+        for text, want in (("err:/tmp/a.py:3", f"err:{hidden}:3"),
+                           ("file:///tmp/x.html", f"file://{hidden}"),
+                           ("PATH=/no-such-root-a:/tmp/x/y", f"PATH=/no-such-root-a:{hidden}"),
+                           ("-I/tmp/inc", f"-I{hidden}"),
+                           ("cmd 2>/dev/null", "cmd 2>/dev/null"),
+                           ("/usr/bin/env python3", "/usr/bin/env python3"),
+                           ("https://example.com/tmp/x", "https://example.com/tmp/x")):
+            self.assertEqual(cloud.strip_local_paths(text, w, h), want, text)
