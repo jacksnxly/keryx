@@ -235,8 +235,9 @@ def main_worktree() -> Path:
     """The repository's main checkout, where .keryx/ lives, in every layout: this checkout when its git
     dir is the common dir (the main checkout itself, a separate git dir, a submodule), the folder above
     a .git common dir (a linked worktree), the checkout the common dir's config names (a submodule's
-    worktree: core.worktree), else the folder that holds a bare repository, which its worktrees share.
-    Paths are compared resolved, because git prints each one as it found it."""
+    worktree: core.worktree), else the bare repository's own folder, which its worktrees share — and
+    which no other bare repository in the same folder shares with it. Paths are compared resolved,
+    because git prints each one as it found it."""
     common = common_dir().resolve()
     current = Path(git("rev-parse", "--absolute-git-dir")).resolve()
     if current == common:
@@ -249,7 +250,7 @@ def main_worktree() -> Path:
     if worktree:
         named = Path(worktree)
         return (common / named).resolve() if not named.is_absolute() else named.resolve()
-    return common.parent.resolve()
+    return common
 
 
 def state_root() -> Path:
@@ -288,16 +289,20 @@ def ensure_ignored(folder: Path) -> None:
 
 
 def repo_relative(path: Path) -> str:
-    """A path as the repository's main checkout holds it: .keryx/runs/<slug>/… for a run, or
-    .git/cursor-loop/<slug>/… for one started before 1.2."""
-    return str(path.relative_to(main_worktree()))
+    """A path relative to the repository's main checkout (.keryx/runs/<slug>/… for a run, or
+    .git/cursor-loop/<slug>/… for one started before 1.2): a folder outside the checkout is named
+    with ../ segments — never an absolute path, never an exception."""
+    return os.path.relpath(path, main_worktree())
 
 
 def strip_local_paths(text: str, checkout: Path, home: Path) -> str:
     """Text as a committed report may hold it: the main checkout's path becomes repo-relative (its bare
-    form becomes "."), then the home directory becomes "~" — a report names no local path."""
+    form becomes "."), then the home directory becomes "~" — a report names no local path. Each is
+    replaced only where it ends at a path boundary (a "/", the end of the text, or a character that
+    cannot continue a path name), so a sibling folder that shares its name is left as it is."""
     for path, inside, bare in ((checkout, "", "."), (home, "~/", "~")):
-        text = text.replace(f"{path}/", inside).replace(str(path), bare)
+        at_boundary = re.escape(str(path)) + r"(?![A-Za-z0-9._-])(/)?"
+        text = re.sub(at_boundary, lambda m: inside if m.group(1) else bare, text)
     return text
 
 
