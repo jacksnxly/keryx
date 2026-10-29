@@ -2379,3 +2379,44 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
         line = next(l for l in playbook.splitlines() if "review-brief --slug <slug> --hotfix" in l)
         for flag in ("--base", "--head"):
             self.assertIn(flag, playbook[playbook.index(line):playbook.index(line) + 400])
+
+    def test_the_lane_marker_with_any_separator_and_not_negated(self):
+        rows = lambda text: [(1, ["2026-10-29T10:00:00Z", "intake", text, "w", "e", "S"])]
+        for text in ("size S · lane hotfix: prod is down", "size S · lane hotfix - prod is down", "lane hotfix — login",
+                     "size S, lane hotfix"):
+            self.assertTrue(cloud.is_hotfix_run(rows(text)), text)
+        for text in ("size M: the export button — not lane hotfix", "size M, no lane hotfix needed", "size M: hotfixes later"):
+            self.assertFalse(cloud.is_hotfix_run(rows(text)), text)
+
+    def test_a_waiver_is_the_phrase_no_follow_up_itself(self):
+        def ruling(text):
+            return [(1, ["2026-10-29T10:00:00Z", "ruling", text, "w", "e", "r"])]
+        self.assertTrue(cloud.followup_waived(ruling("Ruling: no follow-up — the revert is the lasting fix")))
+        self.assertFalse(cloud.followup_waived(ruling("Ruling: no follow-up-run has been opened yet")))
+
+    def test_an_ordinary_runs_slice_is_counted_even_if_a_followup_row_names_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            runs = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs"
+            self.assertEqual(_cli(repo, ["log", "--slug", "big", "intake", "size L: the export", "w", "e", "L"])[0], 0)
+            (runs / "big" / "PLAN.md").write_text("## Slices\n- big-a: owns export.py\n")
+            self.assertEqual(_cli(repo, ["log", "--slug", "big-a", "intake", "slice a", "w", "e", "M"])[0], 0)
+            (runs / "big-a" / "rounds" / "01").mkdir(parents=True)
+            (runs / "big-a" / "rounds" / "01" / "prompt.md").write_text("Mode: IMPLEMENT\n")
+            self.assertEqual(_cli(repo, ["log", "--slug", "big", "followup", "big-a: a stray row", "w", "e", "x"])[0], 0)
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "big", "--base", base, "--head", head])[0], 0)
+            (runs / "big" / "review" / f"{base[:12]}..{head[:12]}.findings.md").write_text(self.GOOD.format(head=head))
+            self.assertEqual(_cli(repo, ["log", "--slug", "big", "finish", "PR #5", "w", "e", "merged"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "big", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("big-a 1", out)
+
+    def test_follow_up_rows_left_unopened_are_shown_as_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
+            for decision in ("hf-roto: the lasting fix", "hf-root: the lasting fix"):
+                self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", decision, "w", "e", "x"])[0], 0)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf-root", "intake", "size M: the lasting fix", "w", "e", "M"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("followup  hf-roto: the lasting fix (no run opened for it; ignored)", out)

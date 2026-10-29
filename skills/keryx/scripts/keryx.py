@@ -413,14 +413,14 @@ def deferred_rows(rows: list[tuple[int, list[str]]]) -> list[tuple[int, list[str
 
 
 def is_hotfix_run(rows: list[tuple[int, list[str]]]) -> bool:
-    """A hotfix run: its log has an intake row whose decision names the lane as the playbook writes it,
-    `size S · lane hotfix: …` — the marker with its colon, so prose such as "not lane hotfix" is not one."""
+    """A hotfix run: its log has an intake row whose decision names the lane (`size S · lane hotfix: …`, or with
+    another separator), and not negated: prose such as "not lane hotfix" or "no lane hotfix" is no hotfix."""
     return bool(hotfix_started(rows))
 
 
 def hotfix_started(rows: list[tuple[int, list[str]]]) -> str:
     """The time of the run's first hotfix intake row, or "" when the run is not a hotfix."""
-    stamps = [c[0] for _, c in rows if c[1] == "intake" and re.search(r"(?i)\blane hotfix:", c[2])]
+    stamps = [c[0] for _, c in rows if c[1] == "intake" and re.search(r"(?i)(?<!\bnot )(?<!\bno )\blane hotfix\b", c[2])]
     return min(stamps) if stamps else ""
 
 
@@ -441,7 +441,7 @@ def followup_waived(rulings: list[tuple[int, list[str]]]) -> bool:
     text_after = re.compile(r"(?i)^ruling(?: \(replaces row \d+\))?:\s*(.*)$")
     for _, c in rulings:
         m = text_after.match(c[2])
-        if m and m.group(1).lower().startswith("no follow-up"):
+        if m and re.match(r"(?i)no follow-up(?![\w-])", m.group(1)):  # the phrase itself, not "no follow-up-run …"
             return True
     return False
 
@@ -473,7 +473,8 @@ def _later_prefix_folders(d: Path) -> tuple[list[Path], list[Path]]:
         return first[0][1][0] if first else ""
 
     own = rows[0][1][0]
-    follow_ups = {slug for slug, _ in followup_rows(rows)}  # separate runs, never slices of this one
+    # a hotfix's follow-ups are separate runs, never its slices; an ordinary run has no follow-ups to set aside
+    follow_ups = {slug for slug, _ in followup_rows(rows)} if is_hotfix_run(rows) else set()
     named = (d / "PLAN.md").read_text() if (d / "PLAN.md").exists() else ""
     named += "\n" + "\n".join("\t".join(c) for _, c in rows)
     later = []
@@ -2377,7 +2378,7 @@ def cmd_finish(args) -> int:
         elif "<!--" in git("show", f"{final}:{report}"):
             problems.append(f"missing  the run report at head {final[:12]}: {report} still has <!-- --> "
                             "placeholders (pass --head <the shipped commit> when it ships from another branch)")
-    opened = []  # the follow-ups whose run was opened for this hotfix
+    opened, ignored = [], []  # the follow-ups whose run was opened for this hotfix; rows naming none
     if hotfix and not followup_waived(rulings):  # the fast lane pays for itself: the lasting fix runs as its own
         unmet = []                               # keryx run, or a standing ruling says why not
         for slug, what in followups:
@@ -2394,6 +2395,8 @@ def cmd_finish(args) -> int:
                              f"intake (keryx.py log --slug {slug} intake …)")
             else:
                 opened.append((slug, what))
+                continue
+            ignored.append((slug, what))
         if not followups:
             problems.append(f"missing  the follow-up run: keryx.py log --slug {args.slug} followup "
                             f"\"{args.slug}-root: <what the lasting fix does>\" WHY EVIDENCE RESULT, then that "
@@ -2435,6 +2438,8 @@ def cmd_finish(args) -> int:
         print(f"deferred  {c[2]}")
     for slug, what in opened:
         print(f"followup  {slug}: {what}")
+    for slug, what in ignored if opened else []:
+        print(f"followup  {slug}: {what} (no run opened for it; ignored)")
     folders = run_folders(d)
     counted = [folder_rounds(f) for f in folders]
     total, fixes = sum(n for n, _ in counted), sum(k for _, k in counted)
