@@ -2183,3 +2183,109 @@ class UnnamedLaterRunsAndSystemFolders(unittest.TestCase):
             root = "/" + local.split("/")[1]
             if Path(root).is_dir():  # a folder this machine has: its paths are local ones
                 self.assertEqual(cloud.strip_local_paths(local, w, h), hidden, local)
+
+
+class HotfixLane(unittest.TestCase):
+    """A hotfix is fixed fast by the session's own model, then the lasting fix runs as a follow-up: a hotfix run is
+    finished only when its follow-up run exists, or a ruling says the hotfix is the lasting fix."""
+
+    GOOD = FinishGate.GOOD
+
+    def _hotfix_run(self, tmp, slug="hf"):
+        repo, run, base, head = _two_commit_repo(tmp)
+        state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / slug
+        self.assertEqual(_cli(repo, ["log", "--slug", slug, "intake", "size S · lane hotfix: login returns 500 on production",
+                                     "owner: prod is down", "health check red since 09:12", "S"])[0], 0)
+        self.assertEqual(_cli(repo, ["review-brief", "--slug", slug, "--base", base, "--head", head, "--hotfix"])[0], 0)
+        (state / "review" / f"{base[:12]}..{head[:12]}.findings.md").write_text(self.GOOD.format(head=head))
+        self.assertEqual(_cli(repo, ["log", "--slug", slug, "finish", "PR #9 merged and deployed", "health check green",
+                                     "deploy 77", "deployed"])[0], 0)
+        return repo, run, base, head, state
+
+    def test_a_hotfix_run_is_not_finished_without_its_follow_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = self._hotfix_run(tmp)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 1, out)
+            self.assertIn("missing  the follow-up run", out)
+            self.assertFalse((state / "finished.json").exists())
+
+    def test_a_follow_up_row_naming_an_opened_run_finishes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = self._hotfix_run(tmp)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", "hf-root: move the session check into the domain",
+                                         "the hotfix only catches the null session", "app.py:1", "opened"])[0], 0)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf-root", "intake", "size M: the session check, properly",
+                                         "follow-up of hf", "hf decisions.tsv", "M"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("followup  hf-root: move the session check into the domain", out)
+
+    def test_a_follow_up_row_naming_a_run_never_opened_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = self._hotfix_run(tmp)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", "hf-root: the lasting fix", "why", "ev", "planned"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 1, out)
+            self.assertIn("hf-root", out)
+            self.assertIn("has no run log", out)
+
+    def test_a_ruling_that_the_hotfix_is_the_lasting_fix_finishes_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = self._hotfix_run(tmp)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf", "ruling",
+                                         "Ruling: no follow-up — the hotfix reverts the change that broke login; nothing new to fix",
+                                         "a revert restores the reviewed code", "PR #9", "ruled"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+
+    def test_an_ordinary_run_needs_no_follow_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "plain"
+            self.assertEqual(_cli(repo, ["log", "--slug", "plain", "intake", "size M: the export button", "w", "e", "M"])[0], 0)
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "plain", "--base", base, "--head", head])[0], 0)
+            (state / "review" / f"{base[:12]}..{head[:12]}.findings.md").write_text(self.GOOD.format(head=head))
+            self.assertEqual(_cli(repo, ["log", "--slug", "plain", "finish", "PR #3", "w", "e", "merged"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "plain", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertNotIn("follow-up", out)
+
+    def test_the_hotfix_brief_reviews_the_diff_for_p0_and_p1_on_the_strongest_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            code, out = _cli(repo, ["review-brief", "--slug", "hb", "--base", base, "--head", head, "--hotfix"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("dispatch  model=opus", out)
+            brief = (Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "hb" / "review"
+                     / f"{base[:12]}..{head[:12]}.brief.md").read_text()
+            self.assertIn("## Hotfix", brief)
+            self.assertIn("P0 and P1 only", brief)
+            self.assertIn("Findings:", brief)  # the same findings shape, so finish reads it as any review
+
+    def test_the_report_of_a_hotfix_run_names_its_follow_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = self._hotfix_run(tmp)
+            code, out = _cli(repo, ["report", "--slug", "hf", "--head", head])
+            self.assertEqual(code, 0, out)
+            draft = next((Path(run("rev-parse", "--show-toplevel")) / "docs" / "keryx").glob("*-hf.md")).read_text()
+            self.assertIn("- Follow-up: <!--", draft)  # none logged yet: a placeholder finish refuses
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", "hf-root: move the session check into the domain",
+                                         "w", "e", "opened"])[0], 0)
+            for f in (Path(run("rev-parse", "--show-toplevel")) / "docs" / "keryx").glob("*-hf.md"):
+                f.unlink()
+            self.assertEqual(_cli(repo, ["report", "--slug", "hf", "--head", head])[0], 0)
+            draft = next((Path(run("rev-parse", "--show-toplevel")) / "docs" / "keryx").glob("*-hf.md")).read_text()
+            self.assertIn("- Follow-up: `hf-root`: move the session check into the domain", draft)
+
+    def test_the_hotfix_skill_names_its_narrow_triggers_and_the_playbook(self):
+        plugin = Path(__file__).resolve().parents[3]
+        skill = (plugin / "skills" / "hotfix" / "SKILL.md").read_text()
+        self.assertTrue(skill.startswith("---\nname: hotfix\ndescription: "))
+        head = skill.split("---", 2)[1]
+        for must in ("hotfix", "production", "never"):
+            self.assertIn(must, head.lower())
+        self.assertIn("../keryx/references/hotfix.md", skill)
+        playbook = (plugin / "skills" / "keryx" / "references" / "hotfix.md").read_text()
+        for must in ("lane hotfix", "followup", "review-brief --slug <slug> --hotfix", "rollback"):
+            self.assertIn(must, playbook)
