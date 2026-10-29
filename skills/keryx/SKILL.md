@@ -62,5 +62,5 @@ Write each ruling as `Ruling: <what> — …`; one that overturns an earlier rul
 - Start the session in the main checkout, or add it as a working directory (`/add-dir`): from a linked worktree, `.keryx/` lies outside the working directory and every write there prompts. *(fact)*
 - **`.keryx/memory.md`**: this repository's traps; `~/.config/keryx/memory.md` and `config.json`: the owner's choices and executors.
 - **`docs/keryx/<date>-<slug>.md`**: the run's report, committed with the change (`keryx.py report`). Screenshots, executor logs and the plan never leave `.keryx/`. *(owner)*
-- **`.worktrees/<runner>-<slug>`**: each executor's worktree, on branch `<runner>/<slug>`; its fetched head is `refs/keryx/<slug>`. A GLM executor's own Claude Code config is in `.keryx/glm/<slug>/`, outside the runs its permission rules refuse it.
+- **`.worktrees/<runner>-<slug>`**: each executor's worktree, on branch `<runner>/<slug>`; its fetched head is `refs/keryx/<slug>`. The folder ignores itself, as `.keryx/` does. A GLM executor's own Claude Code config is in `.keryx/glm/<slug>/`, outside the runs its permission rules refuse it.
 - Name an L run's slices `<slug>-<name>` and list them in the plan: the report and `finish` count their executor rounds with the run's.

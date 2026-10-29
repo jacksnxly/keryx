@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.2 — 2026-10-29
+
+- An executor round leaves `git status` clean. `.worktrees/`, where each executor's worktree lives, now ignores itself as `.keryx/` does, so it no longer shows as untracked in a repository whose `.gitignore` does not name it, and no longer makes a submodule look modified in its superproject. A `.worktrees/` an older keryx left is ignored from the next round on.
+
 ## 1.2.1 — 2026-10-29
 
 - A subagent round no longer breaks a bare repository or a submodule. The round blocks pushes through a per-worktree setting, and turning that on made git apply the shared `core.bare` and `core.worktree` to every worktree: in a bare repository `git status` failed in all of them, and a submodule's linked worktree pointed at the wrong folder. keryx now moves those two settings to the main worktree's own config, as git's documentation says, and repairs a repository 1.2.0 left broken on its next subagent round.

@@ -99,7 +99,8 @@ Every decision is logged as it is made (`.keryx/runs/<slug>/decisions.tsv`), so 
 │   └── glm/<slug>/             a GLM executor's own Claude Code config
 ├── docs/keryx/
 │   └── <date>-<slug>.md        the run's report, committed with the change
-└── .worktrees/<runner>-<slug>  each executor's worktree
+└── .worktrees/                 ignored by git (it carries its own .gitignore)
+    └── <runner>-<slug>/        each executor's worktree
 ```
 
 Screenshots and executor logs never leave `.keryx/`, since they can show real data. `git clean -fdx` deletes `.keryx/`. A submodule keeps its own `.keryx/`; a bare repository keeps it in the repository's own folder, shared by its worktrees. Runs started with keryx 1.1 or earlier finish in `.git/cursor-loop/`.
