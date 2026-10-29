@@ -7,7 +7,7 @@
 - The repository's memory moves to `.keryx/memory.md` with the first new note; until then the old file is still read.
 - keryx's own names throughout: the adapter is `scripts/keryx.py` (`scripts/cursor.py` still works in this release), the fetched head is `refs/keryx/<slug>`, and errors start with `keryx:`.
 - A GLM executor may not read a run's QA evidence or reproductions in `.keryx/`, since they can show real people.
-- keryx finds the main checkout in a submodule, a repository with a separate git dir and a bare repository's worktrees too, and `finish` finds the report from any folder of the repository.
+- keryx finds the main checkout in a submodule (and its worktrees), in a repository with a separate git dir (from its own checkout) and in a bare repository's worktrees, which keep `.keryx/` in the bare repository's folder; `finish` finds the report from any folder of the repository.
 - The field recorder and the benchmark read executor logs in both places.
 
 ## 1.1.0 — 2026-10-28

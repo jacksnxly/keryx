@@ -295,13 +295,15 @@ def repo_relative(path: Path) -> str:
     return os.path.relpath(path, main_worktree())
 
 
-def strip_local_paths(text: str, checkout: Path, home: Path) -> str:
-    """Text as a committed report may hold it: the main checkout's path becomes repo-relative (its bare
-    form becomes "."), then the home directory becomes "~" — a report names no local path. Each is
-    replaced only where it ends at a path boundary (a "/", the end of the text, or a character that
-    cannot continue a path name), so a sibling folder that shares its name is left as it is."""
-    for path, inside, bare in ((checkout, "", "."), (home, "~/", "~")):
-        at_boundary = re.escape(str(path)) + r"(?![A-Za-z0-9._-])(/)?"
+def strip_local_paths(text: str, checkouts: Path | list[Path], home: Path) -> str:
+    """Text as a committed report may hold it: each checkout's path becomes repo-relative (its bare form
+    becomes "."), then the home directory becomes "~" — a report names no local path. Each is replaced
+    only where it ends at a path boundary: a "/", the end of the text, or anything but a character that
+    continues a path name ("." and "-" continue one only when a name character follows, so a path that
+    ends a sentence is still replaced and a sibling folder that shares its name is left as it is)."""
+    checkouts = [checkouts] if isinstance(checkouts, Path) else checkouts
+    for path, inside, bare in [(c, "", ".") for c in checkouts] + [(home, "~/", "~")]:
+        at_boundary = re.escape(str(path)) + r"(?![A-Za-z0-9_]|[.-][A-Za-z0-9_])(/)?"
         text = re.sub(at_boundary, lambda m: inside if m.group(1) else bare, text)
     return text
 
@@ -2010,7 +2012,8 @@ def cmd_report(args) -> int:
 
     def committed(text: str) -> str:
         """The report is committed, often to a public repository: nothing it copies names a local path."""
-        return strip_local_paths(text, main_worktree(), Path.home())
+        # this checkout first (a bare repository's worktree lies outside its main folder), then the main one
+        return strip_local_paths(text, list(dict.fromkeys((top.resolve(), main_worktree()))), Path.home())
 
     title = next((re.sub(r"^#{1,6}\s+", "", line).strip() for line in plan.splitlines() if line.strip()),
                  args.slug)
