@@ -90,18 +90,21 @@ Every decision is logged as it is made (`.keryx/runs/<slug>/decisions.tsv`), so 
 <your repository>/
 ├── .keryx/                     ignored by git (it carries its own .gitignore)
 │   ├── memory.md               this repository's traps
-│   └── runs/<slug>/            one folder per task
-│       ├── PLAN.md             decisions and locked tests
-│       ├── decisions.tsv       the run log
-│       ├── locked/  rounds/    locked test blocks, each executor round
-│       ├── review/             the reviewer's brief and findings
-│       └── qa/QA.md            QA steps, screenshots, responses
+│   ├── runs/<slug>/            one folder per task
+│   │   ├── PLAN.md             decisions and locked tests
+│   │   ├── decisions.tsv       the run log
+│   │   ├── locked/  rounds/    locked test blocks, each executor round
+│   │   ├── review/             the reviewer's brief and findings
+│   │   └── qa/QA.md            QA steps, screenshots, responses
+│   └── glm/<slug>/             a GLM executor's own Claude Code config
 ├── docs/keryx/
 │   └── <date>-<slug>.md        the run's report, committed with the change
 └── .worktrees/<runner>-<slug>  each executor's worktree
 ```
 
 Screenshots and executor logs never leave `.keryx/`, since they can show real data. `git clean -fdx` deletes `.keryx/`. A submodule keeps its own `.keryx/`; a bare repository keeps it in the repository's own folder, shared by its worktrees. Runs started with keryx 1.1 or earlier finish in `.git/cursor-loop/`.
+
+The executors that run another company's model read less of it: a GLM executor reads no run and not the memory (its own config lives in `.keryx/glm/`), and the Cursor CLI may not read QA evidence or reproductions. Both are permission rules, not a sandbox: GLM's rule also covers commands such as `cat`, but not a script that opens the file itself, and the Cursor CLI's documentation does not say whether its rule reaches shell commands. The bundled subagent is Claude, like the session that runs keryx, and reads what that session reads.
 
 ## What is in the repository
 

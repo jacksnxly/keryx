@@ -50,7 +50,9 @@ Stop and ask only for: an irreversible or destructive step; a security-sensitive
 
 ## 5. Run log
 
-M and L runs keep one log, written as you go, one row per decision: `python3 "$SKILL_DIR/scripts/keryx.py" log --slug <slug> <phase> <decision> <why> <evidence> <result>` — five quoted arguments; it prints the log's path (`.keryx/runs/<slug>/decisions.tsv`). The adapter adds its own rows. After a context reset, trust the log, `git log` and the executor's status over your memory. *(evidence: lost-context coordinators re-ran finished work)*
+M and L runs keep one log, written as you go, one row per decision: `python3 "$SKILL_DIR/scripts/keryx.py" log --slug <slug> <phase> <decision> <why> <evidence> <result>` — five quoted arguments; it prints the log's path (`.keryx/runs/<slug>/decisions.tsv`) and the row's number. The adapter adds its own rows. After a context reset, trust the log, `git log` and the executor's status over your memory. *(evidence: lost-context coordinators re-ran finished work)*
+
+Write each ruling as `Ruling: <what> — …`; one that overturns an earlier ruling says so, `Ruling (replaces row <N>): <what>`, and the report and `finish` then list only the standing one. Write each deferred point as `minor (deferred): <what>`: only a row whose label carries `(deferred` is listed as deferred. *(evidence: 1.2.0's report listed two overturned rulings and a review row that only mentioned "deferred")*
 
 `SKILL_DIR` is this file's folder. Run commands from inside the target repository.
 
@@ -60,4 +62,5 @@ M and L runs keep one log, written as you go, one row per decision: `python3 "$S
 - Start the session in the main checkout, or add it as a working directory (`/add-dir`): from a linked worktree, `.keryx/` lies outside the working directory and every write there prompts. *(fact)*
 - **`.keryx/memory.md`**: this repository's traps; `~/.config/keryx/memory.md` and `config.json`: the owner's choices and executors.
 - **`docs/keryx/<date>-<slug>.md`**: the run's report, committed with the change (`keryx.py report`). Screenshots, executor logs and the plan never leave `.keryx/`. *(owner)*
-- **`.worktrees/<runner>-<slug>`**: each executor's worktree, on branch `<runner>/<slug>`; its fetched head is `refs/keryx/<slug>`.
+- **`.worktrees/<runner>-<slug>`**: each executor's worktree, on branch `<runner>/<slug>`; its fetched head is `refs/keryx/<slug>`. A GLM executor's own Claude Code config is in `.keryx/glm/<slug>/`, outside the runs it may not read.
+- Name an L run's slices `<slug>-<name>`: the report and `finish` count their executor rounds with the run's.

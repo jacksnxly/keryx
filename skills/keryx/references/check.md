@@ -36,4 +36,4 @@ S work: one probe. M/L: one per behaviour the plan names. Log each probe and its
 
 ## When something fails
 
-A failure in review, QA or a probe goes back to the executor as a FIX round with the evidence verbatim (`execute.md`). Minor points that change nothing a user sees go to the log as deferred, never into a fix round. *(evidence)*
+A failure in review, QA or a probe goes back to the executor as a FIX round with the evidence verbatim (`execute.md`). Minor points that change nothing a user sees go to the log as `minor (deferred): <what>`, never into a fix round. *(evidence)*
