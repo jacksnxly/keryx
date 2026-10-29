@@ -140,10 +140,11 @@ GLM_DENY = [f"Bash({c} *)" for c in (
 )] + [f"Bash({c})" for c in ("kubectl", "ssh", "gh", "vercel", "env", "printenv")] + [
     "Read(~/.ssh/**)", "Read(~/.config/glm/**)", "Read(~/.kube/**)", "Read(~/.cursor/**)",
     "Read(~/Library/Application Support/com.vercel.cli/**)",
-    # A run's QA evidence and reproductions can show real people; an executor never reads those. The rest of
-    # .keryx/ stays readable to it: its own Claude Code config lives there, and it reads large tool outputs back.
-    "Read(**/.keryx/runs/*/qa/**)", "Read(//**/.keryx/runs/*/qa/**)",
-    "Read(**/.keryx/runs/*/repro/**)", "Read(//**/.keryx/runs/*/repro/**)",
+    # A third party's model reads no run (a run's QA evidence and reproductions can show real people) and not
+    # the repository's memory; its own config lives in .keryx/glm/<slug>/, beside the runs and still readable
+    # to the executor that reads its large tool outputs back from it.
+    "Read(**/.keryx/runs/**)", "Read(//**/.keryx/runs/**)",
+    "Read(**/.keryx/memory.md)", "Read(//**/.keryx/memory.md)",
     # Seen 2026-10-25: a GLM run printed the non-secret lines of a checkout's .env.local while debugging.
     "Read(**/.env)", "Read(**/.env.*)", "Read(//**/.env)", "Read(//**/.env.*)", "Edit(**/.env*)", "Edit(//**/.env*)",
     "Bash(cp *.env*)", "Bash(cat *.env*)", "Bash(grep *.env*)", "Bash(source *.env*)",
@@ -291,21 +292,38 @@ def ensure_ignored(folder: Path) -> None:
 def repo_relative(path: Path) -> str:
     """A path relative to the repository's main checkout (.keryx/runs/<slug>/… for a run, or
     .git/cursor-loop/<slug>/… for one started before 1.2): a folder outside the checkout is named
-    with ../ segments — never an absolute path, never an exception."""
-    return os.path.relpath(path, main_worktree())
+    with ../ segments — never an absolute path, never an exception. The path is resolved first, so a
+    checkout reached through a symlink is still named from the checkout itself."""
+    return os.path.relpath(Path(path).resolve(), main_worktree())
+
+
+LOCAL_PATH = "<!-- a local path was here -->"
+# Any other absolute path: segments with no spaces or brackets in them, not glued to a name, URL, option or
+# glob around it (those characters sit before the leading "/" or inside the segments' class).
+ANY_ABSOLUTE_PATH = re.compile(r"(?<![\w.~/:-])/[^\s/`'\"()\[\]{}<>|;,]+(?:/[^\s/`'\"()\[\]{}<>|;,]*)*")
 
 
 def strip_local_paths(text: str, checkouts: Path | list[Path], home: Path) -> str:
     """Text as a committed report may hold it: each checkout's path becomes repo-relative (its bare form
-    becomes "."), then the home directory becomes "~" — a report names no local path. Each is replaced
+    becomes "."), then the home directory becomes "~", and every other absolute path whose first segment is a
+    directory on this machine becomes a placeholder — a report names no local path. Each is replaced
     only where it ends at a path boundary: a "/", the end of the text, or anything but a character that
     continues a path name ("." and "-" continue one only when a name character follows, so a path that
     ends a sentence is still replaced and a sibling folder that shares its name is left as it is)."""
     checkouts = [checkouts] if isinstance(checkouts, Path) else checkouts
     for path, inside, bare in [(c, "", ".") for c in checkouts] + [(home, "~/", "~")]:
-        at_boundary = re.escape(str(path)) + r"(?![A-Za-z0-9_]|[.-][A-Za-z0-9_])(/)?"
+        at_boundary = re.escape(str(path)) + r"(?!\w|[.-]\w)(/)?"
         text = re.sub(at_boundary, lambda m: inside if m.group(1) else bare, text)
-    return text
+
+    def hide(match: re.Match) -> str:
+        path, kept = match.group(0), ""
+        while path[-1:] in ".:":  # a full stop or a colon can end the sentence, not the path
+            kept = path[-1] + kept
+            path = path[:-1]
+        first = path.lstrip("/").split("/", 1)[0]
+        return LOCAL_PATH + kept if first and os.path.isdir("/" + first) else match.group(0)
+
+    return ANY_ABSOLUTE_PATH.sub(hide, text)
 
 
 def load_agent(d: Path) -> dict:
@@ -339,6 +357,69 @@ def append_log(d: Path, phase: str, decision: str, why: str, evidence: str, resu
 
 def rounds(d: Path) -> list[Path]:
     return sorted(p for p in (d / "rounds").glob("[0-9][0-9]") if p.is_dir())
+
+
+# A later row may retire an earlier one: "Ruling (replaces row 3): …" stands in for row 3.
+REPLACES_ROW = re.compile(r"(?i)\breplaces row (\d+)\b")
+
+
+def read_log_rows(d: Path) -> list[tuple[int, list[str]]]:
+    """The run log's rows, each with its number: row N is the Nth line after the header. A malformed line
+    keeps its number for the rows after it but is not returned."""
+    log = d / "decisions.tsv"
+    if not log.exists():
+        return []
+    return [(n, c) for n, c in enumerate((line.split("\t") for line in log.read_text().splitlines()[1:]), 1)
+            if len(c) >= 6]
+
+
+def is_ruling(phase: str, decision: str) -> bool:
+    """A ruling row: the phase says so, or the decision starts with "Ruling"."""
+    return phase == "ruling" or decision.lower().startswith("ruling")
+
+
+def standing_rulings(rows: list[tuple[int, list[str]]]) -> list[tuple[int, list[str]]]:
+    """The rulings that still stand: no later row names one as the row it replaces."""
+    replaced = set()
+    for _, c in rows:
+        m = REPLACES_ROW.search(c[2])
+        if m:
+            replaced.add(int(m.group(1)))
+    return [(n, c) for n, c in rows if is_ruling(c[1], c[2]) and n not in replaced]
+
+
+def deferred_rows(rows: list[tuple[int, list[str]]]) -> list[tuple[int, list[str]]]:
+    """The rows marked deferred in their decision's label (the text before its first colon) — a row that only
+    mentions the word later in its sentence is not one."""
+    return [(n, c) for n, c in rows if "(deferred" in c[2].split(":", 1)[0].lower()]
+
+
+def run_folders(d: Path) -> list[Path]:
+    """The run's own folder and its slices': every folder named <slug>-<anything> beside it, in either layout,
+    whose log starts no earlier than this run's (an older run that shares the prefix is not this run's slice)."""
+    def started(folder: Path) -> str:
+        rows = read_log_rows(folder)
+        return rows[0][1][0] if rows else ""
+
+    own = started(d)
+    slices = []
+    roots = [state_root()]
+    try:
+        roots.append(legacy_root())
+    except LoopError:  # no repository here: only the state root can hold a slice
+        pass
+    for root in roots:
+        slices += [s for s in sorted(root.glob(f"{d.name}-*"))
+                   if s.is_dir() and len(s.name) > len(d.name) + 1 and started(s) >= own]
+    return [d] + sorted(slices, key=lambda s: s.name)
+
+
+def folder_rounds(folder: Path) -> tuple[int, int]:
+    """(rounds, FIX rounds) in one run folder."""
+    rs = rounds(folder)
+    fixes = sum(1 for r in rs if (r / "prompt.md").exists()
+                and any(line.startswith("Mode: FIX") for line in (r / "prompt.md").read_text().splitlines()))
+    return len(rs), fixes
 
 
 def current_round(d: Path) -> Path:
@@ -598,9 +679,18 @@ def glm_env(base: dict, config_dir: str) -> dict:
     return env
 
 
+def glm_config_dir(d: Path) -> Path:
+    """Where a GLM run's Claude Code config lives: beside the runs (.keryx/glm/<slug>/), so the deny rules can
+    cover every run while the config itself stays readable to the executor that reads its large tool outputs
+    back from it. A run started before 1.2 keeps its config inside its own folder."""
+    return state_root().parent / "glm" / d.name if d.parent == state_root() else d / "claude-config"
+
+
 def write_glm_config(d: Path) -> Path:
     """A config dir of its own (no user memory, skills, hooks, plugins or MCP servers), attribution off, denies."""
-    cfg_dir = d / "claude-config"
+    if d.parent == state_root():
+        ensure_ignored(state_root().parent)  # .keryx/ ignores itself from its first file on
+    cfg_dir = glm_config_dir(d)
     cfg_dir.mkdir(parents=True, exist_ok=True)
     settings = {"attribution": {"commit": "", "pr": "", "sessionUrl": False}, "autoMemoryEnabled": False,
                 "permissions": {"deny": GLM_DENY}}
@@ -916,12 +1006,16 @@ def strip_attribution(message: str) -> str:
 
 
 def write_cli_permissions(workspace: Path) -> None:
+    """The workspace's own CLI config: the always-denied commands, and the runs' QA evidence and reproductions
+    under the main checkout — they can show real people, and the CLI's deny takes absolute paths."""
     cfg = workspace / ".cursor" / "cli.json"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     data = json.loads(cfg.read_text()) if cfg.exists() else {}
     perms = data.setdefault("permissions", {})
     perms.setdefault("allow", [])
-    perms["deny"] = sorted(set(perms.get("deny", [])) | set(CLI_DENY))
+    runs = state_root()
+    perms["deny"] = sorted(set(perms.get("deny", [])) | set(CLI_DENY) | {
+        f"Read({runs}/*/qa/**)", f"Read({runs}/*/repro/**)"})
     cfg.write_text(json.dumps(data, indent=2) + "\n")
     ensure_excluded("/.cursor/cli.json")
 
@@ -1232,6 +1326,7 @@ def _preflight_glm() -> int:
     probe = runs / "_glm-preflight"
     ensure_ignored(runs.parent)  # the probe's config is written under .keryx/, which ignores itself first
     cfg = write_glm_config(probe)
+    probe.mkdir(parents=True, exist_ok=True)  # the probe run's working directory; its config lives beside the runs
     res = subprocess.run(["claude", "-p", "--output-format", "json", "--model", DEFAULT_GLM_MODEL, "--settings",
                           str(cfg / "settings.json"), "--strict-mcp-config", "--", "Reply with exactly the word OK."],
                          capture_output=True, text=True, env=glm_env(environ, str(cfg)), cwd=str(probe), timeout=300,
@@ -1383,12 +1478,30 @@ def _reuse_worktree(wt: Path, branch: str, start: str) -> None:
         git("worktree", "add", "-b", branch, str(wt), start)
 
 
+def keep_main_worktree_settings() -> None:
+    """Under extensions.worktreeConfig git applies core.bare and core.worktree from the shared config to every
+    worktree, so a bare repository's worktrees stop being work trees and a submodule's linked worktree reports
+    the submodule's git dir as its top level. Both settings belong to the main worktree alone: they move into
+    its config.worktree, as git's own worktree machinery does for a bare repository (git-worktree(1),
+    CONFIGURATION FILE). Idempotent, so a repository an older keryx left broken is repaired by the next round."""
+    shared = common_dir() / "config"
+    own = common_dir() / "config.worktree"
+    if git("config", "--type=bool", "--file", str(shared), "--get", "core.bare", check=False) == "true":
+        git("config", "--file", str(own), "core.bare", "true")
+        git("config", "--file", str(shared), "--unset", "core.bare")
+    worktree = git("config", "--file", str(shared), "--get", "core.worktree", check=False)
+    if worktree:
+        git("config", "--file", str(own), "core.worktree", worktree)
+        git("config", "--file", str(shared), "--unset", "core.worktree")
+
+
 def block_pushes(wt: Path) -> None:
     """A subagent's worktree cannot push: a per-worktree push URL for origin (even before that remote
     exists) and every configured remote, under extensions.worktreeConfig — never the main worktree's
     or the shared config."""
     if not git("config", "--get", "extensions.worktreeConfig", check=False):
         git("config", "extensions.worktreeConfig", "true")
+    keep_main_worktree_settings()
     for name in ["origin"] + [r for r in git("remote").split() if r != "origin"]:
         git("config", "--worktree", f"remote.{name}.pushurl", "https://push-disabled.invalid/keryx", cwd=wt)
 
@@ -1421,7 +1534,7 @@ def cmd_create(args) -> int:
         branch = f"{WORKTREE_PREFIX[args.runner]}/{args.slug}"
         if args.dry_run:
             shown = (f"keryx:executor with worktree {wt}" if sub
-                     else glm_command(model, "<prompt>", None, args.mode, str(d / "claude-config" / "settings.json")) if glm
+                     else glm_command(model, "<prompt>", None, args.mode, str(glm_config_dir(d) / "settings.json")) if glm
                      else cli_command(model, str(wt), "<prompt>", None, args.mode))
             print(json.dumps({"runner": args.runner, "worktree": str(wt), "branch": branch, "base": start,
                               "model": model, "command": shown}, indent=2))
@@ -1997,16 +2110,14 @@ def cmd_report(args) -> int:
     name = f"docs/keryx/{date}-{args.slug}.md"
     if (top / name).exists():
         raise LoopError(f"{name} already exists; the coordinator's prose is never overwritten")
-    rows = [c for c in (line.split("\t") for line in log.read_text().splitlines()[1:]) if len(c) >= 6]
-    left_out = 0
-    shown = []
-    for c in rows:
-        if any(looks_secret(c[i]) for i in (2, 3, 5)):
-            left_out += 1
-        else:
-            shown.append(c)
-    rulings = [c for c in shown if c[1] == "ruling" or c[2].lower().startswith("ruling")]
-    deferred = [c for c in shown if "deferred" in c[2].lower()]
+    def safe(c: list[str]) -> bool:
+        return not any(looks_secret(c[i]) for i in (2, 3, 5))
+
+    rows = read_log_rows(d)
+    left_out = sum(1 for _, c in rows if not safe(c))
+    keep = {n for n, c in rows if safe(c)}  # a credential-looking row is left out, numbered or not
+    rulings = [(n, c) for n, c in standing_rulings(rows) if n in keep]
+    deferred = deferred_rows([(n, c) for n, c in rows if n in keep])
     review = covering_review(parsed_reviews(d), final)
     plan = (d / "PLAN.md").read_text() if (d / "PLAN.md").exists() else ""
 
@@ -2021,25 +2132,41 @@ def cmd_report(args) -> int:
         title, left_out = args.slug, left_out + 1
     else:
         title = committed(title)
-    acceptance, inside = "", False
+    # The whole Acceptance check section, up to the next heading, with its edge blank lines gone.
+    check, inside = [], False
     for line in plan.splitlines():
         if line.startswith("## "):
+            if inside:
+                break
             inside = line.strip() == "## Acceptance check"
-        elif inside and line.strip():
-            acceptance = line.strip()
-            break
-    if looks_secret(acceptance):
-        acceptance, left_out = "", left_out + 1
+        elif inside:
+            check.append(line.strip())
+    while check and not check[0]:
+        check.pop(0)
+    while check and not check[-1]:
+        check.pop()
+    if any(looks_secret(line) for line in check):
+        check, left_out = [], left_out + 1
     if left_out:
         print("a row of the log was left out of the report: it looks like a credential", file=sys.stderr)
+    if len(check) == 1:
+        proof = f"- Acceptance check: {committed(check[0])}\n"
+    elif check:
+        proof = "- Acceptance check:\n" + "".join(f"  {committed(line)}\n" for line in check)
+    else:
+        proof = "- Acceptance check: <!-- the check, failing on the base and passing now -->\n"
     qa = d / "qa" / "QA.md"
     counts = review[1]["counts"] if review is not None else None
-    rs = rounds(d)
-    fixes = sum(1 for r in rs if (r / "prompt.md").exists()
-                and any(line.startswith("Mode: FIX") for line in (r / "prompt.md").read_text().splitlines()))
-    started = dt.datetime.strptime(rows[0][0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc) \
+    folders = run_folders(d)
+    counted = [folder_rounds(f) for f in folders]
+    total, fixes = sum(n for n, _ in counted), sum(k for _, k in counted)
+    parts = [(f.name, n) for f, (n, _) in zip(folders, counted) if n]
+    started = dt.datetime.strptime(rows[0][1][0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc) \
         if rows else dt.datetime.now(dt.timezone.utc)
     wall = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
+    run_line = f"- {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m wall clock, {total} executor rounds ({fixes} FIX)"
+    if len(folders) > 1:  # the slices' rounds are counted too, so each folder is named
+        run_line += ": " + ", ".join(f"{name} {n}" for name, n in parts)
     text = (
         f"# {title}\n"
         "\n"
@@ -2049,8 +2176,7 @@ def cmd_report(args) -> int:
         "<!-- For the person who uses it: what is different now, and where it lives (branch, commits, PR). -->\n"
         "\n"
         "## Proof\n"
-        + (f"- Acceptance check: {committed(acceptance)}\n" if acceptance
-           else "- Acceptance check: <!-- the check, failing on the base and passing now -->\n")
+        + proof
         + (f"- Fresh review: `{repo_relative(review[0])}`: "
            f"P0 {counts['P0']} · P1 {counts['P1']} · P2 {counts['P2']} · P3 {counts['P3']}\n"
            if review is not None else "- Fresh review: <!-- none yet -->\n")
@@ -2060,14 +2186,14 @@ def cmd_report(args) -> int:
         "\n"
         "## Open\n"
         "<!-- What was not verified, and why. -->\n"
-        + "".join(f"- Deferred: {committed(c[2])}\n" for c in deferred)
+        + "".join(f"- Deferred: {committed(c[2])}\n" for _, c in deferred)
         + "\n"
         "## Rulings\n"
-        + ("".join(f"- {committed(c[2])} — {committed(c[3])} — {committed(c[5])}\n" for c in rulings)
+        + ("".join(f"- {committed(c[2])} — {committed(c[3])} — {committed(c[5])}\n" for _, c in rulings)
            or "- none\n")
         + "\n"
         "## Run\n"
-        f"- {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m wall clock, {len(rs)} executor rounds ({fixes} FIX)\n"
+        f"{run_line}\n"
     )
     (top / name).parent.mkdir(parents=True, exist_ok=True)
     (top / name).write_text(text)
@@ -2083,11 +2209,11 @@ def cmd_finish(args) -> int:
     if not log.exists():
         raise LoopError(f"no run log at {log}")
     final = resolve_head(d, args.head)
-    rows = [c for c in (line.split("\t") for line in log.read_text().splitlines()[1:]) if len(c) >= 6]
-    finish_rows = [c for c in rows if c[1].split("-")[0] == "finish"
+    rows = read_log_rows(d)
+    finish_rows = [c for _, c in rows if c[1].split("-")[0] == "finish"
                    and not c[2].startswith(ADAPTER_FINISH_ROWS)]
-    rulings = [c for c in rows if c[1] == "ruling" or c[2].lower().startswith("ruling")]
-    deferred = [c for c in rows if "deferred" in c[2].lower()]
+    rulings = standing_rulings(rows)
+    deferred = deferred_rows(rows)
 
     def commits_behind(sha: str) -> int:
         return int(git("rev-list", "--count", f"{sha}..{final}"))
@@ -2142,10 +2268,10 @@ def cmd_finish(args) -> int:
         return (f"review    {path}  head {r['head'][:12]}, {where}  "
                 f"P0 {c['P0']} · P1 {c['P1']} · P2 {c['P2']} · P3 {c['P3']}")
 
-    started = dt.datetime.strptime(rows[0][0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    started = dt.datetime.strptime(rows[0][1][0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
     wall = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
     print(f"FINISHED  {args.slug}  head {final[:12]}")
-    print(f"wall      {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m since {rows[0][0]}")
+    print(f"wall      {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m since {rows[0][1][0]}")
     reviews = [str(review[0])]
     print(review_line(review[0], review[1]))
     if second is not None:
@@ -2155,15 +2281,18 @@ def cmd_finish(args) -> int:
         print(f"report    {report}")
     for c in finish_rows:
         print(f"shipped   {c[2]} — {c[5]}")
-    for c in rulings:
-        print(f"ruling    {c[2]} — {c[4]} — {c[5]}")
-    for c in deferred:
+    for _, c in rulings:
+        print(f"ruling    {c[2]} — {c[3]} — {c[5]}")
+    for _, c in deferred:
         print(f"deferred  {c[2]}")
-    rs = rounds(d)
-    if rs:
-        fixes = sum(1 for r in rs if (r / "prompt.md").exists()
-                    and any(line.startswith("Mode: FIX") for line in (r / "prompt.md").read_text().splitlines()))
-        print(f"rounds    {len(rs)} executor rounds, {fixes} of them FIX")
+    folders = run_folders(d)
+    counted = [folder_rounds(f) for f in folders]
+    total, fixes = sum(n for n, _ in counted), sum(k for _, k in counted)
+    if total:
+        line = f"rounds    {total} executor rounds, {fixes} of them FIX"
+        if len(folders) > 1:  # the slices' rounds are counted too, so each folder is named
+            line += " (" + ", ".join(f"{f.name} {n}" for f, (n, _) in zip(folders, counted) if n) + ")"
+        print(line)
     qa = d / "qa" / "QA.md"
     print(f"qa        {qa}" if qa.exists() else f"qa        none (no {qa})")
     finished = {"slug": args.slug, "finishedAt": now(), "head": final,
@@ -2310,8 +2439,16 @@ def cmd_log(args) -> int:
     runs = state_root()
     if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
         ensure_ignored(runs.parent)
+    rows = read_log_rows(d)
+    m = REPLACES_ROW.search(args.decision)
+    if m:
+        n = int(m.group(1))
+        named = next((c for i, c in rows if i == n), None)
+        if not (is_ruling(args.phase, args.decision) and named is not None and is_ruling(named[1], named[2])):
+            raise LoopError(f'"replaces row {n}" needs row {n} to exist and be a ruling, and the new row to be one')
     append_log(d, args.phase, args.decision, args.why, args.evidence, args.result)
-    print(d / "decisions.tsv")
+    lines = (d / "decisions.tsv").read_text().splitlines()
+    print(f"{d / 'decisions.tsv'}  row {len(lines) - 1}")  # the header is not a row
     return 0
 
 
