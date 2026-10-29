@@ -1467,7 +1467,8 @@ class OtherRepositoryShapes(unittest.TestCase):
             g("worktree", "add", "-q", str(t / "wt-a"), "main", cwd=t / "bare.git")
             g("worktree", "add", "-q", "-b", "b2", str(t / "wt-b"), cwd=t / "bare.git")
             for where, home in ((t / "sep", t / "sep"), (t / "sup" / "mod", t / "sup" / "mod"),
-                                (t / "mod-wt", t / "sup" / "mod"), (t / "wt-a", t), (t / "wt-b", t)):
+                                (t / "mod-wt", t / "sup" / "mod"), (t / "wt-a", t / "bare.git"),
+                                (t / "wt-b", t / "bare.git")):
                 code, out = _cli(where, ["log", "--slug", "sh", "intake", f"from {where.name}", "why", "ev", "ok"])
                 self.assertEqual(code, 0, where)
                 self.assertIn(f"from {where.name}", (home / ".keryx" / "runs" / "sh" / "decisions.tsv").read_text())
@@ -1554,3 +1555,83 @@ class FinishSaysWhichHeadItChecked(unittest.TestCase):
             line = next(x for x in out.splitlines() if x.startswith("missing  the run report"))
             self.assertIn(base[:12], line)
             self.assertIn("--head", line)
+
+
+class ReportForAnOldRunInASubmodule(unittest.TestCase):
+    """A run started before 1.2 in a submodule lives under the superproject's git dir, outside the checkout: its
+    report still gets written, with relative paths."""
+
+    def test_an_old_run_outside_the_checkout_still_gets_its_report(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+
+            def g(*a, cwd=t):
+                return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                                       "-c", "protocol.file.allow=always", *a],
+                                      cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+            g("init", "-q", "-b", "main", "sub")
+            g("commit", "-q", "--allow-empty", "-m", "b", cwd=t / "sub")
+            g("init", "-q", "-b", "main", "sup")
+            g("submodule", "-q", "add", str(t / "sub"), "mod", cwd=t / "sup")
+            mod = t / "sup" / "mod"
+            legacy = Path(g("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=mod)) / "cursor-loop" / "lg"
+            (legacy / "review").mkdir(parents=True)
+            (legacy / "decisions.tsv").write_text("ts\tphase\tdecision\twhy\tevidence\tresult\n"
+                                                  "2026-10-28T10:00:00Z\tintake\tsize M\tw\te\tM\n")
+            head = g("rev-parse", "HEAD", cwd=mod)
+            (legacy / "review" / f"{head[:12]}..{head[:12]}.findings.md").write_text(FinishGate.GOOD.format(head=head))
+            code, out = _cli(mod, ["report", "--slug", "lg"])
+            self.assertEqual(code, 0, out)
+            text = next((mod / "docs" / "keryx").glob("*-lg.md")).read_text()
+            self.assertIn("P1 1", text)
+            self.assertNotIn(str(t), text)
+
+
+class TwoBareRepositoriesSideBySide(unittest.TestCase):
+    """Bare repositories in one folder keep their runs and memory apart: each keeps .keryx/ in its own folder."""
+
+    def test_they_keep_separate_runs_and_memory(self):
+        import os
+        import subprocess
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+
+            def g(*a, cwd=t):
+                return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                                      cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+            g("init", "-q", "-b", "main", "src")
+            g("commit", "-q", "--allow-empty", "-m", "b", cwd=t / "src")
+            for name in ("alpha", "beta"):
+                g("clone", "-q", "--bare", str(t / "src"), f"{name}.git")
+                g("worktree", "add", "-q", str(t / f"{name}-wt"), "main", cwd=t / f"{name}.git")
+            with mock.patch.dict(os.environ, {"KERYX_CONFIG": str(t / "cfg" / "config.json")}):
+                self.assertEqual(_cli(t / "alpha-wt", ["remember", "--repo", "alpha keeps its fixtures in db/"])[0], 0)
+                self.assertNotIn("alpha keeps its fixtures", _cli(t / "beta-wt", ["recall"])[1])
+            for name in ("alpha", "beta"):
+                self.assertEqual(_cli(t / f"{name}-wt", ["log", "--slug", "fix-auth", "intake", f"from {name}", "w",
+                                                         "e", "ok"])[0], 0)
+            alpha = (t / "alpha.git" / ".keryx" / "runs" / "fix-auth" / "decisions.tsv").read_text()
+            beta = (t / "beta.git" / ".keryx" / "runs" / "fix-auth" / "decisions.tsv").read_text()
+            self.assertIn("from alpha", alpha)
+            self.assertNotIn("from beta", alpha)
+            self.assertIn("from beta", beta)
+
+
+class ReportLeavesSiblingFoldersAlone(unittest.TestCase):
+    """Stripping the checkout's path stops at a path boundary: a sibling folder that shares its name is not garbled."""
+
+    def test_a_sibling_folder_sharing_the_checkouts_name_is_not_garbled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            self.assertEqual(_cli(repo, ["log", "--slug", "sb", "ruling",
+                                         f"Ruling: keep {top}-other/calendar.py and {top}/app.py", "why", "ev",
+                                         "ok"])[0], 0)
+            self.assertEqual(_cli(repo, ["report", "--slug", "sb"])[0], 0)
+            text = next((top / "docs" / "keryx").glob("*-sb.md")).read_text()
+            self.assertIn(f"{top.name}-other/calendar.py and app.py", text)
+            self.assertNotIn(".-other", text)
