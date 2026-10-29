@@ -2304,3 +2304,12 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
             code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
             self.assertEqual(code, 1, out)
             self.assertIn("missing  the follow-up run hf is this hotfix run itself", out)
+
+    def test_a_follow_up_row_in_another_shape_is_no_follow_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
+            for decision in ("the root fix: move the check", "Hf-Root: move the check", "hf-root:", "hf-root move the check"):
+                self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", decision, "w", "e", "x"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 1, out)
+            self.assertIn("missing  the follow-up run: keryx.py log --slug hf followup", out)
