@@ -446,6 +446,17 @@ def followup_waived(rulings: list[tuple[int, list[str]]]) -> bool:
     return False
 
 
+_DROP_FOLLOWUP = re.compile(r"(?i)^ruling(?: \(replaces row \d+\))?:\s*drop follow-up ([a-z0-9][a-z0-9-]{0,60})(?![\w-])")
+
+
+def standing_followups(rows: list[tuple[int, list[str]]], rulings: list[tuple[int, list[str]]]) -> list[tuple[str, str]]:
+    """The follow-ups still asked for: every follow-up row, less those a standing ruling drops
+    (`Ruling: drop follow-up <slug> — <why>`, for a row logged by mistake). `finish` checks these, the report names
+    them, so the two never disagree."""
+    dropped = {m.group(1) for _, c in rulings for m in [_DROP_FOLLOWUP.match(c[2])] if m}
+    return [(slug, what) for slug, what in followup_rows(rows) if slug not in dropped]
+
+
 def run_folders(d: Path) -> list[Path]:
     """The run's own folder and its slices': every folder named <slug>-<name> beside it, in either layout, that
     the run itself names as a whole name (in its plan or in a cell of one of its rows) and whose log starts no
@@ -475,6 +486,9 @@ def _later_prefix_folders(d: Path) -> tuple[list[Path], list[Path]]:
     own = rows[0][1][0]
     # a hotfix's follow-ups are separate runs, never its slices; an ordinary run has no follow-ups to set aside
     follow_ups = {slug for slug, _ in followup_rows(rows)} if is_hotfix_run(rows) else set()
+
+    def a_follow_up(name: str) -> bool:  # the follow-up run, or one of its own slices
+        return any(name == f or name.startswith(f + "-") for f in follow_ups)
     named = (d / "PLAN.md").read_text() if (d / "PLAN.md").exists() else ""
     named += "\n" + "\n".join("\t".join(c) for _, c in rows)
     later = []
@@ -485,7 +499,7 @@ def _later_prefix_folders(d: Path) -> tuple[list[Path], list[Path]]:
         pass
     for root in roots:
         later += [s for s in sorted(root.glob(f"{d.name}-*"))
-                  if s.is_dir() and len(s.name) > len(d.name) + 1 and started(s) >= own and s.name not in follow_ups]
+                  if s.is_dir() and len(s.name) > len(d.name) + 1 and started(s) >= own and not a_follow_up(s.name)]
     is_named = [bool(re.search(rf"(?<![\w-]){re.escape(s.name)}(?![\w-])", named)) for s in later]
     return (sorted((s for s, n in zip(later, is_named) if n), key=lambda s: s.name),
             sorted((s for s, n in zip(later, is_named) if not n), key=lambda s: s.name))
@@ -2213,7 +2227,7 @@ def cmd_report(args) -> int:
     keep = {n for n, c in rows if safe(c)}  # a credential-looking row is left out, numbered or not
     rulings = [(n, c) for n, c in standing_rulings(rows) if n in keep]
     deferred = deferred_rows([(n, c) for n, c in rows if n in keep])
-    followups = followup_rows([(n, c) for n, c in rows if n in keep])
+    followups = standing_followups([(n, c) for n, c in rows if n in keep], standing_rulings(rows))
     review = covering_review(parsed_reviews(d), final)
     plan = (d / "PLAN.md").read_text() if (d / "PLAN.md").exists() else ""
 
@@ -2280,10 +2294,10 @@ def cmd_report(args) -> int:
                      + " started after this run, which never names it: if a slice, add its rounds to this line"
                      " and name it in the plan; if another run, delete this note -->")
     follow_up = ""  # a hotfix run reports the run that will do the lasting fix, until it is logged
-    if is_hotfix_run(rows):
+    if is_hotfix_run(rows) and not followup_waived(standing_rulings(rows)):  # a waived follow-up is in the rulings
         if followups:
             follow_up = "".join(f"- Follow-up: `{slug}`: {committed(what)}\n" for slug, what in followups)
-        elif not followup_waived(rulings):
+        else:
             follow_up = (f"- Follow-up: <!-- the follow-up run that does the lasting fix: keryx.py log "
                          f"--slug {args.slug} followup \"{args.slug}-root: <what>\" WHY EVIDENCE RESULT, "
                          "then log its intake -->\n")
@@ -2336,7 +2350,7 @@ def cmd_finish(args) -> int:
                    and not c[2].startswith(ADAPTER_FINISH_ROWS)]
     rulings = standing_rulings(rows)
     deferred = deferred_rows(rows)
-    followups = followup_rows(rows)
+    followups = standing_followups(rows, rulings)
     hotfix = is_hotfix_run(rows)
 
     def commits_behind(sha: str) -> int:
@@ -2378,7 +2392,7 @@ def cmd_finish(args) -> int:
         elif "<!--" in git("show", f"{final}:{report}"):
             problems.append(f"missing  the run report at head {final[:12]}: {report} still has <!-- --> "
                             "placeholders (pass --head <the shipped commit> when it ships from another branch)")
-    opened, ignored = [], []  # the follow-ups whose run was opened for this hotfix; rows naming none
+    opened = []  # the follow-ups whose run was opened for this hotfix
     if hotfix and not followup_waived(rulings):  # the fast lane pays for itself: the lasting fix runs as its own
         unmet = []                               # keryx run, or a standing ruling says why not
         for slug, what in followups:
@@ -2395,16 +2409,13 @@ def cmd_finish(args) -> int:
                              f"intake (keryx.py log --slug {slug} intake …)")
             else:
                 opened.append((slug, what))
-                continue
-            ignored.append((slug, what))
         if not followups:
             problems.append(f"missing  the follow-up run: keryx.py log --slug {args.slug} followup "
                             f"\"{args.slug}-root: <what the lasting fix does>\" WHY EVIDENCE RESULT, then that "
                             f"run's intake — or the waiver, when the hotfix is the lasting fix: keryx.py log "
                             f"--slug {args.slug} ruling \"Ruling: no follow-up — <why the hotfix is the lasting "
                             "fix>\" WHY EVIDENCE RESULT")
-        elif not opened:  # one opened follow-up is enough: a row with a typo is corrected by logging the right one
-            problems += unmet
+        problems += unmet  # every follow-up still asked for is opened; a row logged by mistake is dropped by a ruling
     if problems:
         print(f"NOT FINISHED  {args.slug}")
         for line in problems:
@@ -2438,8 +2449,6 @@ def cmd_finish(args) -> int:
         print(f"deferred  {c[2]}")
     for slug, what in opened:
         print(f"followup  {slug}: {what}")
-    for slug, what in ignored if opened else []:
-        print(f"followup  {slug}: {what} (no run opened for it; ignored)")
     folders = run_folders(d)
     counted = [folder_rounds(f) for f in folders]
     total, fixes = sum(n for n, _ in counted), sum(k for _, k in counted)

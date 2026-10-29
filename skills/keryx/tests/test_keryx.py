@@ -2351,15 +2351,21 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
             code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
             self.assertEqual(code, 0, out)
 
-    def test_one_opened_follow_up_is_enough_when_another_row_named_a_typo(self):
+    def test_a_follow_up_row_with_a_typo_is_dropped_by_a_ruling(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
             for decision in ("hf-roto: the lasting fix", "hf-root: the lasting fix"):
                 self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", decision, "w", "e", "x"])[0], 0)
             self.assertEqual(_cli(repo, ["log", "--slug", "hf-root", "intake", "size M: the lasting fix", "w", "e", "M"])[0], 0)
             code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 1, out)
+            self.assertIn("missing  the follow-up run hf-roto has no run log", out)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf", "ruling", "Ruling: drop follow-up hf-roto — a typo of hf-root",
+                                         "w", "e", "ruled"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
             self.assertEqual(code, 0, out)
             self.assertIn("followup  hf-root: the lasting fix", out)
+            self.assertNotIn("hf-roto: the lasting fix", out.split("ruling")[0])
 
     def test_the_follow_up_runs_executor_rounds_are_not_the_hotfixs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2411,12 +2417,41 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
             self.assertEqual(code, 0, out)
             self.assertIn("big-a 1", out)
 
-    def test_follow_up_rows_left_unopened_are_shown_as_ignored(self):
+    def test_every_real_follow_up_must_be_opened(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
-            for decision in ("hf-roto: the lasting fix", "hf-root: the lasting fix"):
+            for decision in ("hf-root: the lasting fix", "hf-backfill: repair the rows written while it was broken"):
                 self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", decision, "w", "e", "x"])[0], 0)
             self.assertEqual(_cli(repo, ["log", "--slug", "hf-root", "intake", "size M: the lasting fix", "w", "e", "M"])[0], 0)
             code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 1, out)
+            self.assertIn("missing  the follow-up run hf-backfill has no run log", out)
+
+    def test_the_report_lists_the_follow_ups_finish_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            for row in (["followup", "hf-roto: the lasting fix", "w", "e", "x"],
+                        ["ruling", "Ruling: drop follow-up hf-roto — a typo", "w", "e", "r"],
+                        ["ruling", "Ruling: no follow-up — the revert is the lasting fix", "w", "e", "r"]):
+                self.assertEqual(_cli(repo, ["log", "--slug", "hf", *row])[0], 0)
+            self.assertEqual(_cli(repo, ["report", "--slug", "hf", "--head", head])[0], 0)
+            draft = next((top / "docs" / "keryx").glob("*-hf.md")).read_text()
+            self.assertNotIn("- Follow-up:", draft)
+
+    def test_the_follow_up_runs_slices_are_not_the_hotfixs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", "hf-root: the lasting fix", "w", "e", "x"])[0], 0)
+            for slug in ("hf-root", "hf-root-a"):
+                self.assertEqual(_cli(repo, ["log", "--slug", slug, "intake", f"{slug}: work", "w", "e", "M"])[0], 0)
+            (state.parent / "hf-root-a" / "rounds" / "01").mkdir(parents=True)
+            (state.parent / "hf-root-a" / "rounds" / "01" / "prompt.md").write_text("Mode: IMPLEMENT\n")
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
             self.assertEqual(code, 0, out)
-            self.assertIn("followup  hf-roto: the lasting fix (no run opened for it; ignored)", out)
+            self.assertNotIn("hf-root-a", out)
+
+    def test_the_playbook_says_finish_needs_the_shipped_head(self):
+        playbook = (Path(__file__).resolve().parents[1] / "references" / "hotfix.md").read_text()
+        self.assertIn("keryx.py finish --slug <slug> --head", playbook)
+

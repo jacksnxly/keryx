@@ -43,6 +43,8 @@ A hotfix is finished only when the lasting fix has its own run. *(owner)*
   executors, probes, the full review.
 - When the hotfix already is the lasting fix (a clean revert of the change that broke it), log
   `Ruling: no follow-up — <why>` instead.
-- `keryx.py finish` refuses a hotfix run until one of the two is logged and the follow-up run has a log, and the
-  report names the follow-up. Note it in the repository's memory too (`keryx.py remember --repo`), so the next
+- `keryx.py finish --slug <slug> --head <the shipped commit>` refuses a hotfix run until every follow-up row names a
+  run opened for it (its own intake, logged after the hotfix began) or the waiver stands; the report names the same
+  follow-ups. A follow-up row logged by mistake (a typo, a plan dropped) is withdrawn with
+  `Ruling: drop follow-up <slug> — <why>`. Note it in the repository's memory too (`keryx.py remember --repo`), so the next
   session picks it up.
