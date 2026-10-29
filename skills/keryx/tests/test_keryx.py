@@ -1635,3 +1635,37 @@ class ReportLeavesSiblingFoldersAlone(unittest.TestCase):
             text = next((top / "docs" / "keryx").glob("*-sb.md")).read_text()
             self.assertIn(f"{top.name}-other/calendar.py and app.py", text)
             self.assertNotIn(".-other", text)
+
+
+class ReportPathsAtTheEndOfASentence(unittest.TestCase):
+    """A path that ends a sentence is still a path, and a bare repository's worktree is a checkout too: the report
+    names neither."""
+
+    def test_a_path_before_a_full_stop_is_stripped(self):
+        w, h = Path("/w/proj"), Path("/h")
+        self.assertEqual(cloud.strip_local_paths("run it from /w/proj.", w, h), "run it from ..")
+        self.assertEqual(cloud.strip_local_paths("see /w/proj/app.py.", w, h), "see app.py.")
+        self.assertEqual(cloud.strip_local_paths("notes in /h/notes.", w, h), "notes in ~/notes.")
+        self.assertEqual(cloud.strip_local_paths("/w/proj.v2 and /w/proj-other stay", w, h),
+                         "/w/proj.v2 and /w/proj-other stay")
+
+    def test_a_bare_repositorys_worktree_report_names_no_local_path(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+
+            def g(*a, cwd=t):
+                return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                                      cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+            g("init", "-q", "-b", "main", "src")
+            g("commit", "-q", "--allow-empty", "-m", "b", cwd=t / "src")
+            g("clone", "-q", "--bare", str(t / "src"), "alpha.git")
+            g("worktree", "add", "-q", str(t / "alpha-wt"), "main", cwd=t / "alpha.git")
+            wt = t / "alpha-wt"
+            self.assertEqual(_cli(wt, ["log", "--slug", "bw", "ruling", f"Ruling: keep {wt}/app.py as it is.", "why",
+                                       "ev", "ok"])[0], 0)
+            self.assertEqual(_cli(wt, ["report", "--slug", "bw"])[0], 0)
+            text = next((wt / "docs" / "keryx").glob("*-bw.md")).read_text()
+            self.assertNotIn(str(t), text)
+            self.assertIn("keep app.py as it is.", text)
