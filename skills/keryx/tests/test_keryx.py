@@ -1843,7 +1843,8 @@ class RunReportFromTheWholeRun(unittest.TestCase):
             for part in ("3 executor rounds (1 FIX)", "sl-a 2", "sl-b 1"):
                 self.assertIn(part, text)
             self.assertNotIn("sl-old", text)
-            self.assertNotIn("sl-later", text)
+            # since the second review an unnamed later run is not counted but named for the coordinator
+            self.assertIn("<!-- sl-later (4 rounds) started after this run", text)
             self._reviewed(repo, base, head, "sl", runs / "sl")
             code, out = _cli(repo, ["finish", "--slug", "sl", "--head", head, "--findings-only"])
             self.assertEqual(code, 0, out)
@@ -2028,8 +2029,7 @@ class RunReportDraftDetails(unittest.TestCase):
                 (runs / name / "rounds" / "01").mkdir(parents=True)
                 (runs / name / "rounds" / "01" / "prompt.md").write_text("Mode: IMPLEMENT\n")
             text = RunReportFromTheWholeRun._draft(repo, run, "nm")
-            self.assertIn("1 executor rounds (0 FIX): nm-a 1", text)
-            self.assertNotIn("nm-other", text)
+            self.assertIn("1 executor rounds (0 FIX): nm-a 1 <!-- nm-other (1 rounds) started after this run", text)
 
     def test_the_second_finders_counts_are_shown(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2096,3 +2096,41 @@ class RunLineOfARunWithoutSlices(unittest.TestCase):
             code, out = _cli(repo, ["finish", "--slug", "solo", "--head", head, "--findings-only"])
             self.assertEqual(code, 0, out)
             self.assertIn("rounds    2 executor rounds, 1 of them FIX\n", out)
+
+
+class UnnamedLaterRunsAndSystemFolders(unittest.TestCase):
+    """Found by the second review. A later <slug>-<name> run with rounds that the run never names was dropped from
+    the count without a word (re-drafting 1.2.0's report gave 4 rounds instead of 7, as its plan said "slice A");
+    now the draft names it in a placeholder the coordinator settles. And the system folders kept in a report were
+    whole trees, /System/Volumes/Data (the user's data volume), /usr/home and /Library among them; now only
+    system subtrees stay."""
+
+    def test_an_unnamed_later_run_with_rounds_is_named_for_the_coordinator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            runs = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs"
+            self.assertEqual(_cli(repo, ["log", "--slug", "un", "plan", "slice A to GLM", "why", "ev", "ok"])[0], 0)
+            self.assertEqual(_cli(repo, ["log", "--slug", "un-a", "dispatch", "x", "w", "e", "ok"])[0], 0)
+            for i in (1, 2):
+                (runs / "un-a" / "rounds" / f"{i:02d}").mkdir(parents=True)
+                (runs / "un-a" / "rounds" / f"{i:02d}" / "prompt.md").write_text("Mode: IMPLEMENT\n")
+            text = RunReportFromTheWholeRun._draft(repo, run, "un")
+            run_line = next(line for line in text.splitlines() if "wall clock" in line)
+            self.assertIn("0 executor rounds (0 FIX)", run_line)
+            self.assertIn("<!--", run_line)
+            self.assertIn("un-a (2 rounds)", run_line)
+            RunReportFromTheWholeRun._reviewed(repo, base, head, "un", runs / "un")
+            code, out = _cli(repo, ["finish", "--slug", "un", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("unnamed   un-a: 2 executor rounds", out)
+
+    def test_only_system_subtrees_stay_in_a_report(self):
+        w, h = Path("/no-such-root-w/proj"), Path("/no-such-root-h")
+        hidden = cloud.LOCAL_PATH
+        for kept in ("2>/dev/null", "/usr/bin/env python3", "/usr/share/zoneinfo/UTC", "/System/Library/Frameworks"):
+            self.assertEqual(cloud.strip_local_paths(kept, w, h), kept)
+        for local in ("/usr/home/alice/proj/x.py", "/usr/local/src/client/x", "/etc/nginx/client.conf",
+                      "/System/Volumes/Data/Users/other/client-x", "/Library/WebServer/Documents/clientsite"):
+            root = "/" + local.split("/")[1]
+            if Path(root).is_dir():  # a folder this machine has: its paths are local ones
+                self.assertEqual(cloud.strip_local_paths(local, w, h), hidden, local)
