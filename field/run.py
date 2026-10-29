@@ -114,6 +114,9 @@ def _main_and_common(repo: Path) -> tuple[Path, Path]:
     if common_path.name == ".git":
         return common_path.parent, common_path
     worktree = _git(common_path, "config", "--file", str(common_path / "config"), "core.worktree")
+    if not worktree:
+        # extensions.worktreeConfig keeps it in the main worktree's own file, where the adapter moves it
+        worktree = _git(common_path, "config", "--file", str(common_path / "config.worktree"), "core.worktree")
     if worktree:
         return (common_path / worktree).resolve(), common_path
     return common_path, common_path

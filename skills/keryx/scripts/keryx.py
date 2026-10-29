@@ -85,6 +85,7 @@ import re
 import signal
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.request
@@ -236,7 +237,8 @@ def main_worktree() -> Path:
     """The repository's main checkout, where .keryx/ lives, in every layout: this checkout when its git
     dir is the common dir (the main checkout itself, a separate git dir, a submodule), the folder above
     a .git common dir (a linked worktree), the checkout the common dir's config names (a submodule's
-    worktree: core.worktree), else the bare repository's own folder, which its worktrees share — and
+    worktree: core.worktree, in the shared config or, once the settings move, the main worktree's own
+    config.worktree), else the bare repository's own folder, which its worktrees share — and
     which no other bare repository in the same folder shares with it. Paths are compared resolved,
     because git prints each one as it found it."""
     common = common_dir().resolve()
@@ -248,6 +250,8 @@ def main_worktree() -> Path:
     if common.name == ".git":
         return common.parent.resolve()
     worktree = git("config", "--file", str(common / "config"), "--get", "core.worktree", check=False)
+    if not worktree:  # extensions.worktreeConfig moved it into the main worktree's own file (keryx does too)
+        worktree = git("config", "--file", str(common / "config.worktree"), "--get", "core.worktree", check=False)
     if worktree:
         named = Path(worktree)
         return (common / named).resolve() if not named.is_absolute() else named.resolve()
@@ -298,9 +302,15 @@ def repo_relative(path: Path) -> str:
 
 
 LOCAL_PATH = "<!-- a local path was here -->"
-# Any other absolute path: segments with no spaces or brackets in them, not glued to a name, URL, option or
-# glob around it (those characters sit before the leading "/" or inside the segments' class).
-ANY_ABSOLUTE_PATH = re.compile(r"(?<![\w.~/:-])/[^\s/`'\"()\[\]{}<>|;,]+(?:/[^\s/`'\"()\[\]{}<>|;,]*)*")
+# Any other absolute path: segments with no spaces, brackets or colons in them (a compiler's "file.py:3" ends
+# before the colon, and each PATH entry is its own match), and a leading "/" that starts a path of its own —
+# after a space, "=", ">", ":" or a flag ("-I/tmp"), or the "//" of a file:// URL — not one glued into a word
+# or a URL's host ("example.com/tmp"), which is why the lookbehind stops a match only after two word characters.
+ANY_ABSOLUTE_PATH = re.compile(r"(?<!\w\w)(?<![.~])/[^\s/`'\"()\[\]{}<>|;,:]+(?:/[^\s/`'\"()\[\]{}<>|;,:]+)*")
+# Roots that name the machine's system, not a person's files: "2>/dev/null" and "/usr/bin/env" say nothing
+# private, so a path under them stays as it is.
+SYSTEM_ROOTS = ("dev", "usr", "bin", "sbin", "etc", "lib", "lib64", "proc", "sys", "System", "Library",
+                "Applications")
 
 
 def strip_local_paths(text: str, checkouts: Path | list[Path], home: Path) -> str:
@@ -317,11 +327,12 @@ def strip_local_paths(text: str, checkouts: Path | list[Path], home: Path) -> st
 
     def hide(match: re.Match) -> str:
         path, kept = match.group(0), ""
-        while path[-1:] in ".:":  # a full stop or a colon can end the sentence, not the path
+        while path[-1:] == ".":  # a full stop can end the sentence, not the path
             kept = path[-1] + kept
             path = path[:-1]
         first = path.lstrip("/").split("/", 1)[0]
-        return LOCAL_PATH + kept if first and os.path.isdir("/" + first) else match.group(0)
+        real = first and first not in SYSTEM_ROOTS and os.path.isdir("/" + first)
+        return LOCAL_PATH + kept if real else match.group(0)
 
     return ANY_ABSOLUTE_PATH.sub(hide, text)
 
@@ -395,13 +406,21 @@ def deferred_rows(rows: list[tuple[int, list[str]]]) -> list[tuple[int, list[str
 
 
 def run_folders(d: Path) -> list[Path]:
-    """The run's own folder and its slices': every folder named <slug>-<anything> beside it, in either layout,
-    whose log starts no earlier than this run's (an older run that shares the prefix is not this run's slice)."""
-    def started(folder: Path) -> str:
-        rows = read_log_rows(folder)
-        return rows[0][1][0] if rows else ""
+    """The run's own folder and its slices': every folder named <slug>-<name> beside it, in either layout, that
+    the run itself names as a whole name (in its plan or in a cell of one of its rows) and whose log starts no
+    earlier than this run's — a later, separate run that merely shares the prefix is not a slice. A run with
+    no rows of its own counts no slices."""
+    rows = read_log_rows(d)
+    if not rows:
+        return [d]
 
-    own = started(d)
+    def started(folder: Path) -> str:
+        first = read_log_rows(folder)
+        return first[0][1][0] if first else ""
+
+    own = rows[0][1][0]
+    named = (d / "PLAN.md").read_text() if (d / "PLAN.md").exists() else ""
+    named += "\n" + "\n".join("\t".join(c) for _, c in rows)
     slices = []
     roots = [state_root()]
     try:
@@ -410,7 +429,8 @@ def run_folders(d: Path) -> list[Path]:
         pass
     for root in roots:
         slices += [s for s in sorted(root.glob(f"{d.name}-*"))
-                   if s.is_dir() and len(s.name) > len(d.name) + 1 and started(s) >= own]
+                   if s.is_dir() and len(s.name) > len(d.name) + 1 and started(s) >= own
+                   and re.search(rf"(?<![\w-]){re.escape(s.name)}(?![\w-])", named)]
     return [d] + sorted(slices, key=lambda s: s.name)
 
 
@@ -682,14 +702,17 @@ def glm_env(base: dict, config_dir: str) -> dict:
 def glm_config_dir(d: Path) -> Path:
     """Where a GLM run's Claude Code config lives: beside the runs (.keryx/glm/<slug>/), so the deny rules can
     cover every run while the config itself stays readable to the executor that reads its large tool outputs
-    back from it. A run started before 1.2 keeps its config inside its own folder."""
-    return state_root().parent / "glm" / d.name if d.parent == state_root() else d / "claude-config"
+    back from it — told from the run's folder alone, with no repository around the current directory. A run
+    started before 1.2 keeps its config inside its own folder."""
+    if d.parent.name == "runs" and d.parent.parent.name == ".keryx":
+        return d.parent.parent / "glm" / d.name
+    return d / "claude-config"
 
 
 def write_glm_config(d: Path) -> Path:
     """A config dir of its own (no user memory, skills, hooks, plugins or MCP servers), attribution off, denies."""
-    if d.parent == state_root():
-        ensure_ignored(state_root().parent)  # .keryx/ ignores itself from its first file on
+    if d.parent.name == "runs" and d.parent.parent.name == ".keryx":
+        ensure_ignored(d.parent.parent)  # .keryx/ ignores itself from its first file on
     cfg_dir = glm_config_dir(d)
     cfg_dir.mkdir(parents=True, exist_ok=True)
     settings = {"attribution": {"commit": "", "pr": "", "sessionUrl": False}, "autoMemoryEnabled": False,
@@ -1007,7 +1030,8 @@ def strip_attribution(message: str) -> str:
 
 def write_cli_permissions(workspace: Path) -> None:
     """The workspace's own CLI config: the always-denied commands, and the runs' QA evidence and reproductions
-    under the main checkout — they can show real people, and the CLI's deny takes absolute paths."""
+    and the repository's memory under the main checkout — they can show real people, and the CLI's deny takes
+    absolute paths."""
     cfg = workspace / ".cursor" / "cli.json"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     data = json.loads(cfg.read_text()) if cfg.exists() else {}
@@ -1015,7 +1039,7 @@ def write_cli_permissions(workspace: Path) -> None:
     perms.setdefault("allow", [])
     runs = state_root()
     perms["deny"] = sorted(set(perms.get("deny", [])) | set(CLI_DENY) | {
-        f"Read({runs}/*/qa/**)", f"Read({runs}/*/repro/**)"})
+        f"Read({runs}/*/qa/**)", f"Read({runs}/*/repro/**)", f"Read({runs.parent}/memory.md)"})
     cfg.write_text(json.dumps(data, indent=2) + "\n")
     ensure_excluded("/.cursor/cli.json")
 
@@ -2132,7 +2156,8 @@ def cmd_report(args) -> int:
         title, left_out = args.slug, left_out + 1
     else:
         title = committed(title)
-    # The whole Acceptance check section, up to the next heading, with its edge blank lines gone.
+    # The whole Acceptance check section, up to the next heading, with its edge blank lines gone and its
+    # indentation kept (nested bullets and indented code come out as they went in, one common indent less).
     check, inside = [], False
     for line in plan.splitlines():
         if line.startswith("## "):
@@ -2140,11 +2165,12 @@ def cmd_report(args) -> int:
                 break
             inside = line.strip() == "## Acceptance check"
         elif inside:
-            check.append(line.strip())
+            check.append(line.rstrip())
     while check and not check[0]:
         check.pop(0)
     while check and not check[-1]:
         check.pop()
+    check = textwrap.dedent("\n".join(check)).splitlines()
     if any(looks_secret(line) for line in check):
         check, left_out = [], left_out + 1
     if left_out:
@@ -2152,11 +2178,19 @@ def cmd_report(args) -> int:
     if len(check) == 1:
         proof = f"- Acceptance check: {committed(check[0])}\n"
     elif check:
-        proof = "- Acceptance check:\n" + "".join(f"  {committed(line)}\n" for line in check)
+        proof = "- Acceptance check:\n" + "".join(f"  {committed(line)}\n" if line else "\n" for line in check)
     else:
         proof = "- Acceptance check: <!-- the check, failing on the base and passing now -->\n"
     qa = d / "qa" / "QA.md"
     counts = review[1]["counts"] if review is not None else None
+    second_finder = ""
+    if review is not None:
+        stem = review[0].name.removesuffix(".findings.md")
+        second = review[0].with_name(f"{stem}.security.findings.md")
+        if review[0].with_name(f"{stem}.security.brief.md").exists() and second.exists():
+            c2 = review_findings(second.read_text())["counts"]
+            second_finder = (f"- Second finder: `{repo_relative(second)}`: "
+                             f"P0 {c2['P0']} · P1 {c2['P1']} · P2 {c2['P2']} · P3 {c2['P3']}\n")
     folders = run_folders(d)
     counted = [folder_rounds(f) for f in folders]
     total, fixes = sum(n for n, _ in counted), sum(k for _, k in counted)
@@ -2165,7 +2199,7 @@ def cmd_report(args) -> int:
         if rows else dt.datetime.now(dt.timezone.utc)
     wall = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
     run_line = f"- {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m wall clock, {total} executor rounds ({fixes} FIX)"
-    if len(folders) > 1:  # the slices' rounds are counted too, so each folder is named
+    if parts:  # the slices' rounds are counted too, so each folder is named
         run_line += ": " + ", ".join(f"{name} {n}" for name, n in parts)
     text = (
         f"# {title}\n"
@@ -2180,6 +2214,7 @@ def cmd_report(args) -> int:
         + (f"- Fresh review: `{repo_relative(review[0])}`: "
            f"P0 {counts['P0']} · P1 {counts['P1']} · P2 {counts['P2']} · P3 {counts['P3']}\n"
            if review is not None else "- Fresh review: <!-- none yet -->\n")
+        + second_finder
         + (f"- QA: `{repo_relative(qa)}` (kept where the run ran, not committed)\n" if qa.exists()
            else "- QA: <!-- what QA covered -->\n")
         + "<!-- Anything else that proves it: mutation probes, CI runs. -->\n"
@@ -2288,10 +2323,11 @@ def cmd_finish(args) -> int:
     folders = run_folders(d)
     counted = [folder_rounds(f) for f in folders]
     total, fixes = sum(n for n, _ in counted), sum(k for _, k in counted)
+    parts = [(f.name, n) for f, (n, _) in zip(folders, counted) if n]
     if total:
         line = f"rounds    {total} executor rounds, {fixes} of them FIX"
-        if len(folders) > 1:  # the slices' rounds are counted too, so each folder is named
-            line += " (" + ", ".join(f"{f.name} {n}" for f, (n, _) in zip(folders, counted) if n) + ")"
+        if parts:  # the slices' rounds are counted too, so each folder is named
+            line += " (" + ", ".join(f"{name} {n}" for name, n in parts) + ")"
         print(line)
     qa = d / "qa" / "QA.md"
     print(f"qa        {qa}" if qa.exists() else f"qa        none (no {qa})")
@@ -2446,6 +2482,10 @@ def cmd_log(args) -> int:
         named = next((c for i, c in rows if i == n), None)
         if not (is_ruling(args.phase, args.decision) and named is not None and is_ruling(named[1], named[2])):
             raise LoopError(f'"replaces row {n}" needs row {n} to exist and be a ruling, and the new row to be one')
+        for i, c in rows:  # a row already replaced once stays replaced: the new ruling takes the replacer's number
+            r = REPLACES_ROW.search(c[2])
+            if r and int(r.group(1)) == n:
+                raise LoopError(f"row {n} was already replaced by row {i}; replace row {i} instead")
     append_log(d, args.phase, args.decision, args.why, args.evidence, args.result)
     lines = (d / "decisions.tsv").read_text().splitlines()
     print(f"{d / 'decisions.tsv'}  row {len(lines) - 1}")  # the header is not a row
