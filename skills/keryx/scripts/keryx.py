@@ -2199,7 +2199,7 @@ def cmd_report(args) -> int:
         if rows else dt.datetime.now(dt.timezone.utc)
     wall = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
     run_line = f"- {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m wall clock, {total} executor rounds ({fixes} FIX)"
-    if parts:  # the slices' rounds are counted too, so each folder is named
+    if len(folders) > 1 and parts:  # the slices' rounds are counted too, so each folder is named
         run_line += ": " + ", ".join(f"{name} {n}" for name, n in parts)
     text = (
         f"# {title}\n"
@@ -2326,7 +2326,7 @@ def cmd_finish(args) -> int:
     parts = [(f.name, n) for f, (n, _) in zip(folders, counted) if n]
     if total:
         line = f"rounds    {total} executor rounds, {fixes} of them FIX"
-        if parts:  # the slices' rounds are counted too, so each folder is named
+        if len(folders) > 1 and parts:  # the slices' rounds are counted too, so each folder is named
             line += " (" + ", ".join(f"{name} {n}" for name, n in parts) + ")"
         print(line)
     qa = d / "qa" / "QA.md"
