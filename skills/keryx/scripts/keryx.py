@@ -284,9 +284,10 @@ def slug_dir(slug: str, *, must_exist: bool = True) -> Path:
 
 
 def ensure_ignored(folder: Path) -> None:
-    """Before anything is written into `folder` (the .keryx folder the run root sits in), its .gitignore
-    exists with exactly `*` (created if missing, never overwritten), so git status never shows a run's
-    files. The folder itself is passed in, so this needs no repository around the current directory."""
+    """Before anything is written into `folder` (the .keryx folder the run root sits in, or .worktrees), its
+    .gitignore exists with exactly `*` (created if missing, never overwritten), so git status never shows a
+    run's files or an executor's worktree. The folder itself is passed in, so this needs no repository around
+    the current directory."""
     ignore = folder / ".gitignore"
     if not ignore.exists():
         folder.mkdir(parents=True, exist_ok=True)
@@ -1585,6 +1586,7 @@ def cmd_create(args) -> int:
         extra_env = parse_env(args.env)
         if glm:
             glm_env(dict(os.environ), "")  # no key, or a wrong endpoint: fail before a worktree exists
+        ensure_ignored(wt.parent)  # .worktrees/ ignores itself before a worktree lands in it, as .keryx/ does
         if switch:
             _reuse_worktree(wt, branch, start)
         else:
