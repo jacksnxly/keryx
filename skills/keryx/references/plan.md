@@ -27,7 +27,7 @@ Save it as `<state>/PLAN.md` (`.keryx/runs/<slug>/PLAN.md`, never committed). Th
 - `<command>` → <what passing output looks like>   (run on the base: <result>)
 
 ## Slices (L only)
-- <slice>: owns <files> in <context>; depends on <slice or none>
+- <slug>-<name>: owns <files> in <context>; depends on <slice or none>
 
 ## Review focus
 - The inputs most likely to break this that no test covers yet.

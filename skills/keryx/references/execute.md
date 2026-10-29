@@ -7,8 +7,8 @@ keryx works with Claude Code alone. Which executors a person has, and in which o
 | Executor | Name | How |
 |---|---|---|
 | A Claude subagent | `subagent` | `keryx.py create --runner subagent` makes its worktree (`.worktrees/sub-<slug>`, branch `sub/<slug>`) and loop state and starts nothing; you dispatch the plugin's `keryx:executor` agent (Sonnet) through the Agent tool in the background with that worktree path in its brief. Its completion notice is its report; `keryx.py mark --slug S --status FINISHED|ERROR` closes the round. It runs with your session's environment and permission mode and reads what your session reads, `.keryx/` included (a plugin agent cannot carry its own deny rules), without MCP tools, and its worktree cannot push; put `cli` or `glm` first for work that must not see your credentials. Always available. |
-| Cursor CLI | `cli` | `keryx.py create --runner cli`: `.worktrees/cursor-<slug>`, branch `cursor/<slug>`; commits stay local. It may not read the runs' QA evidence or reproductions. |
-| GLM Coding Plan | `glm` | `keryx.py create --runner glm`: headless Claude Code on a GLM Coding Plan, `.worktrees/glm-<slug>`, branch `glm/<slug>`. The model is a third party's: it sees the repository, never credentials (secret variables stripped, `.env` files and key folders denied, no MCP servers), and no run or memory in `.keryx/` (its own config is `.keryx/glm/<slug>/`). |
+| Cursor CLI | `cli` | `keryx.py create --runner cli`: `.worktrees/cursor-<slug>`, branch `cursor/<slug>`; commits stay local. Its permission rules refuse it the runs' QA evidence and reproductions and the memory. |
+| GLM Coding Plan | `glm` | `keryx.py create --runner glm`: headless Claude Code on a GLM Coding Plan, `.worktrees/glm-<slug>`, branch `glm/<slug>`. The model is a third party's: it sees the repository, never credentials (secret variables stripped, `.env` files and key folders denied, no MCP servers); its permission rules refuse it every run and the memory in `.keryx/` (its own config is `.keryx/glm/<slug>/`). Permission rules cover its file tools and commands such as `cat`, not a script that opens a file itself. |
 | Cursor Cloud Agent | `cloud` | `keryx.py create --runner cloud`: on Cursor's machines; the repository must be on GitHub. |
 | You, inline | `inline` | S work, M work that is mostly judgement, and the rung after the last executor. |
 
@@ -84,4 +84,4 @@ Before a third attempt on one problem, write down the premise the failed attempt
 
 ## Parallel slices (L)
 
-Up to 3 at once, each named `<slug>-<name>` so the report counts its rounds, never two on the same file, spread across the configured executors when there are several. Merge each finished slice into your integration branch before the next depends on it. *(owner)*
+Up to 3 at once, each named `<slug>-<name>` and listed in the plan's Slices so the report counts its rounds, never two on the same file, spread across the configured executors when there are several. Merge each finished slice into your integration branch before the next depends on it. *(owner)*
