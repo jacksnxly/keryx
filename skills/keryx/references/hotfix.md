@@ -25,7 +25,8 @@ The session's own model does the work: no plan file, no executor round. *(owner;
    before any new code, that is the hotfix. *(borrowed)*
 4. **Otherwise the smallest change**, with a regression test that fails first and passes after, and the tests of the
    area it touches. *(owner)*
-5. **One fast fresh review**: `keryx.py review-brief --slug <slug> --hotfix` (add `--risk` for auth, money or
+5. **One fast fresh review**: `keryx.py review-brief --slug <slug> --hotfix --base <the commit before the fix>
+   --head <the fix>` — a hotfix has no executor run, so both commits are named (add `--risk` for auth, money or
    privacy). The reviewer reads the diff only and reports P0 and P1; dispatch it before CI starts, so it adds no wait.
    A P0 or P1 is fixed before the change ships. *(owner)*
 6. **Ship within the autonomy**, with a written rollback, and check production afterwards: the harm you saw is gone.

@@ -473,6 +473,7 @@ def _later_prefix_folders(d: Path) -> tuple[list[Path], list[Path]]:
         return first[0][1][0] if first else ""
 
     own = rows[0][1][0]
+    follow_ups = {slug for slug, _ in followup_rows(rows)}  # separate runs, never slices of this one
     named = (d / "PLAN.md").read_text() if (d / "PLAN.md").exists() else ""
     named += "\n" + "\n".join("\t".join(c) for _, c in rows)
     later = []
@@ -483,7 +484,7 @@ def _later_prefix_folders(d: Path) -> tuple[list[Path], list[Path]]:
         pass
     for root in roots:
         later += [s for s in sorted(root.glob(f"{d.name}-*"))
-                  if s.is_dir() and len(s.name) > len(d.name) + 1 and started(s) >= own]
+                  if s.is_dir() and len(s.name) > len(d.name) + 1 and started(s) >= own and s.name not in follow_ups]
     is_named = [bool(re.search(rf"(?<![\w-]){re.escape(s.name)}(?![\w-])", named)) for s in later]
     return (sorted((s for s, n in zip(later, is_named) if n), key=lambda s: s.name),
             sorted((s for s, n in zip(later, is_named) if not n), key=lambda s: s.name))
@@ -2376,25 +2377,31 @@ def cmd_finish(args) -> int:
         elif "<!--" in git("show", f"{final}:{report}"):
             problems.append(f"missing  the run report at head {final[:12]}: {report} still has <!-- --> "
                             "placeholders (pass --head <the shipped commit> when it ships from another branch)")
-    if hotfix:  # the fast lane pays for itself: the lasting fix runs as its own keryx run, or a ruling says why not
-        for slug, _ in followups:
+    opened = []  # the follow-ups whose run was opened for this hotfix
+    if hotfix and not followup_waived(rulings):  # the fast lane pays for itself: the lasting fix runs as its own
+        unmet = []                               # keryx run, or a standing ruling says why not
+        for slug, what in followups:
             if slug == args.slug:  # the lasting fix needs a run of its own, or the gate would wave itself through
-                problems.append(f"missing  the follow-up run {slug} is this hotfix run itself: name the run that "
-                                f"does the lasting fix (keryx.py log --slug {args.slug} followup \"{args.slug}-root: …\")")
+                unmet.append(f"missing  the follow-up run {slug} is this hotfix run itself: name the run that "
+                             f"does the lasting fix (keryx.py log --slug {args.slug} followup \"{args.slug}-root: …\")")
             elif not (slug_dir(slug, must_exist=False) / "decisions.tsv").exists():
-                problems.append(f"missing  the follow-up run {slug} has no run log: log its intake "
-                                f"(keryx.py log --slug {slug} intake …)")
+                unmet.append(f"missing  the follow-up run {slug} has no run log: log its intake "
+                             f"(keryx.py log --slug {slug} intake …)")
             elif not any(c[1] == "intake" and c[0] >= hotfix_started(rows)
                          for _, c in read_log_rows(slug_dir(slug, must_exist=False))):
                 # a run opened before the hotfix, or one with only a note, is not the lasting fix's run
-                problems.append(f"missing  the follow-up run {slug} has no intake since this hotfix began: log its "
-                                f"intake (keryx.py log --slug {slug} intake …)")
-        if not followups and not followup_waived(rulings):
+                unmet.append(f"missing  the follow-up run {slug} has no intake since this hotfix began: log its "
+                             f"intake (keryx.py log --slug {slug} intake …)")
+            else:
+                opened.append((slug, what))
+        if not followups:
             problems.append(f"missing  the follow-up run: keryx.py log --slug {args.slug} followup "
                             f"\"{args.slug}-root: <what the lasting fix does>\" WHY EVIDENCE RESULT, then that "
                             f"run's intake — or the waiver, when the hotfix is the lasting fix: keryx.py log "
                             f"--slug {args.slug} ruling \"Ruling: no follow-up — <why the hotfix is the lasting "
                             "fix>\" WHY EVIDENCE RESULT")
+        elif not opened:  # one opened follow-up is enough: a row with a typo is corrected by logging the right one
+            problems += unmet
     if problems:
         print(f"NOT FINISHED  {args.slug}")
         for line in problems:
@@ -2426,9 +2433,8 @@ def cmd_finish(args) -> int:
         print(f"ruling    {c[2]} — {c[3]} — {c[5]}")
     for _, c in deferred:
         print(f"deferred  {c[2]}")
-    if hotfix:
-        for slug, what in followups:
-            print(f"followup  {slug}: {what}")
+    for slug, what in opened:
+        print(f"followup  {slug}: {what}")
     folders = run_folders(d)
     counted = [folder_rounds(f) for f in folders]
     total, fixes = sum(n for n, _ in counted), sum(k for _, k in counted)
@@ -2446,7 +2452,7 @@ def cmd_finish(args) -> int:
     finished = {"slug": args.slug, "finishedAt": now(), "head": final,
                 "reviews": reviews, "finishRows": len(finish_rows)}
     if hotfix:
-        finished["followups"] = [slug for slug, _ in followups]
+        finished["followups"] = [slug for slug, _ in opened]
     if report is not None:
         finished["report"] = report
     save_json(d / "finished.json", finished)

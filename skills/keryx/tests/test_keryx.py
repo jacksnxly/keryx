@@ -2340,3 +2340,42 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
             self.assertEqual(_cli(repo, ["log", "--slug", "prose", "finish", "PR #4", "w", "e", "merged"])[0], 0)
             code, out = _cli(repo, ["finish", "--slug", "prose", "--head", head, "--findings-only"])
             self.assertEqual(code, 0, out)
+
+    def test_a_standing_waiver_overrides_a_follow_up_row_logged_by_mistake(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", "hf-roto: the lasting fix", "w", "e", "x"])[0], 0)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf", "ruling",
+                                         "Ruling: no follow-up — the revert is the lasting fix; the follow-up row above was logged too early",
+                                         "w", "e", "ruled"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+
+    def test_one_opened_follow_up_is_enough_when_another_row_named_a_typo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
+            for decision in ("hf-roto: the lasting fix", "hf-root: the lasting fix"):
+                self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", decision, "w", "e", "x"])[0], 0)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf-root", "intake", "size M: the lasting fix", "w", "e", "M"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("followup  hf-root: the lasting fix", out)
+
+    def test_the_follow_up_runs_executor_rounds_are_not_the_hotfixs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", "hf-root: the lasting fix", "w", "e", "x"])[0], 0)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf-root", "intake", "size M: the lasting fix", "w", "e", "M"])[0], 0)
+            for n, mode in (("01", "IMPLEMENT"), ("02", "FIX")):
+                (state.parent / "hf-root" / "rounds" / n).mkdir(parents=True)
+                (state.parent / "hf-root" / "rounds" / n / "prompt.md").write_text(f"Mode: {mode}\n")
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertNotIn("hf-root 2", out)
+            self.assertNotIn("2 executor rounds", out)
+
+    def test_the_playbooks_review_command_names_what_a_run_without_an_executor_needs(self):
+        playbook = (Path(__file__).resolve().parents[1] / "references" / "hotfix.md").read_text()
+        line = next(l for l in playbook.splitlines() if "review-brief --slug <slug> --hotfix" in l)
+        for flag in ("--base", "--head"):
+            self.assertIn(flag, playbook[playbook.index(line):playbook.index(line) + 400])
