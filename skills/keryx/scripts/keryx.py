@@ -307,10 +307,11 @@ LOCAL_PATH = "<!-- a local path was here -->"
 # after a space, "=", ">", ":" or a flag ("-I/tmp"), or the "//" of a file:// URL — not one glued into a word
 # or a URL's host ("example.com/tmp"), which is why the lookbehind stops a match only after two word characters.
 ANY_ABSOLUTE_PATH = re.compile(r"(?<!\w\w)(?<![.~])/[^\s/`'\"()\[\]{}<>|;,:]+(?:/[^\s/`'\"()\[\]{}<>|;,:]+)*")
-# Roots that name the machine's system, not a person's files: "2>/dev/null" and "/usr/bin/env" say nothing
-# private, so a path under them stays as it is.
-SYSTEM_ROOTS = ("dev", "usr", "bin", "sbin", "etc", "lib", "lib64", "proc", "sys", "System", "Library",
-                "Applications")
+# System subtrees, which hold no person's files: "2>/dev/null" and "/usr/bin/env" say nothing private, so a path
+# in them stays as it is. Only subtrees: /System/Volumes/Data is the user's data volume on macOS, /usr/home is
+# FreeBSD's home folder and /usr/local, /etc and /Library can name a client (found by the second review).
+SYSTEM_PATHS = ("/dev/", "/bin/", "/sbin/", "/proc/", "/sys/", "/lib/", "/lib64/", "/usr/bin/", "/usr/sbin/",
+                "/usr/lib/", "/usr/libexec/", "/usr/include/", "/usr/share/", "/System/Library/")
 
 
 def strip_local_paths(text: str, checkouts: Path | list[Path], home: Path) -> str:
@@ -331,7 +332,7 @@ def strip_local_paths(text: str, checkouts: Path | list[Path], home: Path) -> st
             kept = path[-1] + kept
             path = path[:-1]
         first = path.lstrip("/").split("/", 1)[0]
-        real = first and first not in SYSTEM_ROOTS and os.path.isdir("/" + first)
+        real = first and not (path + "/").startswith(SYSTEM_PATHS) and os.path.isdir("/" + first)
         return LOCAL_PATH + kept if real else match.group(0)
 
     return ANY_ABSOLUTE_PATH.sub(hide, text)
@@ -410,9 +411,22 @@ def run_folders(d: Path) -> list[Path]:
     the run itself names as a whole name (in its plan or in a cell of one of its rows) and whose log starts no
     earlier than this run's — a later, separate run that merely shares the prefix is not a slice. A run with
     no rows of its own counts no slices."""
+    return [d] + _later_prefix_folders(d)[0]
+
+
+def unnamed_later_runs(d: Path) -> list[Path]:
+    """The later <slug>-<name> folders with executor rounds that the run does not name: perhaps slices of a plan
+    that called them "slice A", perhaps separate runs. Neither counted nor dropped without a word: the report
+    names them for the coordinator to settle (found by the second review)."""
+    return [f for f in _later_prefix_folders(d)[1] if rounds(f)]
+
+
+def _later_prefix_folders(d: Path) -> tuple[list[Path], list[Path]]:
+    """(named, unnamed): the <slug>-<name> folders, in either layout, whose log starts no earlier than the run's,
+    split by whether the run names them."""
     rows = read_log_rows(d)
     if not rows:
-        return [d]
+        return [], []
 
     def started(folder: Path) -> str:
         first = read_log_rows(folder)
@@ -421,17 +435,18 @@ def run_folders(d: Path) -> list[Path]:
     own = rows[0][1][0]
     named = (d / "PLAN.md").read_text() if (d / "PLAN.md").exists() else ""
     named += "\n" + "\n".join("\t".join(c) for _, c in rows)
-    slices = []
+    later = []
     roots = [state_root()]
     try:
         roots.append(legacy_root())
     except LoopError:  # no repository here: only the state root can hold a slice
         pass
     for root in roots:
-        slices += [s for s in sorted(root.glob(f"{d.name}-*"))
-                   if s.is_dir() and len(s.name) > len(d.name) + 1 and started(s) >= own
-                   and re.search(rf"(?<![\w-]){re.escape(s.name)}(?![\w-])", named)]
-    return [d] + sorted(slices, key=lambda s: s.name)
+        later += [s for s in sorted(root.glob(f"{d.name}-*"))
+                  if s.is_dir() and len(s.name) > len(d.name) + 1 and started(s) >= own]
+    is_named = [bool(re.search(rf"(?<![\w-]){re.escape(s.name)}(?![\w-])", named)) for s in later]
+    return (sorted((s for s, n in zip(later, is_named) if n), key=lambda s: s.name),
+            sorted((s for s, n in zip(later, is_named) if not n), key=lambda s: s.name))
 
 
 def folder_rounds(folder: Path) -> tuple[int, int]:
@@ -2201,6 +2216,10 @@ def cmd_report(args) -> int:
     run_line = f"- {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m wall clock, {total} executor rounds ({fixes} FIX)"
     if len(folders) > 1 and parts:  # the slices' rounds are counted too, so each folder is named
         run_line += ": " + ", ".join(f"{name} {n}" for name, n in parts)
+    unnamed = unnamed_later_runs(d)
+    if unnamed:
+        run_line += (" <!-- " + ", ".join(f"{f.name} ({len(rounds(f))} rounds)" for f in unnamed)
+                     + " started after this run, which never names it: a slice to count, or another run? -->")
     text = (
         f"# {title}\n"
         "\n"
@@ -2329,6 +2348,8 @@ def cmd_finish(args) -> int:
         if len(folders) > 1 and parts:  # the slices' rounds are counted too, so each folder is named
             line += " (" + ", ".join(f"{name} {n}" for name, n in parts) + ")"
         print(line)
+    for f in unnamed_later_runs(d):
+        print(f"unnamed   {f.name}: {len(rounds(f))} executor rounds, started after this run, which never names it")
     qa = d / "qa" / "QA.md"
     print(f"qa        {qa}" if qa.exists() else f"qa        none (no {qa})")
     finished = {"slug": args.slug, "finishedAt": now(), "head": final,
