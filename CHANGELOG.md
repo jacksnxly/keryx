@@ -6,7 +6,8 @@
 - Each finished run leaves a short report in the repository. `keryx.py report` drafts `docs/keryx/<date>-<slug>.md` from the run, the coordinator fills it in and commits it with the change, and `finish` refuses until it is there (`--findings-only` for a review that changes nothing). Screenshots, executor logs and the plan stay in `.keryx/`.
 - The repository's memory moves to `.keryx/memory.md` with the first new note; until then the old file is still read.
 - keryx's own names throughout: the adapter is `scripts/keryx.py` (`scripts/cursor.py` still works in this release), the fetched head is `refs/keryx/<slug>`, and errors start with `keryx:`.
-- A GLM executor may not read `.keryx/`, since QA screenshots can show real people.
+- A GLM executor may not read a run's QA evidence or reproductions in `.keryx/`, since they can show real people.
+- keryx finds the main checkout in a submodule, a repository with a separate git dir and a bare repository's worktrees too, and `finish` finds the report from any folder of the repository.
 - The field recorder and the benchmark read executor logs in both places.
 
 ## 1.1.0 — 2026-10-28

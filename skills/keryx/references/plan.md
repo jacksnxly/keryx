@@ -2,7 +2,7 @@
 
 A plan is the set of decisions an implementer who has never seen this codebase cannot make alone. It holds no implementation code except the locked tests. One slice fits on one or two screens plus its tests. *(owner; evidence: plans of 3k–22k lines that contained the code got it written twice)*
 
-Save it as `<state>/PLAN.md` (`.keryx/runs/<slug>/PLAN.md`, never committed). The executor does not read that folder: paste the plan into its brief.
+Save it as `<state>/PLAN.md` (`.keryx/runs/<slug>/PLAN.md`, never committed). The executor is not pointed at that folder: paste the plan into its brief.
 
 ```markdown
 # <slug>: <one-line goal>
