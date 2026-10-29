@@ -307,11 +307,14 @@ LOCAL_PATH = "<!-- a local path was here -->"
 # after a space, "=", ">", ":" or a flag ("-I/tmp"), or the "//" of a file:// URL — not one glued into a word
 # or a URL's host ("example.com/tmp"), which is why the lookbehind stops a match only after two word characters.
 ANY_ABSOLUTE_PATH = re.compile(r"(?<!\w\w)(?<![.~])/[^\s/`'\"()\[\]{}<>|;,:]+(?:/[^\s/`'\"()\[\]{}<>|;,:]+)*")
-# System subtrees, which hold no person's files: "2>/dev/null" and "/usr/bin/env" say nothing private, so a path
-# in them stays as it is. Only subtrees: /System/Volumes/Data is the user's data volume on macOS, /usr/home is
-# FreeBSD's home folder and /usr/local, /etc and /Library can name a client (found by the second review).
-SYSTEM_PATHS = ("/dev/", "/bin/", "/sbin/", "/proc/", "/sys/", "/lib/", "/lib64/", "/usr/bin/", "/usr/sbin/",
-                "/usr/lib/", "/usr/libexec/", "/usr/include/", "/usr/share/", "/System/Library/")
+# The system's own programs, libraries and devices, which name no person's files: "2>/dev/null" and "/usr/bin/env"
+# say nothing private, so they stay as they are. Only these: /System/Volumes/Data is the user's data volume on
+# macOS, /usr/home is FreeBSD's home folder, and /usr/local, /usr/share/nginx, /dev/shm, /etc and /Library can
+# name a client (found by the second and third reviews).
+SYSTEM_PATHS = ("/bin/", "/sbin/", "/lib/", "/lib64/", "/usr/bin/", "/usr/sbin/", "/usr/lib/", "/usr/libexec/",
+                "/usr/include/", "/proc/self/", "/System/Library/")
+SYSTEM_DEVICES = ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty", "/dev/stdin", "/dev/stdout",
+                  "/dev/stderr")
 
 
 def strip_local_paths(text: str, checkouts: Path | list[Path], home: Path) -> str:
@@ -332,7 +335,8 @@ def strip_local_paths(text: str, checkouts: Path | list[Path], home: Path) -> st
             kept = path[-1] + kept
             path = path[:-1]
         first = path.lstrip("/").split("/", 1)[0]
-        real = first and not (path + "/").startswith(SYSTEM_PATHS) and os.path.isdir("/" + first)
+        system = path in SYSTEM_DEVICES or (path + "/").startswith(SYSTEM_PATHS)
+        real = first and not system and os.path.isdir("/" + first)
         return LOCAL_PATH + kept if real else match.group(0)
 
     return ANY_ABSOLUTE_PATH.sub(hide, text)
@@ -2218,8 +2222,10 @@ def cmd_report(args) -> int:
         run_line += ": " + ", ".join(f"{name} {n}" for name, n in parts)
     unnamed = unnamed_later_runs(d)
     if unnamed:
-        run_line += (" <!-- " + ", ".join(f"{f.name} ({len(rounds(f))} rounds)" for f in unnamed)
-                     + " started after this run, which never names it: a slice to count, or another run? -->")
+        # the draft is never drafted again, so the note carries what it takes to count such a run in by hand
+        run_line += (" <!-- " + ", ".join("{} ({} rounds, {} FIX)".format(f.name, *folder_rounds(f)) for f in unnamed)
+                     + " started after this run, which never names it: if a slice, add its rounds to this line"
+                     " and name it in the plan; if another run, delete this note -->")
     text = (
         f"# {title}\n"
         "\n"
@@ -2349,7 +2355,8 @@ def cmd_finish(args) -> int:
             line += " (" + ", ".join(f"{name} {n}" for name, n in parts) + ")"
         print(line)
     for f in unnamed_later_runs(d):
-        print(f"unnamed   {f.name}: {len(rounds(f))} executor rounds, started after this run, which never names it")
+        n, k = folder_rounds(f)
+        print(f"unnamed   {f.name}: {n} executor rounds ({k} FIX), started after this run, which never names it")
     qa = d / "qa" / "QA.md"
     print(f"qa        {qa}" if qa.exists() else f"qa        none (no {qa})")
     finished = {"slug": args.slug, "finishedAt": now(), "head": final,
