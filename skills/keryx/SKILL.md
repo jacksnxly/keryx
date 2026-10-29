@@ -20,6 +20,8 @@ Origin tags: *fact* cannot be otherwise · *owner* the owner's rule · *evidence
 Risk list: money, auth, privacy, migrations, concurrency, data deletion, public contracts. *(owner)*
 Size by the work, not the wording; when an S grows, stop and re-size. *(evidence: per-task plans and reviews cost ~0.85× the implementation; a subagent-per-task turn used ~4 M fresh tokens in the field log)*
 
+**Urgency is a second axis.** When harm is happening now — the owner says hotfix, urgent or prod is down, or you find a failing production check, live errors or an outage and the owner agrees to the lane — take the **hotfix lane** (`references/hotfix.md`): you fix it yourself, fast, with no plan file and no executor, behind a regression test and a fast review; then the lasting fix runs as its own keryx run, and `finish` waits for it. Never for work that is merely small or "quick". *(owner)*
+
 ## 2. The loop
 
 1. **Intake** — `references/intake.md`. Read what you can yourself, then ask only what you can't find: one question at a time, choices where possible. Ask the autonomy question once. Turn "who accepts this and what do they look at" into a check, run it on the base, and see it fail. *(owner)*
@@ -30,7 +32,7 @@ Size by the work, not the wording; when an S grows, stop and re-size. *(evidence
 6. **Fresh review** (M/L) — `references/review.md`. `keryx.py review-brief` writes the reviewer's brief (two for a risk-list diff); dispatch it exactly as printed, never a prompt of your own. One reviewer with fresh context on the whole branch; validate each finding before acting on it. *(owner; evidence: converged branches still had 3–12 real bugs; a reviewer briefed from memory lost the reach question and the grades)*
 7. **Finish** — `references/finish.md`. Act within the autonomy, log a finish row, and run `keryx.py finish`: an M or L run is finished only when it prints FINISHED. Then a short report with links to evidence. *(owner; evidence: three field runs in a row ended without a finish row)*
 
-Modes add their own steps: **bug** and **CI** `references/bug.md` · **feature** `references/intake.md` · **review a PR/branch** `references/review.md`.
+Modes add their own steps: **bug** and **CI** `references/bug.md` · **feature** `references/intake.md` · **review a PR/branch** `references/review.md` · **hotfix** `references/hotfix.md`.
 
 ## 3. Rulings, not stalls
 

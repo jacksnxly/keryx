@@ -11,6 +11,7 @@
 - **Real QA and code review**: scripted and exploratory QA with kept evidence, mutation probes, and a review with a written bar (P0–P3), a production-reach question and two reviewers for risky changes. The reviewer's brief ships with the plugin, so the bar is the same in every run.
 - **Finished means finished**: a run counts as done only when its log records what shipped and a well-formed fresh review covers the shipped commit.
 - **Guards architecture**: guard tests, import contracts, dependency rules and CI config changed by an executor are flagged; a domain-driven design lens applies wherever a change touches business rules.
+- **A hotfix lane**: harm happening now is fixed at once by the session's own model, behind a regression test and a fast review, without a plan or an executor; the lasting fix follows as its own run, and the hotfix is not finished without it.
 - **Stays inside your limits**: it asks once how far it may go (commit, push, PR, merge, deploy) and never goes further.
 
 ```mermaid
@@ -44,6 +45,7 @@ Ask for the work and say keryx, or call it directly:
 /keryx:keryx build the export button from docs/spec/export.md
 /keryx:keryx review and fix this branch
 /keryx:keryx review this PR, findings only
+/keryx:hotfix login returns 500 on production since 09:12
 ```
 
 keryx remembers the choices you make that will come up again (your executor order, how far it may go, a repository's traps) in `~/.config/keryx/memory.md` and, per repository, in `.keryx/memory.md`. It never stores a secret; edit or delete either file at any time.
@@ -73,7 +75,7 @@ When an executor fails (an error, a stop, a dispatch that never starts), keryx m
 
 ## How a run goes
 
-1. **Size the work.** S is done inline; M gets a plan, an executor and one review; L is split into slices that run in parallel.
+1. **Size the work.** S is done inline; M gets a plan, an executor and one review; L is split into slices that run in parallel. Urgent work takes the hotfix lane: fixed at once by the session itself, then the lasting fix as its own run.
 2. **Intake.** keryx reads what it can, asks only what it cannot find, one question at a time, and asks once how far it may go: commit, push, open a PR, merge, deploy.
 3. **An acceptance check that fails first.** Who accepts the work and what they look at becomes a command, a test or a comparison, run on the base before anything is built.
 4. **Plan and locked tests.** Decisions and exact tests, no implementation code. The tests are locked: an executor that changes one fails the check.

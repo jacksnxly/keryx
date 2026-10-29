@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.0 — 2026-10-29
+
+- A hotfix lane. Urgency is a second axis next to size: when the owner says hotfix, urgent or prod is down (or calls `/keryx:hotfix`), or keryx finds live harm and the owner agrees, the session's own model fixes it at once, with no plan file and no executor round: it sees the harm itself, tries the fastest safe action first (a revert, a flag, a rollback), otherwise ships the smallest change behind a regression test that fails first, and gets one fast fresh review (`keryx.py review-brief --hotfix`: the diff only, P0 and P1 only, on the strongest model). Never for work that is merely small or quick.
+- The lasting fix is enforced: a hotfix run logs a `followup` row naming its follow-up run, and `keryx.py finish` refuses until that run has a log (or a ruling says the hotfix is the lasting fix). The report names the follow-up.
+
 ## 1.2.2 — 2026-10-29
 
 - An executor round leaves `git status` clean. `.worktrees/`, where each executor's worktree lives, now ignores itself as `.keryx/` does, so it no longer shows as untracked in a repository whose `.gitignore` does not name it, and no longer makes a submodule look modified in its superproject. A `.worktrees/` an older keryx left is ignored from the next round on.
