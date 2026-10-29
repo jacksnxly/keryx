@@ -262,3 +262,14 @@ def test_a_run_in_the_keryx_folder_is_read_from_there(tmp_path):
     rec = run.record(session, repo, slug="tf", now=BASE)
     assert rec["log"]["rows"] == 3
     assert sorted(x["loop"] for x in rec["executor"]["runs"]) == ["tf-s1", "tf-s2"]
+
+
+def test_a_run_split_across_both_layouts_is_read_from_both(tmp_path):
+    # A run started before 1.2 keeps its folder; a slice it starts after the upgrade lands in .keryx/runs.
+    session, repo = _setup(tmp_path)
+    new = repo / ".keryx" / "runs"
+    new.mkdir(parents=True)
+    (repo / ".git" / "cursor-loop" / "tf-s2").rename(new / "tf-s2")
+    rec = run.record(session, repo, slug="tf", now=BASE)
+    assert rec["log"]["rows"] == 3
+    assert sorted(x["loop"] for x in rec["executor"]["runs"]) == ["tf-s1", "tf-s2"]
