@@ -95,7 +95,8 @@ def _busy_min(times: list[float]) -> float:
     return round(sum(b - a for a, b in zip(times, times[1:]) if b - a <= IDLE_GAP_S) / 60, 1)
 
 
-def _loops_dir(repo: Path, prefixes: list[str]) -> Path:
+def _loops_dirs(repo: Path) -> list[Path]:
+    """Both layouts a run can live in, the keryx folder first; only those that exist."""
     repo = Path(repo)
     if (repo / ".git").is_dir():
         main, common_path = repo, repo / ".git"
@@ -104,10 +105,7 @@ def _loops_dir(repo: Path, prefixes: list[str]) -> Path:
                                 capture_output=True, text=True).stdout.strip()
         common_path = (Path(common) if Path(common).is_absolute() else repo / common).resolve()
         main = common_path.parent
-    new = main / ".keryx" / "runs"
-    if new.is_dir() and any(p.is_dir() and p.name.startswith(prefix) for prefix in prefixes for p in new.iterdir()):
-        return new
-    return common_path / "cursor-loop"
+    return [d for d in (main / ".keryx" / "runs", common_path / "cursor-loop") if d.is_dir()]
 
 
 def _started(run_json: Path, default: float) -> float:
@@ -125,9 +123,10 @@ def _failed_status(run_json: Path) -> str | None:
     return status.lower() if status in FAILED_ROUND else None
 
 
-def _executor_runs(loops: Path, prefixes: list[str], now: float) -> list[dict]:
+def _executor_runs(roots: list[Path], prefixes: list[str], now: float) -> list[dict]:
     runs = []
-    for loop in sorted({p for prefix in prefixes for p in loops.glob(f"{prefix}*") if p.is_dir()}):
+    for loop in sorted({p for root in roots for prefix in prefixes for p in root.glob(f"{prefix}*") if p.is_dir()},
+                       key=lambda p: (p.name, str(p))):
         rounds = sorted(p for p in (loop / "rounds").glob("*") if p.is_dir())
         if not rounds:
             continue
@@ -180,10 +179,12 @@ def _executor_runs(loops: Path, prefixes: list[str], now: float) -> list[dict]:
     return runs
 
 
-def _run_log(loops: Path, slug: str, prefixes: list[str] | None = None) -> dict:
-    # a run that switched runner copied its log into <slug>-glm/ and kept logging there: read them all
-    dirs = [loops / slug] + sorted({p for prefix in prefixes or [slug] for p in loops.glob(f"{prefix}*")
-                                    if p.is_dir() and p != loops / slug})
+def _run_log(roots: list[Path], slug: str, prefixes: list[str] | None = None) -> dict:
+    # a run that switched runner copied its log into <slug>-glm/ and kept logging there: read them all,
+    # in every layout, the slug's own log first
+    own = [root / slug for root in roots]
+    dirs = own + sorted({p for root in roots for prefix in prefixes or [slug] for p in root.glob(f"{prefix}*")
+                         if p.is_dir() and p not in own}, key=lambda p: (p.name, str(p)))
     rows, kept = [], set()
     for d in dirs:
         path = d / "decisions.tsv"
@@ -251,8 +252,8 @@ def record(session: Path, repo: Path, slug: str, now: datetime | None = None, si
                 _usage(subs, e.get("message") or {}, sub_seen)
                 used = True
         sub_files += used
-    loops_dir = _loops_dir(repo, loops or [slug])
-    runs = _executor_runs(loops_dir, loops or [slug], now_s)
+    roots = _loops_dirs(repo)
+    runs = _executor_runs(roots, loops or [slug], now_s)
     last = max(times) if times else _t(start)
     return {
         "slug": slug, "name": name or slug, "session": str(session), "repo": str(repo), "start": start, "until": until,
@@ -265,7 +266,7 @@ def record(session: Path, repo: Path, slug: str, now: datetime | None = None, si
         "executor": {"runs": runs, "stalled": [r["loop"] for r in runs if r["status"] == "stalled"],
                      "minutes": round(sum(r["minutes"] for r in runs), 1),
                      "output_tokens": sum(r["output_tokens"] for r in runs)},
-        "log": _run_log(loops_dir, slug, loops or [slug]),
+        "log": _run_log(roots, slug, loops or [slug]),
         "outcome": {"prs": prs},
         "escaped_defects": [],
     }
