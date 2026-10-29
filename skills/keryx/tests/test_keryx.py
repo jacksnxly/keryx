@@ -1341,6 +1341,50 @@ class KeryxFolder(unittest.TestCase):
             self.assertEqual(out.count("--noconftest"), 1)
 
 
+class WorktreesFolderIgnoresItself(unittest.TestCase):
+    """Executors' worktrees live in <main checkout>/.worktrees/, which ignores itself as .keryx/ does: a round
+    leaves git status as it found it, in the repository and in a superproject around a submodule."""
+
+    def _round(self, where, tmp, slug):
+        (Path(tmp) / "brief.md").write_text("Mode: IMPLEMENT\n")
+        return _cli(where, ["create", "--slug", slug, "--runner", "subagent",
+                            "--prompt-file", str(Path(tmp) / "brief.md"), "--ref", "main"])
+
+    def test_a_round_leaves_git_status_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            code, out = self._round(repo, tmp, "ws")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(run("status", "--porcelain"), "")
+            self.assertEqual((top / ".worktrees" / ".gitignore").read_text(), "*\n")
+            self.assertEqual(run("-C", str(top / ".worktrees" / "sub-ws"), "status", "--porcelain"), "")
+
+    def test_a_folder_an_older_round_left_is_ignored_from_the_next_round_on(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            run("worktree", "add", "-q", "-b", "sub/old", str(top / ".worktrees" / "sub-old"))
+            self.assertEqual(run("status", "--porcelain"), "?? .worktrees/", "the state 1.2.1 left")
+            code, out = self._round(repo, tmp, "nx")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(run("status", "--porcelain"), "")
+
+    def test_a_round_in_a_submodule_leaves_the_superproject_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+            g = WorktreesOfABareRepositoryOrASubmodule._g(t)
+            g("init", "-q", "-b", "main", "sub")
+            g("commit", "-q", "--allow-empty", "-m", "b", cwd=t / "sub")
+            g("init", "-q", "-b", "main", "sup")
+            g("submodule", "-q", "add", str(t / "sub"), "mod", cwd=t / "sup")
+            g("commit", "-q", "-m", "mod", cwd=t / "sup")
+            code, out = self._round(t / "sup" / "mod", tmp, "sm")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(g("status", "--porcelain", cwd=t / "sup").stdout, "")
+            self.assertEqual(g("status", "--porcelain", cwd=t / "sup" / "mod").stdout, "")
+
+
 class RunReport(unittest.TestCase):
     """Each finished run leaves a short report in the repository, docs/keryx/<date>-<slug>.md; screenshots and
     executor logs stay in the ignored folder."""
