@@ -1431,9 +1431,126 @@ class KeryxNames(unittest.TestCase):
 
 
 class ThirdPartyExecutorAndTheFolder(unittest.TestCase):
-    """A GLM executor gets the plan in its brief; it never reads keryx's folder, which can hold QA screenshots of
-    real people and other runs' logs."""
+    """A GLM executor never reads a run's QA evidence or reproductions, which can show real people. The rest of the
+    folder stays readable: its own Claude Code config lives there, and it reads large tool outputs back from it."""
 
-    def test_glm_is_denied_the_keryx_folder(self):
-        for rule in ("Read(**/.keryx/**)", "Read(//**/.keryx/**)"):
+    def test_glm_is_denied_the_evidence_only(self):
+        for rule in ("Read(**/.keryx/runs/*/qa/**)", "Read(//**/.keryx/runs/*/qa/**)",
+                     "Read(**/.keryx/runs/*/repro/**)", "Read(//**/.keryx/runs/*/repro/**)"):
             self.assertIn(rule, cloud.GLM_DENY)
+        for rule in ("Read(**/.keryx/**)", "Read(//**/.keryx/**)"):
+            self.assertNotIn(rule, cloud.GLM_DENY)
+
+
+class OtherRepositoryShapes(unittest.TestCase):
+    """A separate git dir, a submodule (and its linked worktree) and a bare repository's worktrees all keep their
+    runs; 1.2's first cut asked git for the top level inside the git dir, which these layouts refuse."""
+
+    def test_each_layout_keeps_its_runs_in_one_shared_folder(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+
+            def g(*a, cwd=t):
+                return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                                       "-c", "protocol.file.allow=always", *a],
+                                      cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+            g("init", "-q", "-b", "main", "sep", f"--separate-git-dir={t / 'sep.gitdir'}")
+            g("commit", "-q", "--allow-empty", "-m", "b", cwd=t / "sep")
+            g("init", "-q", "-b", "main", "sub")
+            g("commit", "-q", "--allow-empty", "-m", "b", cwd=t / "sub")
+            g("init", "-q", "-b", "main", "sup")
+            g("submodule", "-q", "add", str(t / "sub"), "mod", cwd=t / "sup")
+            g("worktree", "add", "-q", "-b", "side", str(t / "mod-wt"), cwd=t / "sup" / "mod")
+            g("clone", "-q", "--bare", str(t / "sub"), "bare.git")
+            g("worktree", "add", "-q", str(t / "wt-a"), "main", cwd=t / "bare.git")
+            g("worktree", "add", "-q", "-b", "b2", str(t / "wt-b"), cwd=t / "bare.git")
+            for where, home in ((t / "sep", t / "sep"), (t / "sup" / "mod", t / "sup" / "mod"),
+                                (t / "mod-wt", t / "sup" / "mod"), (t / "wt-a", t), (t / "wt-b", t)):
+                code, out = _cli(where, ["log", "--slug", "sh", "intake", f"from {where.name}", "why", "ev", "ok"])
+                self.assertEqual(code, 0, where)
+                self.assertIn(f"from {where.name}", (home / ".keryx" / "runs" / "sh" / "decisions.tsv").read_text())
+            self.assertEqual(g("status", "--porcelain", cwd=t / "sup" / "mod"), "")
+
+
+class ReportKeepsLocalPathsOut(unittest.TestCase):
+    """Text the report copies from the plan and the log names no local path: the report is committed, often to a
+    public repository."""
+
+    def test_copied_text_names_no_local_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            state = top / ".keryx" / "runs" / "lp"
+            self.assertEqual(_cli(repo, ["log", "--slug", "lp", "ruling",
+                                         f"Ruling: read {top}/app.py, not {Path.home()}/notes.txt", "why", "ev",
+                                         "ok"])[0], 0)
+            (state / "PLAN.md").write_text(f"# lp: fix {top}/app.py\n\n## Acceptance check\n"
+                                           f"`python3 {top}/app.py` — on the base: 1\n")
+            self.assertEqual(_cli(repo, ["report", "--slug", "lp"])[0], 0)
+            text = next((top / "docs" / "keryx").glob("*-lp.md")).read_text()
+            self.assertNotIn(str(top), text)
+            self.assertNotIn(str(Path.home()), text)
+            self.assertIn("`python3 app.py`", text)
+            self.assertIn("~/notes.txt", text)
+
+
+class NoSurroundingRepository(unittest.TestCase):
+    """The suite runs from an export without .git (seen in a Linux check): a state root pointed elsewhere needs no
+    repository around the current directory."""
+
+    def test_a_log_row_needs_no_repository_when_the_state_root_points_elsewhere(self):
+        import os
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.getcwd()
+            os.chdir(tmp)
+            try:
+                with mock.patch.object(cloud, "state_root", lambda: Path(tmp) / "loops"):
+                    self.assertEqual(cloud.main(["log", "--slug", "s", "intake", "x", "w", "e", "ok"]), 0)
+            finally:
+                os.chdir(old)
+            self.assertTrue((Path(tmp) / "loops" / "s" / "decisions.tsv").is_file())
+
+
+class FinishFromASubdirectory(unittest.TestCase):
+    """A monorepo coordinator often works from a package folder: report and finish find the top level anyway."""
+
+    def test_report_and_finish_work_from_a_subdirectory(self):
+        import re
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            pkg = repo / "pkg"
+            pkg.mkdir()
+            state = top / ".keryx" / "runs" / "sd"
+            self.assertEqual(_cli(pkg, ["review-brief", "--slug", "sd", "--base", base, "--head", head])[0], 0)
+            (state / "review" / f"{base[:12]}..{head[:12]}.findings.md").write_text(FinishGate.GOOD.format(head=head))
+            self.assertEqual(_cli(pkg, ["log", "--slug", "sd", "finish", "branch main committed", "why", "ev",
+                                        "committed"])[0], 0)
+            code, out = _cli(pkg, ["report", "--slug", "sd"])
+            self.assertEqual(code, 0, out)
+            report = next((top / "docs" / "keryx").glob("*-sd.md"))
+            report.write_text(re.sub(r"<!--.*?-->", "filled in", report.read_text(), flags=re.S))
+            run("add", str(report))
+            run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "docs(keryx): report for sd")
+            code, out = _cli(pkg, ["finish", "--slug", "sd", "--head", run("rev-parse", "HEAD")])
+            self.assertEqual(code, 0, out)
+
+
+class FinishSaysWhichHeadItChecked(unittest.TestCase):
+    """Without --head, finish checks the executor's fetched head; when the report ships on another branch, the
+    refusal says which head it checked and to pass --head."""
+
+    def test_the_refusal_names_the_head_and_the_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "nh2"
+            self.assertEqual(_cli(repo, ["log", "--slug", "nh2", "finish", "PR #3", "why", "ev", "merged"])[0], 0)
+            (state / "head.txt").write_text(base + "\n")
+            code, out = _cli(repo, ["finish", "--slug", "nh2"])
+            self.assertEqual(code, 1)
+            line = next(x for x in out.splitlines() if x.startswith("missing  the run report"))
+            self.assertIn(base[:12], line)
+            self.assertIn("--head", line)
