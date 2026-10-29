@@ -56,7 +56,8 @@ M and L runs keep one log, written as you go, one row per decision: `python3 "$S
 
 ## 6. Where things live
 
-- **`.keryx/runs/<slug>/`** in the repository's main checkout, written `<state>` in the references: the plan, the run log, locked tests, executor rounds, review briefs and findings, QA evidence, reproductions. The folder ignores itself (`.keryx/.gitignore`), so it never shows up in `git status`; `git clean -fdx` deletes it. A run started before keryx 1.2 keeps `.git/cursor-loop/<slug>/` until it finishes. *(fact: `.git` is a protected path, where an agent's writes prompt or are denied)*
+- **`.keryx/runs/<slug>/`** in the repository's main checkout, written `<state>` in the references: the plan, the run log, locked tests, executor rounds, review briefs and findings, QA evidence, reproductions. The folder ignores itself (`.keryx/.gitignore`), so it never shows up in `git status`; `git clean -fdx` deletes it. The first `keryx.py log` row creates the folder and its `.gitignore`: log the intake before you write any file there. A run started before keryx 1.2 keeps `.git/cursor-loop/<slug>/` until it finishes. *(fact: `.git` is a protected path, where an agent's writes prompt or are denied)*
+- Start the session in the main checkout, or add it as a working directory (`/add-dir`): from a linked worktree, `.keryx/` lies outside the working directory and every write there prompts. *(fact)*
 - **`.keryx/memory.md`**: this repository's traps; `~/.config/keryx/memory.md` and `config.json`: the owner's choices and executors.
 - **`docs/keryx/<date>-<slug>.md`**: the run's report, committed with the change (`keryx.py report`). Screenshots, executor logs and the plan never leave `.keryx/`. *(owner)*
 - **`.worktrees/<runner>-<slug>`**: each executor's worktree, on branch `<runner>/<slug>`; its fetched head is `refs/keryx/<slug>`.
