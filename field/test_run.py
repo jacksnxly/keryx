@@ -294,3 +294,22 @@ def test_runs_in_a_separate_git_dir_and_a_submodule_are_recorded(tmp_path):
         log.parent.mkdir(parents=True)
         log.write_text("ts\tphase\tdecision\twhy\tevidence\tresult\nt\tintake\tsize M\tw\te\tM\n")
         assert run.record(session, checkout, slug="tf", now=BASE)["log"]["rows"] == 1, checkout
+
+
+def test_a_run_in_a_bare_repositorys_worktree_is_recorded(tmp_path):
+    # The adapter keeps a bare repository's runs in its own folder (<name>.git/.keryx/runs), which its worktrees share.
+    import subprocess
+    session, _ = _setup(tmp_path)
+
+    def g(*a, cwd=tmp_path):
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], cwd=cwd, check=True,
+                       capture_output=True)
+
+    g("init", "-q", "-b", "main", "src")
+    g("commit", "-q", "--allow-empty", "-m", "b", cwd=tmp_path / "src")
+    g("clone", "-q", "--bare", str(tmp_path / "src"), "bare.git")
+    g("worktree", "add", "-q", str(tmp_path / "wt"), "main", cwd=tmp_path / "bare.git")
+    log = tmp_path / "bare.git" / ".keryx" / "runs" / "tf" / "decisions.tsv"
+    log.parent.mkdir(parents=True)
+    log.write_text("ts\tphase\tdecision\twhy\tevidence\tresult\nt\tintake\tsize M\tw\te\tM\n")
+    assert run.record(session, tmp_path / "wt", slug="tf", now=BASE)["log"]["rows"] == 1

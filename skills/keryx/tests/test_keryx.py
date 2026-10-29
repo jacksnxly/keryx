@@ -204,8 +204,9 @@ class LogCommand(unittest.TestCase):
                 printed = io.StringIO()
                 with contextlib.redirect_stdout(printed):
                     self.assertEqual(cloud.main(["log", "--slug", "s", "plan", "=sum(1)", "why", "ev", "OK"]), 0)
-                # Seen: a coordinator spent five calls finding where its rows went.
-                self.assertEqual(printed.getvalue().strip(), str(root / "s" / "decisions.tsv"))
+                # Seen: a coordinator spent five calls finding where its rows went. The row's number is what a
+                # later ruling names when it replaces this one.
+                self.assertEqual(printed.getvalue().strip(), f"{root / 's' / 'decisions.tsv'}  row 1")
             finally:
                 cloud.state_root = orig
             rows = (root / "s" / "decisions.tsv").read_text().splitlines()
@@ -1430,16 +1431,56 @@ class KeryxNames(unittest.TestCase):
             self.assertTrue(r.stderr.startswith("keryx: "), r.stderr)
 
 
-class ThirdPartyExecutorAndTheFolder(unittest.TestCase):
-    """A GLM executor never reads a run's QA evidence or reproductions, which can show real people. The rest of the
-    folder stays readable: its own Claude Code config lives there, and it reads large tool outputs back from it."""
+class ExecutorsAndTheKeryxFolder(unittest.TestCase):
+    """GLM, a third party's model, reads no run and not the repository's memory: its own Claude Code config, which
+    it reads large tool outputs back from, now lives beside the runs (.keryx/glm/<slug>/), so every run can be
+    denied. The Cursor CLI, another third party, is denied the runs' QA evidence and reproductions, which can show
+    real people. (1.2.0 denied GLM only those two and the Cursor CLI nothing.)"""
 
-    def test_glm_is_denied_the_evidence_only(self):
-        for rule in ("Read(**/.keryx/runs/*/qa/**)", "Read(//**/.keryx/runs/*/qa/**)",
-                     "Read(**/.keryx/runs/*/repro/**)", "Read(//**/.keryx/runs/*/repro/**)"):
+    def test_glm_is_denied_every_run_and_the_memory(self):
+        for rule in ("Read(**/.keryx/runs/**)", "Read(//**/.keryx/runs/**)",
+                     "Read(**/.keryx/memory.md)", "Read(//**/.keryx/memory.md)"):
             self.assertIn(rule, cloud.GLM_DENY)
-        for rule in ("Read(**/.keryx/**)", "Read(//**/.keryx/**)"):
-            self.assertNotIn(rule, cloud.GLM_DENY)
+
+    def test_glms_own_config_lies_beside_the_runs(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            (Path(tmp) / "brief.md").write_text("Mode: IMPLEMENT\n")
+            code, out = _cli(repo, ["create", "--slug", "gc", "--runner", "glm", "--dry-run",
+                                    "--prompt-file", str(Path(tmp) / "brief.md"), "--ref", "main"])
+            self.assertEqual(code, 0, out)
+            cmd = json.loads(out)["command"]
+            self.assertEqual(cmd[cmd.index("--settings") + 1], str(top / ".keryx" / "glm" / "gc" / "settings.json"))
+            old = os.getcwd()
+            os.chdir(repo)
+            try:
+                cfg = cloud.write_glm_config(cloud.state_root() / "gc")
+            finally:
+                os.chdir(old)
+            self.assertEqual(cfg, top / ".keryx" / "glm" / "gc")
+            self.assertIn("Read(//**/.keryx/runs/**)",
+                          json.loads((cfg / "settings.json").read_text())["permissions"]["deny"])
+            self.assertEqual((top / ".keryx" / ".gitignore").read_text(), "*\n")
+            self.assertEqual(run("status", "--porcelain"), "")
+
+    def test_the_cursor_cli_is_denied_the_evidence(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            wt = top / ".worktrees" / "cursor-cd"
+            run("worktree", "add", "-q", "-b", "cursor/cd", str(wt))
+            old = os.getcwd()
+            os.chdir(repo)
+            try:
+                cloud.write_cli_permissions(wt)
+            finally:
+                os.chdir(old)
+            deny = json.loads((wt / ".cursor" / "cli.json").read_text())["permissions"]["deny"]
+            for rule in (f"Read({top}/.keryx/runs/*/qa/**)", f"Read({top}/.keryx/runs/*/repro/**)"):
+                self.assertIn(rule, deny)
 
 
 class OtherRepositoryShapes(unittest.TestCase):
@@ -1633,7 +1674,9 @@ class ReportLeavesSiblingFoldersAlone(unittest.TestCase):
                                          "ok"])[0], 0)
             self.assertEqual(_cli(repo, ["report", "--slug", "sb"])[0], 0)
             text = next((top / "docs" / "keryx").glob("*-sb.md")).read_text()
-            self.assertIn(f"{top.name}-other/calendar.py and app.py", text)
+            # since 1.2.1 the sibling, a local path too, becomes a placeholder rather than staying as it was
+            self.assertNotIn(f"{top}-other", text)
+            self.assertIn("<!-- a local path was here --> and app.py", text)
             self.assertNotIn(".-other", text)
 
 
@@ -1669,3 +1712,225 @@ class ReportPathsAtTheEndOfASentence(unittest.TestCase):
             text = next((wt / "docs" / "keryx").glob("*-bw.md")).read_text()
             self.assertNotIn(str(t), text)
             self.assertIn("keep app.py as it is.", text)
+
+
+class WorktreesOfABareRepositoryOrASubmodule(unittest.TestCase):
+    """A subagent's worktree blocks pushes through a config of its own (extensions.worktreeConfig). Under that
+    extension git reads core.bare and core.worktree from the shared config in every worktree, so they belong in the
+    main worktree's config.worktree (git-worktree(1), CONFIGURATION FILE). 1.2.0 left them shared: every worktree
+    of a bare repository failed `git status`, and a submodule's linked worktree lost its own checkout."""
+
+    @staticmethod
+    def _g(t):
+        import subprocess
+
+        def g(*a, cwd=t, check=True):
+            return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                                   "-c", "protocol.file.allow=always", *a],
+                                  cwd=cwd, check=check, capture_output=True, text=True)
+        return g
+
+    def _bare(self, t):
+        g = self._g(t)
+        g("init", "-q", "-b", "main", "src")
+        g("commit", "-q", "--allow-empty", "-m", "b", cwd=t / "src")
+        g("clone", "-q", "--bare", str(t / "src"), "bare.git")
+        g("worktree", "add", "-q", str(t / "wt-a"), "main", cwd=t / "bare.git")
+        g("worktree", "add", "-q", "-b", "b2", str(t / "wt-b"), cwd=t / "bare.git")
+        (t / "brief.md").write_text("Mode: IMPLEMENT\n")
+        return g
+
+    def _round(self, t, where, slug):
+        return _cli(where, ["create", "--slug", slug, "--runner", "subagent", "--prompt-file", str(t / "brief.md"),
+                            "--ref", "main"])
+
+    def test_every_worktree_of_a_bare_repository_still_works(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+            g = self._bare(t)
+            code, out = self._round(t, t / "wt-a", "bs")
+            self.assertEqual(code, 0, out)
+            sub = t / "bare.git" / ".worktrees" / "sub-bs"
+            for wt in (t / "wt-a", t / "wt-b", sub):
+                self.assertEqual(g("status", "--porcelain", cwd=wt, check=False).returncode, 0, wt)
+            self.assertEqual(g("rev-parse", "--is-bare-repository", cwd=t / "bare.git").stdout.strip(), "true")
+            self.assertEqual(g("config", "--get", "remote.origin.pushurl", cwd=sub).stdout.strip(),
+                             "https://push-disabled.invalid/keryx")
+            self.assertEqual(g("config", "--get", "remote.origin.pushurl", cwd=t / "wt-a", check=False).stdout, "")
+
+    def test_a_submodules_linked_worktree_keeps_its_own_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+            g = self._g(t)
+            g("init", "-q", "-b", "main", "sub")
+            g("commit", "-q", "--allow-empty", "-m", "b", cwd=t / "sub")
+            g("init", "-q", "-b", "main", "sup")
+            g("submodule", "-q", "add", str(t / "sub"), "mod", cwd=t / "sup")
+            mod = t / "sup" / "mod"
+            g("worktree", "add", "-q", "-b", "side", str(t / "mod-wt"), cwd=mod)
+            (t / "brief.md").write_text("Mode: IMPLEMENT\n")
+            code, out = self._round(t, mod, "ms")
+            self.assertEqual(code, 0, out)
+            for wt in (mod, t / "mod-wt", mod / ".worktrees" / "sub-ms"):
+                self.assertEqual(Path(g("rev-parse", "--show-toplevel", cwd=wt).stdout.strip()).resolve(), wt, wt)
+            self.assertEqual(g("status", "--porcelain", cwd=t / "sup", check=False).returncode, 0)
+
+    def test_a_repository_1_2_0_left_broken_is_repaired_by_the_next_round(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp).resolve()
+            g = self._bare(t)
+            g("config", "extensions.worktreeConfig", "true", cwd=t / "bare.git")
+            self.assertNotEqual(g("status", cwd=t / "wt-b", check=False).returncode, 0, "the state 1.2.0 left")
+            code, out = self._round(t, t / "wt-a", "rp")
+            self.assertEqual(code, 0, out)
+            for wt in (t / "wt-a", t / "wt-b"):
+                self.assertEqual(g("status", "--porcelain", cwd=wt, check=False).returncode, 0, wt)
+
+
+class RunReportFromTheWholeRun(unittest.TestCase):
+    """Drafting 1.2.0's own report showed four gaps: a multi-line acceptance check cut at its first line, the slices'
+    executor rounds left out, a replaced ruling listed as if it still stood, and a review row that merely mentioned
+    "deferred" listed as a deferred item. finish printed a ruling's evidence where its reason belongs."""
+
+    @staticmethod
+    def _draft(repo, run, slug):
+        code, out = _cli(repo, ["report", "--slug", slug])
+        assert code == 0, out
+        return next((Path(run("rev-parse", "--show-toplevel")) / "docs" / "keryx").glob(f"*-{slug}.md")).read_text()
+
+    @staticmethod
+    def _reviewed(repo, base, head, slug, state):
+        assert _cli(repo, ["review-brief", "--slug", slug, "--base", base, "--head", head])[0] == 0
+        (state / "review" / f"{base[:12]}..{head[:12]}.findings.md").write_text(FinishGate.GOOD.format(head=head))
+        assert _cli(repo, ["log", "--slug", slug, "finish", "findings reported", "why", "ev", "reported"])[0] == 0
+
+    def test_the_whole_acceptance_check_is_copied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "ac"
+            self.assertEqual(_cli(repo, ["log", "--slug", "ac", "intake", "size M", "why", "ev", "M"])[0], 0)
+            (state / "PLAN.md").write_text("# ac: f returns 2\n\n## Acceptance check\nAt the base commit:\n"
+                                           "- `python3 -m unittest` → FAILED (failures=2)\n"
+                                           "- `python3 app.py` → prints 1\n\n## Ground truth\n- Fact: x\n")
+            text = self._draft(repo, run, "ac")
+            for line in ("At the base commit:", "`python3 -m unittest` → FAILED (failures=2)",
+                         "`python3 app.py` → prints 1"):
+                self.assertIn(line, text)
+            self.assertNotIn("Fact: x", text)
+
+    def test_the_slices_rounds_count_with_the_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            runs = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs"
+            (runs / "sl-old").mkdir(parents=True)
+            (runs / "sl-old" / "decisions.tsv").write_text("ts\tphase\tdecision\twhy\tevidence\tresult\n"
+                                                           "2020-01-01T00:00:00Z\tintake\tan older run\tw\te\tM\n")
+            self.assertEqual(_cli(repo, ["log", "--slug", "sl", "intake", "size L", "why", "ev", "L"])[0], 0)
+            for name, modes in (("sl-a", ("IMPLEMENT", "FIX")), ("sl-b", ("IMPLEMENT",)), ("sl-old", ("FIX",) * 5)):
+                if name != "sl-old":
+                    self.assertEqual(_cli(repo, ["log", "--slug", name, "dispatch", "slice", "w", "e", "ok"])[0], 0)
+                for i, mode in enumerate(modes, 1):
+                    r = runs / name / "rounds" / f"{i:02d}"
+                    r.mkdir(parents=True)
+                    (r / "prompt.md").write_text(f"Mode: {mode}\nGoal: x\n")
+            text = self._draft(repo, run, "sl")
+            for part in ("3 executor rounds (1 FIX)", "sl-a 2", "sl-b 1"):
+                self.assertIn(part, text)
+            self.assertNotIn("sl-old", text)
+            self._reviewed(repo, base, head, "sl", runs / "sl")
+            code, out = _cli(repo, ["finish", "--slug", "sl", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("3 executor rounds, 1 of them FIX", out)
+
+    def test_a_replaced_ruling_is_left_out_and_log_names_each_rows_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            log = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "rr" / "decisions.tsv"
+            self.assertEqual(_cli(repo, ["log", "--slug", "rr", "intake", "size M", "why", "ev", "M"])[0], 0)
+            code, out = _cli(repo, ["log", "--slug", "rr", "ruling", "Ruling: deny the whole folder", "privacy", "ev",
+                                    "if wrong: x"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("row 2", out)
+            for bad in ("Ruling (replaces row 1): no", "Ruling (replaces row 7): no"):
+                self.assertEqual(_cli(repo, ["log", "--slug", "rr", "ruling", bad, "w", "e", "r"])[0], 1, bad)
+            self.assertEqual(len(log.read_text().splitlines()), 3, "a refused row is not written")
+            self.assertEqual(_cli(repo, ["log", "--slug", "rr", "ruling", "Ruling (replaces row 2): deny only qa/",
+                                         "its config lives there", "ev", "if wrong: y"])[0], 0)
+            text = self._draft(repo, run, "rr")
+            self.assertIn("deny only qa/", text)
+            self.assertNotIn("deny the whole folder", text)
+
+    def test_only_rows_marked_deferred_are_deferred_and_finish_shows_a_rulings_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "df"
+            for row in (["review", "minor (deferred): f has no docstring", "P3", "app.py:1", "deferred"],
+                        ["review", "second review (two finders): none above P3; security P3 1 (deferred)",
+                         "converged", "ev", "converged"],
+                        ["ruling", "Ruling: keep the name f", "callers use it", "seen at app.py:1",
+                         "if wrong: a rename"]):
+                self.assertEqual(_cli(repo, ["log", "--slug", "df", *row])[0], 0)
+            text = self._draft(repo, run, "df")
+            self.assertIn("minor (deferred): f has no docstring", text)
+            self.assertNotIn("second review", text)
+            self._reviewed(repo, base, head, "df", state)
+            code, out = _cli(repo, ["finish", "--slug", "df", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            deferred = [line for line in out.splitlines() if line.startswith("deferred")]
+            self.assertEqual(deferred, ["deferred  minor (deferred): f has no docstring"])
+            ruling = next(line for line in out.splitlines() if line.startswith("ruling"))
+            self.assertIn("callers use it", ruling)
+            self.assertNotIn("seen at app.py:1", ruling)
+
+
+class ReportNamesNoLocalPath(unittest.TestCase):
+    """1.2.0 stripped the checkout and the home folder from what the report copies; any other local path (a scratch
+    folder, a sibling such as <checkout>.git, a checkout reached through a symlink) stayed as it was. Each now
+    becomes a placeholder the coordinator rewrites, and finish refuses a report that still has one."""
+
+    def test_any_other_local_path_becomes_a_placeholder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            state = top / ".keryx" / "runs" / "op"
+            self.assertEqual(_cli(repo, ["log", "--slug", "op", "ruling",
+                                         f"Ruling: keep {top}.git/hooks and {tmp}/repo/app.py; POST /api/v1/agents "
+                                         "stays", "why", "ev", "ok"])[0], 0)
+            (state / "PLAN.md").write_text("# op: f returns 2\n\n## Acceptance check\n"
+                                           "`python3 /tmp/keryx-probe/run.py` — on the base: 1\n")
+            self.assertEqual(_cli(repo, ["report", "--slug", "op"])[0], 0)
+            text = next((top / "docs" / "keryx").glob("*-op.md")).read_text()
+            for local in (f"{top}.git", str(Path(tmp)), "/tmp/keryx-probe"):
+                self.assertNotIn(local, text)
+            self.assertIn("POST /api/v1/agents stays", text)
+            self.assertIn("`python3 <!-- a local path was here -->`", text)
+
+    def test_a_sibling_with_a_non_ascii_name_is_not_garbled(self):
+        w, h = Path("/w/proj"), Path("/h")
+        self.assertEqual(cloud.strip_local_paths("/w/proj/a.py and /w/projé/b.py", w, h), "a.py and /w/projé/b.py")
+
+    def test_a_path_through_a_symlinked_folder_is_named_from_the_checkout(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            link = Path(tmp) / "link"
+            link.symlink_to(repo, target_is_directory=True)
+            old = os.getcwd()
+            os.chdir(repo)
+            try:
+                self.assertEqual(cloud.repo_relative(link / ".git" / "cursor-loop" / "x" / "QA.md"),
+                                 os.path.join(".git", "cursor-loop", "x", "QA.md"))
+            finally:
+                os.chdir(old)
+
+    def test_from_a_linked_worktree_paths_name_the_worktree_and_the_main_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            top = Path(run("rev-parse", "--show-toplevel"))
+            wt = top / ".worktrees" / "rel"
+            run("worktree", "add", "-q", "-b", "rel", str(wt))
+            self.assertEqual(_cli(wt, ["log", "--slug", "wo", "ruling",
+                                       f"Ruling: change {wt}/app.py, keep {top}/CLAUDE.md", "why", "ev", "ok"])[0], 0)
+            self.assertEqual(_cli(wt, ["report", "--slug", "wo"])[0], 0)
+            text = next((wt / "docs" / "keryx").glob("*-wo.md")).read_text()
+            self.assertIn("Ruling: change app.py, keep CLAUDE.md", text)
