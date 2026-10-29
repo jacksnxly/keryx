@@ -2076,3 +2076,23 @@ class ReportPathShapes(unittest.TestCase):
                            ("/usr/bin/env python3", "/usr/bin/env python3"),
                            ("https://example.com/tmp/x", "https://example.com/tmp/x")):
             self.assertEqual(cloud.strip_local_paths(text, w, h), want, text)
+
+
+class RunLineOfARunWithoutSlices(unittest.TestCase):
+    """A run with no slices keeps 1.2.0's Run line: the per-folder counts are for runs whose slices are counted too
+    (the fix round's first cut named the run's own folder after every count)."""
+
+    def test_no_folder_names_follow_the_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "solo"
+            self.assertEqual(_cli(repo, ["log", "--slug", "solo", "intake", "size M", "why", "ev", "M"])[0], 0)
+            for i, mode in enumerate(("IMPLEMENT", "FIX"), 1):
+                (state / "rounds" / f"{i:02d}").mkdir(parents=True)
+                (state / "rounds" / f"{i:02d}" / "prompt.md").write_text(f"Mode: {mode}\n")
+            text = RunReportFromTheWholeRun._draft(repo, run, "solo")
+            self.assertRegex(text, r"wall clock, 2 executor rounds \(1 FIX\)\n")
+            RunReportFromTheWholeRun._reviewed(repo, base, head, "solo", state)
+            code, out = _cli(repo, ["finish", "--slug", "solo", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("rounds    2 executor rounds, 1 of them FIX\n", out)
