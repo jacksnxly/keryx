@@ -57,7 +57,8 @@ Usage (run from inside the target repository):
   keryx.py usage     --slug S                (cloud)
   keryx.py archive   --slug S                (cloud)
   keryx.py log       --slug S PHASE DECISION WHY EVIDENCE RESULT   (the coordinator's own row)
-  keryx.py review-brief --slug S [--base REF] [--head REF] [--risk]   (write the fresh reviewer's brief; print how to dispatch it)
+  keryx.py review-brief --slug S [--base REF] [--head REF] [--risk] [--hotfix]   (write the fresh reviewer's brief;
+                        print how to dispatch it)
   keryx.py report    --slug S [--head REF]   (draft docs/keryx/<date>-<slug>.md, the run report the coordinator fills in)
   keryx.py finish   --slug S [--head REF] [--findings-only]   (the run is finished only when this prints FINISHED;
                     --findings-only: a findings-only review changes nothing, so no run report)
@@ -409,6 +410,33 @@ def deferred_rows(rows: list[tuple[int, list[str]]]) -> list[tuple[int, list[str
     """The rows marked deferred in their decision's label (the text before its first colon) — a row that only
     mentions the word later in its sentence is not one."""
     return [(n, c) for n, c in rows if "(deferred" in c[2].split(":", 1)[0].lower()]
+
+
+def is_hotfix_run(rows: list[tuple[int, list[str]]]) -> bool:
+    """A hotfix run: its log has an intake row whose decision names the lane (as `size S · lane hotfix: …` does)."""
+    return any(c[1] == "intake" and re.search(r"(?i)\blane hotfix\b", c[2]) for _, c in rows)
+
+
+def followup_rows(rows: list[tuple[int, list[str]]]) -> list[tuple[str, str]]:
+    """The run's follow-up rows: phase `followup`, decision `<slug>: <what the lasting fix does>`, the slug matching
+    the slug rule. A row in another shape is not a follow-up."""
+    found = []
+    for _, c in rows:
+        m = re.fullmatch(r"([a-z0-9][a-z0-9-]{0,60}): (.+)", c[2]) if c[1] == "followup" else None
+        if m:
+            found.append((m.group(1), m.group(2)))
+    return found
+
+
+def followup_waived(rulings: list[tuple[int, list[str]]]) -> bool:
+    """A standing ruling whose text after `Ruling: ` (or `Ruling (replaces row N): `) starts with `no follow-up`
+    (case-insensitive) waives the follow-up: the ruling says the hotfix itself is the lasting fix."""
+    text_after = re.compile(r"(?i)^ruling(?: \(replaces row \d+\))?:\s*(.*)$")
+    for _, c in rulings:
+        m = text_after.match(c[2])
+        if m and m.group(1).lower().startswith("no follow-up"):
+            return True
+    return False
 
 
 def run_folders(d: Path) -> list[Path]:
@@ -2033,6 +2061,17 @@ def cmd_locked(args) -> int:
     return 1 if bad else 0
 
 
+# The section a hotfix lane brief ends with: minutes, not the whole bar, because the lasting fix follows in its own
+# run (review-brief --hotfix).
+HOTFIX_REVIEW_SECTION = (
+    "\n## Hotfix\n\n"
+    "This change is a hotfix: production is being harmed now, and the lasting fix follows in its own run. Review the\n"
+    "diff only, for what makes things worse: report P0 and P1 only (data loss, security, wrong results served, a broken\n"
+    "feature or contract, a change that cannot be rolled back), and leave P2 and P3 to the follow-up. Answer Reach and\n"
+    "Spec in one line each, and keep to a few minutes.\n"
+)
+
+
 def cmd_review_brief(args) -> int:
     """Write the fresh reviewer's brief as a file (the bar, the paths, where to write the findings) and
     print how to dispatch it; field run 10 retyped the prompt and lost half of it."""
@@ -2078,12 +2117,13 @@ def cmd_review_brief(args) -> int:
         return (template.replace("{{repo}}", toplevel).replace("{{base}}", base).replace("{{head}}", head)
                 .replace("{{package}}", str(diff_path)).replace("{{task}}", task).replace("{{rules}}", rules)
                 .replace("{{checkout}}", checkout).replace("{{findings}}", str(findings))
-                .replace("{{security}}", security))
+                .replace("{{security}}", security)
+                + (HOTFIX_REVIEW_SECTION if args.hotfix else ""))
 
     brief = rv / f"{name}.brief.md"
     brief.write_text(brief_text(rv / f"{name}.findings.md", ""))
     print(f"package   {diff_path}")
-    print(f"dispatch  model={'opus' if args.risk else 'sonnet'}  "
+    print(f"dispatch  model={'opus' if args.risk or args.hotfix else 'sonnet'}  "
           f"prompt=\"Read {brief} and follow it exactly.\"")
     paths = [brief]
     if args.risk:  # a risk list diff gets a second finder with its own security pass
@@ -2092,9 +2132,10 @@ def cmd_review_brief(args) -> int:
                                              (PROMPTS / "reviewer-security.md").read_text().strip()))
         print(f"dispatch  model=sonnet  prompt=\"Read {security_brief} and follow it exactly.\"")
         paths.append(security_brief)
+    finders = f"{2 if args.risk else 1} finder{'s' if args.risk else ''}" + (" (hotfix)" if args.hotfix else "")
     append_log(d, "review", f"review brief for {name}",
                "the reviewer gets keryx's bar from a file, not from memory",
-               " ".join(str(p) for p in paths), "2 finders" if args.risk else "1 finder")
+               " ".join(str(p) for p in paths), finders)
     return 0
 
 
@@ -2163,6 +2204,7 @@ def cmd_report(args) -> int:
     keep = {n for n, c in rows if safe(c)}  # a credential-looking row is left out, numbered or not
     rulings = [(n, c) for n, c in standing_rulings(rows) if n in keep]
     deferred = deferred_rows([(n, c) for n, c in rows if n in keep])
+    followups = followup_rows([(n, c) for n, c in rows if n in keep])
     review = covering_review(parsed_reviews(d), final)
     plan = (d / "PLAN.md").read_text() if (d / "PLAN.md").exists() else ""
 
@@ -2228,6 +2270,14 @@ def cmd_report(args) -> int:
         run_line += (" <!-- " + ", ".join("{} ({} rounds, {} FIX)".format(f.name, *folder_rounds(f)) for f in unnamed)
                      + " started after this run, which never names it: if a slice, add its rounds to this line"
                      " and name it in the plan; if another run, delete this note -->")
+    follow_up = ""  # a hotfix run reports the run that will do the lasting fix, until it is logged
+    if is_hotfix_run(rows):
+        if followups:
+            follow_up = "".join(f"- Follow-up: `{slug}`: {committed(what)}\n" for slug, what in followups)
+        elif not followup_waived(rulings):
+            follow_up = (f"- Follow-up: <!-- the follow-up run that does the lasting fix: keryx.py log "
+                         f"--slug {args.slug} followup \"{args.slug}-root: <what>\" WHY EVIDENCE RESULT, "
+                         "then log its intake -->\n")
     text = (
         f"# {title}\n"
         "\n"
@@ -2249,6 +2299,7 @@ def cmd_report(args) -> int:
         "## Open\n"
         "<!-- What was not verified, and why. -->\n"
         + "".join(f"- Deferred: {committed(c[2])}\n" for _, c in deferred)
+        + follow_up
         + "\n"
         "## Rulings\n"
         + ("".join(f"- {committed(c[2])} — {committed(c[3])} — {committed(c[5])}\n" for _, c in rulings)
@@ -2276,6 +2327,8 @@ def cmd_finish(args) -> int:
                    and not c[2].startswith(ADAPTER_FINISH_ROWS)]
     rulings = standing_rulings(rows)
     deferred = deferred_rows(rows)
+    followups = followup_rows(rows)
+    hotfix = is_hotfix_run(rows)
 
     def commits_behind(sha: str) -> int:
         return int(git("rev-list", "--count", f"{sha}..{final}"))
@@ -2316,6 +2369,17 @@ def cmd_finish(args) -> int:
         elif "<!--" in git("show", f"{final}:{report}"):
             problems.append(f"missing  the run report at head {final[:12]}: {report} still has <!-- --> "
                             "placeholders (pass --head <the shipped commit> when it ships from another branch)")
+    if hotfix:  # the fast lane pays for itself: the lasting fix runs as its own keryx run, or a ruling says why not
+        for slug, _ in followups:
+            if not (slug_dir(slug, must_exist=False) / "decisions.tsv").exists():
+                problems.append(f"missing  the follow-up run {slug} has no run log: log its intake "
+                                f"(keryx.py log --slug {slug} intake …)")
+        if not followups and not followup_waived(rulings):
+            problems.append(f"missing  the follow-up run: keryx.py log --slug {args.slug} followup "
+                            f"\"{args.slug}-root: <what the lasting fix does>\" WHY EVIDENCE RESULT, then that "
+                            f"run's intake — or the waiver, when the hotfix is the lasting fix: keryx.py log "
+                            f"--slug {args.slug} ruling \"Ruling: no follow-up — <why the hotfix is the lasting "
+                            "fix>\" WHY EVIDENCE RESULT")
     if problems:
         print(f"NOT FINISHED  {args.slug}")
         for line in problems:
@@ -2347,6 +2411,9 @@ def cmd_finish(args) -> int:
         print(f"ruling    {c[2]} — {c[3]} — {c[5]}")
     for _, c in deferred:
         print(f"deferred  {c[2]}")
+    if hotfix:
+        for slug, what in followups:
+            print(f"followup  {slug}: {what}")
     folders = run_folders(d)
     counted = [folder_rounds(f) for f in folders]
     total, fixes = sum(n for n, _ in counted), sum(k for _, k in counted)
@@ -2363,6 +2430,8 @@ def cmd_finish(args) -> int:
     print(f"qa        {qa}" if qa.exists() else f"qa        none (no {qa})")
     finished = {"slug": args.slug, "finishedAt": now(), "head": final,
                 "reviews": reviews, "finishRows": len(finish_rows)}
+    if hotfix:
+        finished["followups"] = [slug for slug, _ in followups]
     if report is not None:
         finished["report"] = report
     save_json(d / "finished.json", finished)
@@ -2621,6 +2690,8 @@ def main(argv=None) -> int:
     rb.add_argument("--head", help="the commit to review (default: the head `fetch` recorded)")
     rb.add_argument("--risk", action="store_true",
                     help="auth, money, privacy or outside calls: dispatch a second finder with a security pass")
+    rb.add_argument("--hotfix", action="store_true",
+                    help="a hotfix: the diff only, P0 and P1 only, on the strongest model")
     rep = sub.add_parser("report")
     rep.add_argument("--slug", required=True)
     rep.add_argument("--head", help="the shipped commit (default: HEAD of this checkout, the branch that ships)")
