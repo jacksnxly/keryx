@@ -1722,12 +1722,15 @@ class WorktreesOfABareRepositoryOrASubmodule(unittest.TestCase):
 
     @staticmethod
     def _g(t):
+        import os
         import subprocess
+        # Without the GIT_CONFIG_* overrides an executor's own shell carries (its pushurl would answer instead).
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_")}
 
         def g(*a, cwd=t, check=True):
             return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
                                    "-c", "protocol.file.allow=always", *a],
-                                  cwd=cwd, check=check, capture_output=True, text=True)
+                                  cwd=cwd, check=check, capture_output=True, text=True, env=env)
         return g
 
     def _bare(self, t):
