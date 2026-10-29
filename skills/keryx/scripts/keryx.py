@@ -413,14 +413,15 @@ def deferred_rows(rows: list[tuple[int, list[str]]]) -> list[tuple[int, list[str
 
 
 def is_hotfix_run(rows: list[tuple[int, list[str]]]) -> bool:
-    """A hotfix run: its log has an intake row whose decision names the lane (`size S · lane hotfix: …`, or with
-    another separator), and not negated: prose such as "not lane hotfix" or "no lane hotfix" is no hotfix."""
+    """A hotfix run: its log has an intake row that declares the lane as a field — `lane hotfix` at the start or after
+    a separator (`size S · lane hotfix: …`, `size S, lane hotfix`) — never a mention inside a sentence: "not lane
+    hotfix", or a follow-up's "the lasting fix behind the lane hotfix hf", is no hotfix."""
     return bool(hotfix_started(rows))
 
 
 def hotfix_started(rows: list[tuple[int, list[str]]]) -> str:
     """The time of the run's first hotfix intake row, or "" when the run is not a hotfix."""
-    stamps = [c[0] for _, c in rows if c[1] == "intake" and re.search(r"(?i)(?<!\bnot )(?<!\bno )\blane hotfix\b", c[2])]
+    stamps = [c[0] for _, c in rows if c[1] == "intake" and re.search(r"(?i)(?:^|[·,;|])\s*lane hotfix\b", c[2])]
     return min(stamps) if stamps else ""
 
 
@@ -443,7 +444,7 @@ def followup_waived(rulings: list[tuple[int, list[str]]]) -> bool:
     for _, c in rulings:
         m = text_after.match(c[2])
         # the phrase, a separator and a reason (`no follow-up — <why>`), not prose like "no follow-up run is open yet"
-        if m and re.match(r"(?i)no follow-up(?:\s+[—–-]\s*|\s*:\s*)\S", m.group(1)):
+        if m and re.match(r"(?i)no follow-ups?(?:\s+[—–-]\s*|\s*:\s*)\S", m.group(1)):
             return True
     return False
 
@@ -489,6 +490,7 @@ def _later_prefix_folders(d: Path) -> tuple[list[Path], list[Path]]:
     # a hotfix's follow-ups are separate runs, never its slices; an ordinary run has no follow-ups to set aside
     follow_ups = ({slug for slug, _ in standing_followups(rows, standing_rulings(rows))} if is_hotfix_run(rows)
                   else set())  # a row dropped by a ruling sets nothing aside
+    follow_ups.discard(d.name)  # a row naming the run itself must not set its own later runs aside
 
     def a_follow_up(name: str) -> bool:  # the follow-up run, or one of its own slices
         return any(name == f or name.startswith(f + "-") for f in follow_ups)
@@ -2297,7 +2299,10 @@ def cmd_report(args) -> int:
                      + " started after this run, which never names it: if a slice, add its rounds to this line"
                      " and name it in the plan; if another run, delete this note -->")
     follow_up = ""  # a hotfix run reports the run that will do the lasting fix, until it is logged
-    if is_hotfix_run(rows) and not followup_waived(standing_rulings(rows)):  # a waived follow-up is in the rulings
+    if is_hotfix_run(rows) and followup_waived(standing_rulings(rows)):
+        # said in the report itself: the ruling may be one the Rulings section leaves out (it looks like a credential)
+        follow_up = "- Follow-up: none — waived by a ruling (`Ruling: no follow-up — …` in the run log)\n"
+    elif is_hotfix_run(rows):
         if followups:
             follow_up = "".join(f"- Follow-up: `{slug}`: {committed(what)}\n" for slug, what in followups)
         else:

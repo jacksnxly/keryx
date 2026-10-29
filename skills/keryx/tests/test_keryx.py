@@ -2365,7 +2365,7 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
             code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
             self.assertEqual(code, 0, out)
             self.assertIn("followup  hf-root: the lasting fix", out)
-            self.assertNotIn("hf-roto: the lasting fix", out.split("ruling")[0])
+            self.assertEqual([l for l in out.splitlines() if l.startswith("followup")], ["followup  hf-root: the lasting fix"])
 
     def test_the_follow_up_runs_executor_rounds_are_not_the_hotfixs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2391,7 +2391,8 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
         for text in ("size S · lane hotfix: prod is down", "size S · lane hotfix - prod is down", "lane hotfix — login",
                      "size S, lane hotfix"):
             self.assertTrue(cloud.is_hotfix_run(rows(text)), text)
-        for text in ("size M: the export button — not lane hotfix", "size M, no lane hotfix needed", "size M: hotfixes later"):
+        for text in ("size M: the export button — not lane hotfix", "size M, no lane hotfix needed", "size M: hotfixes later",
+                     "size M: the lasting fix behind the lane hotfix hf"):
             self.assertFalse(cloud.is_hotfix_run(rows(text)), text)
 
     def test_a_waiver_is_the_phrase_no_follow_up_itself(self):
@@ -2437,7 +2438,8 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
                 self.assertEqual(_cli(repo, ["log", "--slug", "hf", *row])[0], 0)
             self.assertEqual(_cli(repo, ["report", "--slug", "hf", "--head", head])[0], 0)
             draft = next((top / "docs" / "keryx").glob("*-hf.md")).read_text()
-            self.assertNotIn("- Follow-up:", draft)
+            self.assertIn("- Follow-up: none — waived by a ruling", draft)
+            self.assertNotIn("hf-roto", draft.split("## Rulings")[0])
 
     def test_the_follow_up_runs_slices_are_not_the_hotfixs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2460,7 +2462,8 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
         def ruling(text):
             return [(1, ["2026-10-29T10:00:00Z", "ruling", text, "w", "e", "r"])]
         for text in ("Ruling: no follow-up — the revert is the lasting fix", "Ruling: no follow-up - the revert",
-                     "Ruling: no follow-up: the revert", "Ruling (replaces row 3): no follow-up — the revert"):
+                     "Ruling: no follow-up: the revert", "Ruling (replaces row 3): no follow-up — the revert",
+                     "Ruling: no follow-ups — the revert covers both"):
             self.assertTrue(cloud.followup_waived(ruling(text)), text)
         for text in ("Ruling: no follow-up run is open yet", "Ruling: no follow-up-run has been opened yet",
                      "Ruling: no follow-up —"):
@@ -2480,3 +2483,16 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
             code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
             self.assertEqual(code, 0, out)
             self.assertIn("hf-a 1", out)
+
+    def test_a_follow_up_row_naming_the_run_itself_hides_none_of_its_later_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
+            for row in (["followup", "hf: the same run", "w", "e", "x"],
+                        ["ruling", "Ruling: no follow-up — the revert is the lasting fix", "w", "e", "r"]):
+                self.assertEqual(_cli(repo, ["log", "--slug", "hf", *row])[0], 0)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf-later", "intake", "something later", "w", "e", "S"])[0], 0)
+            (state.parent / "hf-later" / "rounds" / "01").mkdir(parents=True)
+            (state.parent / "hf-later" / "rounds" / "01" / "prompt.md").write_text("Mode: IMPLEMENT\n")
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("unnamed   hf-later", out)
