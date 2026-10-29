@@ -95,16 +95,33 @@ def _busy_min(times: list[float]) -> float:
     return round(sum(b - a for a, b in zip(times, times[1:]) if b - a <= IDLE_GAP_S) / 60, 1)
 
 
+def _git(repo: Path, *args: str) -> str:
+    done = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def _main_and_common(repo: Path) -> tuple[Path, Path]:
+    """The main checkout and the common git dir, by the adapter's rule (keryx.py main_worktree)."""
+    if (repo / ".git").is_dir():
+        return repo, repo / ".git"
+    common = _git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    common_path = (Path(common) if Path(common).is_absolute() else repo / common).resolve()
+    git_dir = _git(repo, "rev-parse", "--absolute-git-dir")
+    if git_dir and Path(git_dir).resolve() == common_path:
+        top = _git(repo, "rev-parse", "--show-toplevel")
+        if top:
+            return Path(top).resolve(), common_path
+    if common_path.name == ".git":
+        return common_path.parent, common_path
+    worktree = _git(common_path, "config", "--file", str(common_path / "config"), "core.worktree")
+    if worktree:
+        return (common_path / worktree).resolve(), common_path
+    return common_path, common_path
+
+
 def _loops_dirs(repo: Path) -> list[Path]:
     """Both layouts a run can live in, the keryx folder first; only those that exist."""
-    repo = Path(repo)
-    if (repo / ".git").is_dir():
-        main, common_path = repo, repo / ".git"
-    else:
-        common = subprocess.run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                                capture_output=True, text=True).stdout.strip()
-        common_path = (Path(common) if Path(common).is_absolute() else repo / common).resolve()
-        main = common_path.parent
+    main, common_path = _main_and_common(Path(repo))
     return [d for d in (main / ".keryx" / "runs", common_path / "cursor-loop") if d.is_dir()]
 
 
