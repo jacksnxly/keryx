@@ -2371,7 +2371,10 @@ def cmd_finish(args) -> int:
                             "placeholders (pass --head <the shipped commit> when it ships from another branch)")
     if hotfix:  # the fast lane pays for itself: the lasting fix runs as its own keryx run, or a ruling says why not
         for slug, _ in followups:
-            if not (slug_dir(slug, must_exist=False) / "decisions.tsv").exists():
+            if slug == args.slug:  # the lasting fix needs a run of its own, or the gate would wave itself through
+                problems.append(f"missing  the follow-up run {slug} is this hotfix run itself: name the run that "
+                                f"does the lasting fix (keryx.py log --slug {args.slug} followup \"{args.slug}-root: …\")")
+            elif not (slug_dir(slug, must_exist=False) / "decisions.tsv").exists():
                 problems.append(f"missing  the follow-up run {slug} has no run log: log its intake "
                                 f"(keryx.py log --slug {slug} intake …)")
         if not followups and not followup_waived(rulings):

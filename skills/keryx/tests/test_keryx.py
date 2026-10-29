@@ -2289,3 +2289,18 @@ class HotfixLane(unittest.TestCase):
         playbook = (plugin / "skills" / "keryx" / "references" / "hotfix.md").read_text()
         for must in ("lane hotfix", "followup", "review-brief --slug <slug> --hotfix", "rollback"):
             self.assertIn(must, playbook)
+
+
+class HotfixFollowUpIsAnotherRun(unittest.TestCase):
+    """The follow-up does the lasting fix in a run of its own: naming the hotfix run itself is no follow-up (QA found
+    that it let finish pass)."""
+
+    GOOD = FinishGate.GOOD
+
+    def test_a_follow_up_naming_the_hotfix_run_itself_does_not_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", "hf: the same run", "w", "e", "x"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 1, out)
+            self.assertIn("missing  the follow-up run hf is this hotfix run itself", out)
