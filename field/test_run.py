@@ -273,3 +273,24 @@ def test_a_run_split_across_both_layouts_is_read_from_both(tmp_path):
     rec = run.record(session, repo, slug="tf", now=BASE)
     assert rec["log"]["rows"] == 3
     assert sorted(x["loop"] for x in rec["executor"]["runs"]) == ["tf-s1", "tf-s2"]
+
+
+def test_runs_in_a_separate_git_dir_and_a_submodule_are_recorded(tmp_path):
+    # The recorder finds the main checkout by the adapter's rule (keryx.py main_worktree).
+    import subprocess
+    session, _ = _setup(tmp_path)
+
+    def g(*a, cwd=tmp_path):
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.file.allow=always", *a],
+                       cwd=cwd, check=True, capture_output=True)
+
+    g("init", "-q", "-b", "main", "sep", f"--separate-git-dir={tmp_path / 'sep.gitdir'}")
+    g("init", "-q", "-b", "main", "sub")
+    g("commit", "-q", "--allow-empty", "-m", "b", cwd=tmp_path / "sub")
+    g("init", "-q", "-b", "main", "sup")
+    g("submodule", "-q", "add", str(tmp_path / "sub"), "mod", cwd=tmp_path / "sup")
+    for checkout in (tmp_path / "sep", tmp_path / "sup" / "mod"):
+        log = checkout / ".keryx" / "runs" / "tf" / "decisions.tsv"
+        log.parent.mkdir(parents=True)
+        log.write_text("ts\tphase\tdecision\twhy\tevidence\tresult\nt\tintake\tsize M\tw\te\tM\n")
+        assert run.record(session, checkout, slug="tf", now=BASE)["log"]["rows"] == 1, checkout
