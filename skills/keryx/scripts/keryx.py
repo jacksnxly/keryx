@@ -413,8 +413,15 @@ def deferred_rows(rows: list[tuple[int, list[str]]]) -> list[tuple[int, list[str
 
 
 def is_hotfix_run(rows: list[tuple[int, list[str]]]) -> bool:
-    """A hotfix run: its log has an intake row whose decision names the lane (as `size S · lane hotfix: …` does)."""
-    return any(c[1] == "intake" and re.search(r"(?i)\blane hotfix\b", c[2]) for _, c in rows)
+    """A hotfix run: its log has an intake row whose decision names the lane as the playbook writes it,
+    `size S · lane hotfix: …` — the marker with its colon, so prose such as "not lane hotfix" is not one."""
+    return bool(hotfix_started(rows))
+
+
+def hotfix_started(rows: list[tuple[int, list[str]]]) -> str:
+    """The time of the run's first hotfix intake row, or "" when the run is not a hotfix."""
+    stamps = [c[0] for _, c in rows if c[1] == "intake" and re.search(r"(?i)\blane hotfix:", c[2])]
+    return min(stamps) if stamps else ""
 
 
 def followup_rows(rows: list[tuple[int, list[str]]]) -> list[tuple[str, str]]:
@@ -2377,6 +2384,11 @@ def cmd_finish(args) -> int:
             elif not (slug_dir(slug, must_exist=False) / "decisions.tsv").exists():
                 problems.append(f"missing  the follow-up run {slug} has no run log: log its intake "
                                 f"(keryx.py log --slug {slug} intake …)")
+            elif not any(c[1] == "intake" and c[0] >= hotfix_started(rows)
+                         for _, c in read_log_rows(slug_dir(slug, must_exist=False))):
+                # a run opened before the hotfix, or one with only a note, is not the lasting fix's run
+                problems.append(f"missing  the follow-up run {slug} has no intake since this hotfix began: log its "
+                                f"intake (keryx.py log --slug {slug} intake …)")
         if not followups and not followup_waived(rulings):
             problems.append(f"missing  the follow-up run: keryx.py log --slug {args.slug} followup "
                             f"\"{args.slug}-root: <what the lasting fix does>\" WHY EVIDENCE RESULT, then that "

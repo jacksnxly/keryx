@@ -2313,3 +2313,30 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
             code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
             self.assertEqual(code, 1, out)
             self.assertIn("missing  the follow-up run: keryx.py log --slug hf followup", out)
+
+    def test_the_follow_up_is_a_run_opened_for_it_not_any_run_with_a_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
+            runs = state.parent
+            (runs / "old-run").mkdir()
+            (runs / "old-run" / "decisions.tsv").write_text(  # an unrelated run, opened long before the hotfix
+                "ts\tphase\tdecision\twhy\tevidence\tresult\n2026-01-01T10:00:00Z\tintake\tsize M: something else\tw\te\tM\n")
+            self.assertEqual(_cli(repo, ["log", "--slug", "noted-only", "note", "a note, no intake", "w", "e", "x"])[0], 0)
+            for slug in ("old-run", "noted-only"):
+                self.assertEqual(_cli(repo, ["log", "--slug", "hf", "followup", f"{slug}: the lasting fix", "w", "e", "x"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 1, out)
+            for slug in ("old-run", "noted-only"):
+                self.assertIn(f"missing  the follow-up run {slug} has no intake since this hotfix began", out)
+
+    def test_only_the_lane_marker_makes_a_hotfix_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            state = Path(run("rev-parse", "--show-toplevel")) / ".keryx" / "runs" / "prose"
+            self.assertEqual(_cli(repo, ["log", "--slug", "prose", "intake", "size M: the export button — not lane hotfix",
+                                         "w", "e", "M"])[0], 0)
+            self.assertEqual(_cli(repo, ["review-brief", "--slug", "prose", "--base", base, "--head", head])[0], 0)
+            (state / "review" / f"{base[:12]}..{head[:12]}.findings.md").write_text(self.GOOD.format(head=head))
+            self.assertEqual(_cli(repo, ["log", "--slug", "prose", "finish", "PR #4", "w", "e", "merged"])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "prose", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
