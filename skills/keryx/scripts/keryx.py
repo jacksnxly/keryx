@@ -436,12 +436,14 @@ def followup_rows(rows: list[tuple[int, list[str]]]) -> list[tuple[str, str]]:
 
 
 def followup_waived(rulings: list[tuple[int, list[str]]]) -> bool:
-    """A standing ruling whose text after `Ruling: ` (or `Ruling (replaces row N): `) starts with `no follow-up`
-    (case-insensitive) waives the follow-up: the ruling says the hotfix itself is the lasting fix."""
+    """A standing ruling whose text after `Ruling: ` (or `Ruling (replaces row N): `) is `no follow-up — <why>`
+    (case-insensitive; a dash, en dash, em dash or colon before the reason) waives the follow-up: the ruling says the
+    hotfix itself is the lasting fix."""
     text_after = re.compile(r"(?i)^ruling(?: \(replaces row \d+\))?:\s*(.*)$")
     for _, c in rulings:
         m = text_after.match(c[2])
-        if m and re.match(r"(?i)no follow-up(?![\w-])", m.group(1)):  # the phrase itself, not "no follow-up-run …"
+        # the phrase, a separator and a reason (`no follow-up — <why>`), not prose like "no follow-up run is open yet"
+        if m and re.match(r"(?i)no follow-up(?:\s+[—–-]\s*|\s*:\s*)\S", m.group(1)):
             return True
     return False
 
@@ -485,7 +487,8 @@ def _later_prefix_folders(d: Path) -> tuple[list[Path], list[Path]]:
 
     own = rows[0][1][0]
     # a hotfix's follow-ups are separate runs, never its slices; an ordinary run has no follow-ups to set aside
-    follow_ups = {slug for slug, _ in followup_rows(rows)} if is_hotfix_run(rows) else set()
+    follow_ups = ({slug for slug, _ in standing_followups(rows, standing_rulings(rows))} if is_hotfix_run(rows)
+                  else set())  # a row dropped by a ruling sets nothing aside
 
     def a_follow_up(name: str) -> bool:  # the follow-up run, or one of its own slices
         return any(name == f or name.startswith(f + "-") for f in follow_ups)

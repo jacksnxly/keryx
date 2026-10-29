@@ -2455,3 +2455,28 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
         playbook = (Path(__file__).resolve().parents[1] / "references" / "hotfix.md").read_text()
         self.assertIn("keryx.py finish --slug <slug> --head", playbook)
 
+
+    def test_a_waiver_needs_the_separator_and_a_reason(self):
+        def ruling(text):
+            return [(1, ["2026-10-29T10:00:00Z", "ruling", text, "w", "e", "r"])]
+        for text in ("Ruling: no follow-up — the revert is the lasting fix", "Ruling: no follow-up - the revert",
+                     "Ruling: no follow-up: the revert", "Ruling (replaces row 3): no follow-up — the revert"):
+            self.assertTrue(cloud.followup_waived(ruling(text)), text)
+        for text in ("Ruling: no follow-up run is open yet", "Ruling: no follow-up-run has been opened yet",
+                     "Ruling: no follow-up —"):
+            self.assertFalse(cloud.followup_waived(ruling(text)), text)
+
+    def test_a_dropped_follow_up_row_does_not_hide_a_slice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head, state = HotfixLane._hotfix_run(self, tmp)
+            (state / "PLAN.md").write_text("## Slices\n- hf-a: owns app.py\n")
+            self.assertEqual(_cli(repo, ["log", "--slug", "hf-a", "intake", "slice a", "w", "e", "S"])[0], 0)
+            (state.parent / "hf-a" / "rounds" / "01").mkdir(parents=True)
+            (state.parent / "hf-a" / "rounds" / "01" / "prompt.md").write_text("Mode: IMPLEMENT\n")
+            for row in (["followup", "hf-a: logged by mistake", "w", "e", "x"],
+                        ["ruling", "Ruling: drop follow-up hf-a — it is a slice, not the lasting fix", "w", "e", "r"],
+                        ["ruling", "Ruling: no follow-up — the revert is the lasting fix", "w", "e", "r"]):
+                self.assertEqual(_cli(repo, ["log", "--slug", "hf", *row])[0], 0)
+            code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
+            self.assertEqual(code, 0, out)
+            self.assertIn("hf-a 1", out)
