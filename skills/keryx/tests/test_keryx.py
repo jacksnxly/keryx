@@ -2617,8 +2617,10 @@ class UsageLimitsAreRememberedAcrossSessions(unittest.TestCase):
             cloud.record_limit(env, "cli", future, now)
             self.assertEqual(self._executors(env, "--after", "glm")[1], ["subagent"], "a limited rung is skipped")
             self.assertEqual(self._executors(env, "--after", "subagent")[1], ["inline"])
-            past = {"kind": "5 hour", "resetsAt": "2000-01-01T00:00:00Z", "resetsIn": None}
-            cloud.record_limit(env, "glm", past, now)
+            limits = Path(d) / "limits.json"
+            data = json.loads(limits.read_text())
+            data["glm"]["until"] = "2000-01-01T00:00:00Z"   # glm's reset has passed
+            limits.write_text(json.dumps(data))
             self.assertEqual(self._executors(env)[1], ["glm", "subagent"], "glm is back once its reset has passed")
         with tempfile.TemporaryDirectory() as d:
             env = self._env(d, ladder=("glm",))
