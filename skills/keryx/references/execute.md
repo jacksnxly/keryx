@@ -22,7 +22,7 @@ When nothing is set up, `keryx.py executors` says so on stderr. Then, once: run 
 
 A round stopped by a usage limit ends ERROR, and `wait` prints `USAGE_LIMIT` with the reset: a time in UTC for GLM (which prints UTC+8), a span such as "4 days" for Cursor. If the reset is within about 45 minutes, wait for it and `followup` on the same slug: the round resumes its session and its uncommitted work; when `followup` finds no session (the run died before it started one), `create` on the same slug and runner again. Otherwise take the next rung (`executors --after`; `inline` means you). *(evidence: runs that resumed after a GLM reset lost ~25 minutes; GLM prints its reset time in UTC+8)*
 
-`wait` and `status` record the limit for every session on the machine (`limits.json` beside the config): `keryx.py executors` leaves that runner out, says until when, and lists it again once the reset has passed. Take every new round and slice from `keryx.py executors`, never from the runner the last round used. *(evidence: the owner had to say "glm is free again" or "glm is back" 8 times in a week)*
+`wait` and `status` record the limit for every session on the machine (`limits.json` beside the config): `keryx.py executors` leaves that runner out, says until when, and lists it again once the reset has passed. Take every new round and slice from `keryx.py executors`, never from the runner the last round used. A limit that lifts early (the owner upgraded the plan) stays until its recorded time: delete that runner's entry from `limits.json`. *(evidence: the owner had to say "glm is free again" or "glm is back" 8 times in a week)*
 
 ### On any executor error, the next rung
 
