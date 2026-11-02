@@ -2496,3 +2496,165 @@ class HotfixFollowUpIsAnotherRun(unittest.TestCase):
             code, out = _cli(repo, ["finish", "--slug", "hf", "--head", head, "--findings-only"])
             self.assertEqual(code, 0, out)
             self.assertIn("unnamed   hf-later", out)
+
+
+def _reviewed_run(test, tmp, slug):
+    """A two-commit repository with a reviewed keryx run on it: plan, findings for the head, a ruling, a deferred
+    minor and a finish row."""
+    repo, run, base, head = _two_commit_repo(tmp)
+    top = Path(run("rev-parse", "--show-toplevel"))
+    state = top / ".keryx" / "runs" / slug
+    test.assertEqual(_cli(repo, ["review-brief", "--slug", slug, "--base", base, "--head", head])[0], 0)
+    (state / "review" / f"{base[:12]}..{head[:12]}.findings.md").write_text(FinishGate.GOOD.format(head=head))
+    (state / "PLAN.md").write_text(f"# {slug}: f returns 2\n\n## Acceptance check\n"
+                                   "`python3 -c 'import app; assert app.f() == 2'` — on the base: AssertionError.\n")
+    for row in (["ruling", "Ruling: keep the name f", "callers use it", "app.py:1", "a rename later"],
+                ["finish", "branch main committed", "the acceptance check passes", "ev", "committed"]):
+        test.assertEqual(_cli(repo, ["log", "--slug", slug, *row])[0], 0)
+    return repo, run, head, top, state
+
+
+class ReportLeadsWithProof(unittest.TestCase):
+    """The owner reads a report for its proof first, and comes back to a session asking "where are we, what's
+    next?" (field analysis 2026-11-01: the most common check-in, 6.2 per 100 prompts, a median 4.8 h after the
+    previous prompt). The draft opens with the proof and closes with what is live, what waits on the owner and
+    what comes next."""
+
+    def test_the_draft_opens_with_the_proof_and_closes_with_live_waiting_and_next(self):
+        import datetime
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, head, top, state = _reviewed_run(self, tmp, "nw")
+            code, out = _cli(repo, ["report", "--slug", "nw"])
+            self.assertEqual(code, 0, out)
+            text = (top / f"docs/keryx/{datetime.date.today().isoformat()}-nw.md").read_text()
+            self.assertLess(text.index("## Proof"), text.index("## What changed"), "the proof comes first")
+            self.assertGreater(text.index("## Now"), text.index("## Run"), "the Now block closes the report")
+            now_block = text[text.index("## Now"):]
+            for line in ("- Live: <!--", "- Waiting on you: <!--", "- Next: <!--"):
+                self.assertIn(line, now_block)
+
+    def test_finish_waits_for_the_now_block_like_any_placeholder(self):
+        import datetime
+        import re
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, head, top, state = _reviewed_run(self, tmp, "nw")
+            self.assertEqual(_cli(repo, ["report", "--slug", "nw"])[0], 0)
+            name = f"docs/keryx/{datetime.date.today().isoformat()}-nw.md"
+            text = (top / name).read_text()
+            cut = text.index("## Now")
+            (top / name).write_text(re.sub(r"<!--.*?-->", "filled in", text[:cut], flags=re.S) + text[cut:])
+            run("add", name)
+            run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "docs(keryx): report for nw")
+            code, out = _cli(repo, ["finish", "--slug", "nw", "--head", run("rev-parse", "HEAD")])
+            self.assertEqual(code, 1, "an unfilled Now block is an unfinished report")
+            self.assertIn("placeholders", out)
+            (top / name).write_text(re.sub(r"<!--.*?-->", "filled in", text, flags=re.S))
+            run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am", "docs(keryx): now block")
+            code, out = _cli(repo, ["finish", "--slug", "nw", "--head", run("rev-parse", "HEAD")])
+            self.assertEqual(code, 0, out)
+
+
+class UsageLimitsAreRememberedAcrossSessions(unittest.TestCase):
+    """An executor at its usage limit is left out of the ladder for every session on the machine until its limit
+    resets, then comes back on its own (field: the owner said "glm is free again" or "glm is back" 8 times in a
+    week). The record lives next to the ladder: <config dir>/limits.json."""
+
+    from datetime import datetime as _dt, timezone as _tz
+    AT = _dt(2026, 11, 2, 8, 0, tzinfo=_tz.utc)
+    LATER = _dt(2026, 11, 4, 3, 25, tzinfo=_tz.utc)
+
+    def _env(self, d, ladder=("glm", "cli", "subagent")):
+        p = Path(d) / "config.json"
+        p.write_text(json.dumps({"executors": list(ladder)}))
+        return {"KERYX_CONFIG": str(p)}
+
+    def test_a_limited_executor_is_left_out_until_its_reset_then_comes_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = self._env(d)
+            limit = {"kind": "weekly/monthly", "resetsAt": "2026-11-04T03:24:16Z", "resetsIn": None}
+            self.assertEqual(cloud.record_limit(env, "glm", limit, self.AT), "2026-11-04T03:24:16Z")
+            self.assertTrue((Path(d) / "limits.json").exists())
+            self.assertEqual(cloud.limited_runners(env, self.AT), {"glm": "2026-11-04T03:24:16Z"})
+            self.assertEqual(cloud.available_ladder(["glm", "cli", "subagent"], env, self.AT), ["cli", "subagent"])
+            self.assertEqual(cloud.limited_runners(env, self.LATER), {})
+            self.assertEqual(cloud.available_ladder(["glm", "cli", "subagent"], env, self.LATER),
+                             ["glm", "cli", "subagent"])
+
+    def test_a_span_becomes_a_time_and_an_unreadable_one_is_not_recorded(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = self._env(d)
+            weekly = {"kind": "weekly", "resetsAt": None, "resetsIn": "4 days"}
+            self.assertEqual(cloud.record_limit(env, "cli", weekly, self.AT), "2026-11-06T08:00:00Z")
+            hours = {"kind": "5h", "resetsAt": None, "resetsIn": "3 hours"}
+            self.assertEqual(cloud.record_limit(env, "cli", hours, self.AT), "2026-11-02T11:00:00Z")
+            vague = {"kind": "x", "resetsAt": None, "resetsIn": "soon"}
+            self.assertIsNone(cloud.record_limit(env, "cloud", vague, self.AT))
+            self.assertEqual(cloud.limited_runners(env, self.AT), {"cli": "2026-11-02T11:00:00Z"},
+                             "a runner's latest record replaces its earlier one")
+
+    def _executors(self, env, *argv):
+        import contextlib
+        import io
+        import os
+        from unittest import mock
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cloud.main(["executors", *argv])
+        return code, out.getvalue().split(), err.getvalue()
+
+    def test_the_executors_command_leaves_out_a_limited_runner_and_says_until_when(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as d:
+            env = self._env(d)
+            future = {"kind": "weekly/monthly", "resetsAt": "2099-01-01T00:00:00Z", "resetsIn": None}
+            cloud.record_limit(env, "glm", future, now)
+            code, ladder, err = self._executors(env)
+            self.assertEqual((code, ladder), (0, ["cli", "subagent"]))
+            self.assertIn("glm", err)
+            self.assertIn("2099-01-01T00:00:00Z", err)
+            self.assertEqual(self._executors(env, "--after", "glm")[1], ["cli"])
+            cloud.record_limit(env, "cli", future, now)
+            self.assertEqual(self._executors(env, "--after", "glm")[1], ["subagent"], "a limited rung is skipped")
+            self.assertEqual(self._executors(env, "--after", "subagent")[1], ["inline"])
+            past = {"kind": "5 hour", "resetsAt": "2000-01-01T00:00:00Z", "resetsIn": None}
+            cloud.record_limit(env, "glm", past, now)
+            self.assertEqual(self._executors(env)[1], ["glm", "subagent"], "glm is back once its reset has passed")
+        with tempfile.TemporaryDirectory() as d:
+            env = self._env(d, ladder=("glm",))
+            cloud.record_limit(env, "glm", future, now)
+            self.assertEqual(self._executors(env)[1], ["inline"], "with every executor limited, you write it")
+
+    def test_a_round_stopped_by_its_limit_is_recorded_for_every_session(self):
+        import contextlib
+        import io
+        import os
+        import subprocess
+        from datetime import datetime, timezone
+        from unittest import mock
+        msg = "[1308][Usage limit reached for 5 hour. Your limit will reset at 2026-10-27 19:58:02]"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = self._env(tmp)
+            repo = root / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@x.invalid", "-c", "user.name=t",
+                            "commit", "-q", "--allow-empty", "-m", "work"], check=True)
+            gone = subprocess.Popen([sys.executable, "-c", "pass"])
+            gone.wait()
+            d = root / "loops" / "st"
+            (d / "rounds" / "01").mkdir(parents=True)
+            (d / "agent.json").write_text(json.dumps({"runner": "glm", "workspace": str(repo), "branch": "glm/st"}))
+            (d / "rounds" / "01" / "run.json").write_text(json.dumps({"pid": gone.pid, "status": "ERROR"}))
+            (d / "rounds" / "01" / "events.ndjson").write_text("")
+            (d / "rounds" / "01" / "stderr.log").write_text("API Error: Request rejected (429) · " + msg + "\n")
+            orig = cloud.state_root
+            cloud.state_root = lambda: root / "loops"
+            try:
+                with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(cloud.main(["status", "--slug", "st"]), 0)
+            finally:
+                cloud.state_root = orig
+            self.assertIn("USAGE_LIMIT", out.getvalue())
+            before = datetime(2026, 10, 27, 11, 0, tzinfo=timezone.utc)
+            self.assertEqual(cloud.limited_runners(env, before), {"glm": "2026-10-27T11:58:02Z"})
