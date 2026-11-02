@@ -78,7 +78,6 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
-import fcntl
 import fnmatch
 import json
 import mimetypes
@@ -876,9 +875,14 @@ def report_usage_limit(d: Path, r: Path, limit: dict) -> None:
     runner = load_agent(d).get("runner")
     if isinstance(runner, str) and runner:
         # The same limit applies to every session on this machine, not only this round's run.json.
-        until = record_limit(dict(os.environ), runner, limit, dt.datetime.now(dt.timezone.utc))
-        if until:
-            print(f"recorded   {runner} is left out of keryx.py executors until {until}")
+        # A limits file that cannot be written must not take down wait or status: the round already ended.
+        try:
+            until = record_limit(dict(os.environ), runner, limit, dt.datetime.now(dt.timezone.utc))
+        except OSError as exc:
+            print(f"could not record the limit for {runner}: {exc.strerror or exc}")
+        else:
+            if until:
+                print(f"recorded   {runner} is left out of keryx.py executors until {until}")
 
 
 SETUP_NOTE = ("keryx is not set up on this machine: run `keryx.py setup --detect`, then ask the owner "
@@ -1057,13 +1061,39 @@ def _write_limits(path: Path, data: dict) -> None:
         raise
 
 
-def record_limit(environ: dict, runner: str, limit: dict, at: dt.datetime) -> str | None:
-    """Remember `runner`'s usage limit until it resets. A new record replaces that runner's old one.
+def _saved_limits(path: Path) -> dict[str, dict]:
+    current: dict[str, dict] = {}
+    for name, entry in _read_limits(path).items():
+        if not isinstance(name, str) or looks_secret(name):
+            continue
+        kept = _kept_limit(entry)
+        if kept is not None:
+            current[name] = kept
+    return current
 
-    Returns the "until" time, or None when the reset cannot be read (and then nothing is written).
-    Two sessions can record at once: the write is a temp file in the same folder plus os.replace,
-    under a lock so one record does not erase the other. The file holds runner names, kinds and
-    times only."""
+
+def _store_limit(path: Path, runner: str, kind: str, until: str, at: dt.datetime) -> str | None:
+    """Save `runner`'s record. A reset that is already past does not replace one that is still live."""
+    current = _saved_limits(path)
+    existing = current.get(runner)
+    moment = _as_utc(at)
+    old_until = _parse_stamp(existing.get("until")) if existing else None
+    new_until = _parse_stamp(until)
+    if old_until is not None and old_until > moment and (new_until is None or new_until <= moment):
+        return None
+    current[runner] = {"kind": kind, "until": until, "recorded": _stamp(at)}
+    _write_limits(path, current)
+    return until
+
+
+def record_limit(environ: dict, runner: str, limit: dict, at: dt.datetime) -> str | None:
+    """Remember `runner`'s usage limit until it resets.
+
+    Returns the "until" time, or None when the reset cannot be read or a still-live record is left
+    as it is (and then nothing is written). The first record is saved whatever its time. A reset
+    that is still ahead replaces the runner's old one. Two sessions can record at once: the write
+    is a temp file in the same folder plus os.replace, and where fcntl exists a lock so one record
+    does not erase the other. The file holds runner names, kinds and times only."""
     until = _until_from_limit(limit, at)
     if until is None or not isinstance(runner, str) or not runner:
         return None
@@ -1073,22 +1103,18 @@ def record_limit(environ: dict, runner: str, limit: dict, at: dt.datetime) -> st
         return None
     path = _limits_path(environ)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # fcntl is Unix-only. Without it the replace is still atomic; two writers can only lose an update.
+    try:
+        import fcntl
+    except ImportError:
+        return _store_limit(path, runner, kind, until, at)
     lock_path = path.with_name(path.name + ".lock")
     with open(lock_path, "a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
-            current: dict[str, dict] = {}
-            for name, entry in _read_limits(path).items():
-                if not isinstance(name, str) or looks_secret(name):
-                    continue
-                kept = _kept_limit(entry)
-                if kept is not None:
-                    current[name] = kept
-            current[runner] = {"kind": kind, "until": until, "recorded": _stamp(at)}
-            _write_limits(path, current)
+            return _store_limit(path, runner, kind, until, at)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-    return until
 
 
 def limited_runners(environ: dict, at: dt.datetime) -> dict[str, str]:
