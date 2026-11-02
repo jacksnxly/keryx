@@ -20,10 +20,11 @@
 
 A few lines, in the owner's words, not the process's, taken from what `keryx.py finish` printed:
 
-1. **What changed** for the person using it, and where it lives (branch, commits, PR).
-2. **Proof**: the acceptance check's command and its result on the base and now; the mutation probes and what caught them; the QA file (`<state>/qa/QA.md`), with each piece of evidence named for what it is.
+1. **Proof** first: the acceptance check's command and its result on the base and now; the mutation probes and what caught them; the QA file (`<state>/qa/QA.md`) and its screenshots, as paths the owner can open, each piece of evidence named for what it is.
+2. **What changed** for the person using it, and where it lives (branch, commits, PR).
 3. **Open**: what was not verified and why; deferred minors.
 4. **Rulings I made** you may want to change, each with what it costs if wrong.
 5. Time and tokens: wall clock, executor runs, fix rounds.
+6. **Now**, the last three lines: **Live** (what runs or is in use now, and where), **Waiting on you** (or "nothing"), **Next** (the next step and who takes it). The drafted report ends with the same block, and `finish` waits for it to be filled in.
 
 Evidence lives in files; the report links them. *(owner)*

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0 — 2026-11-02
+
+From a week of field data (71 runs): the owner's most common check-in was "where are we, what's next?", the second was a nudge after keryx stopped while it waited, and most false "done"s were UI builds that missed their design master.
+
+- Reports lead with their proof and close with **Live / Waiting on you / Next**. `keryx.py report` drafts the Proof section first and a last `## Now` section, which `finish` waits for like any placeholder; every message that ends a turn follows the same shape.
+- keryx no longer ends a turn idle while work is in flight: a background watch wakes the run (`keryx.py wait`, `gh run watch`, `gh pr checks --watch`, a polling script), and a `waiting` row in the run log says what it waits on and until when. Under granted autonomy a report is not a stopping point.
+- A usage limit is remembered for every session on the machine (`limits.json` beside the config): `keryx.py executors` leaves the limited runner out, says until when, and lists it first again once the reset has passed, so a run returns to the preferred executor without being told.
+- UI work against a design master is accepted screen by screen, master and build side by side in the QA file; UI without a master shows 2–3 directions as screenshots before it is built.
+- A price, credit cost or billing rule the owner has not set is asked on its own, with a worked customer example, even when the owner delegated every other decision.
+
 ## 1.3.0 — 2026-10-29
 
 - A hotfix lane. Urgency is a second axis next to size: when the owner says hotfix, urgent or prod is down (or calls `/keryx:hotfix`), or keryx finds live harm and the owner agrees, the session's own model fixes it at once, with no plan file and no executor round: it sees the harm itself, tries the fastest safe action first (a revert, a flag, a rollback), otherwise ships the smallest change behind a regression test that fails first, and gets one fast fresh review (`keryx.py review-brief --hotfix`: the diff only, P0 and P1 only, on the strongest model). Never for work that is merely small or quick.

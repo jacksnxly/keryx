@@ -25,6 +25,9 @@ On top of it always: the repository's own rules (`CLAUDE.md`, `AGENTS.md`, contr
 
 When no automatic check is possible (taste, look and feel), name the human judgement, prepare what they need to judge, and say so in the report. *(owner)*
 
+- **A screen built from a design master**: the check is the list of screens and states the master shows. QA screenshots each one at the master's widths and puts master and build side by side in `qa/QA.md`; every difference is fixed or ruled. A parity script's own pass count is not the check. *(owner; evidence: 5 of 8 false "done"s in a week of field runs were UI builds the owner found off the master; a parity gate reported 0 failures while 9 of 49 screens matched)*
+- **A screen without a master**: before building, show 2–3 directions as screenshots and let the owner pick; the pick is a taste call. *(owner; evidence: a finished page came back as "not visually appealing")*
+
 ## Ground truth
 
 Before planning, a short list:

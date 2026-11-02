@@ -38,7 +38,7 @@ Modes add their own steps: **bug** and **CI** `references/bug.md` · **feature**
 
 Between intake and the autonomy limit, never wait on the owner. Decide conflicts and gaps yourself with the request as the authority and log each as a ruling: what you decided, why, what it costs if wrong. *(owner; evidence: ~47 h of a 12-day run was idle at gates the owner would have waved through)*
 
-Stop and ask only for: an irreversible or destructive step; a security-sensitive action; a step beyond the autonomy answer; a plan so broken that every way forward is a guess; a gate the repository or the owner's standing grants put on a human. Those rules outrank this skill. *(owner)*
+Stop and ask only for: an irreversible or destructive step; a security-sensitive action; a step beyond the autonomy answer; a plan so broken that every way forward is a guess; a gate the repository or the owner's standing grants put on a human; a price, credit cost or billing rule the owner has not set — asked on its own, with a worked example of what a customer does, pays and gets, even when the owner said to decide everything else. Those rules outrank this skill. *(owner; evidence: two prices decided under a broad approval were wrong: a credit price "way too generous", a price the owner wanted flat)*
 
 **Scope:** work that grows beyond the accepted task becomes a new task with its own intake; it never rides along. *(evidence: a billing reform ran inside "parity" for ~5 days)*
 
@@ -48,7 +48,8 @@ Stop and ask only for: an irreversible or destructive step; a security-sensitive
 - Subagents only as the executor, for the fresh review and for parallel slices; never a reviewer per task. Never chain review skills into each other. *(evidence: chained review skills cost ~$25 per review case in the benchmark)*
 - Read what you need, not whole trees; send long command output to a file and read its tail. *(evidence)*
 - Start slow things (builds, installs, executor runs) in the background and keep working. *(fact)*
-- Reports are a few lines with paths to evidence files. Before a wait of more than a few minutes, tell the owner what is running, since when, and when you expect it back. *(owner; evidence: "are we done yet or what are we waiting for?")*
+- Every message that ends your turn opens with what proves it — the check's result, the QA file and its screenshots, as paths — and closes with three lines: **Live** (what runs or is in use now), **Waiting on you** (or "nothing"), **Next**. The run report ends the same way. A few lines, not a log. *(owner; evidence: "where are we / what's next?" was the owner's most common check-in, a median 4.8 h after their previous prompt)*
+- Never end a turn idle while work is in flight. Start a watch in the background that wakes you when it ends — `keryx.py wait` for an executor, `gh run watch <id>` or `gh pr checks <pr> --watch` for CI, a small polling script for a verdict or a usage-limit reset — and log what you wait on: `keryx.py log --slug <slug> waiting "<who>: <what>" <why> <evidence> "<expected by>"` (`owner: …` when it is the owner). Under the autonomy you were given, a report is not a stopping point: stop only for §3's list. *(owner; evidence: 13 nudges in one week — "and?", "are we done?", "so we sit and wait?", "why did you stop in first place?")*
 
 ## 5. Run log
 

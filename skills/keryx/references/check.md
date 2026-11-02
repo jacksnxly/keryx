@@ -20,7 +20,7 @@ Deep review per slice only for the risk list (money, auth, privacy, migrations, 
 - A parser, reader or import gets a read-only sample of real data in its acceptance check whenever one is reachable. *(evidence: synthetic inputs missed two defects that a production pilot found within an hour of the merge)*
 - **Exploratory pass**, after the scripted check: open the real surface and use it the way the person who accepts it would — the main journey first, then its edges: empty, wrong and very long input, an error or a slow answer from a dependency, a phone width and the keyboard for a page, the next page and a repeated call for an API. A cheap model may drive the browser; you look at what it saw. *(owner: "I didn't see anyone doing a QA")*
 - **Name the evidence for what it is**: a scripted test, agent exploration (a browser or requests that actually ran), or a human's judgement. A browser test is not manual QA, and a check that never opened the surface is not QA at all. *(fact)*
-- **Keep it where the owner can see it**: `<state>/qa/QA.md` lists each step, what was done and what was seen, with the screenshots and responses beside it; the report links it. *(owner)*
+- **Keep it where the owner can see it**: `<state>/qa/QA.md` lists each step, what was done and what was seen, with the screenshots and responses beside it; the report links it. A screen with a design master shows master and build side by side for every screen and state the check lists (`intake.md`). *(owner)*
 - The owner decides only taste calls. Prepare the evidence they need and keep going on everything else. *(owner)*
 
 ## Mutation probes — every change
