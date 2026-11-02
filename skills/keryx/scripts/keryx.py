@@ -32,7 +32,7 @@ writes prompt or are denied. Runs started before 1.2 keep <git-common-dir>/curso
 Usage (run from inside the target repository):
   keryx.py preflight [--runner cli|cloud|glm|subagent]
   keryx.py setup     [--executors LIST] [--detect]   (save this machine's ladder; probe what works here)
-  keryx.py executors [--after RUNNER]                (the saved ladder; the next executor after a runner)
+  keryx.py executors [--after RUNNER]                (the ladder still available; the next executor after a runner)
   keryx.py remember [--repo] NOTE                   (keep a choice or trap for later runs; never a secret)
   keryx.py recall                                   (print the user's and this repository's keryx memory)
   keryx.py mark --slug S --status STATUS            (close a subagent round: FINISHED, ERROR, STALLED, CANCELLED)
@@ -78,6 +78,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import fcntl
 import fnmatch
 import json
 import mimetypes
@@ -86,6 +87,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import urllib.error
@@ -871,6 +873,12 @@ def report_usage_limit(d: Path, r: Path, limit: dict) -> None:
           "no session); later: the next rung (keryx.py executors --after RUNNER; inline means you)")
     append_log(d, "dispatch", f"round {r.name}: usage limit ({limit['kind']})", "the executor reported its limit",
                f"{r / 'result.md'}", when)
+    runner = load_agent(d).get("runner")
+    if isinstance(runner, str) and runner:
+        # The same limit applies to every session on this machine, not only this round's run.json.
+        until = record_limit(dict(os.environ), runner, limit, dt.datetime.now(dt.timezone.utc))
+        if until:
+            print(f"recorded   {runner} is left out of keryx.py executors until {until}")
 
 
 SETUP_NOTE = ("keryx is not set up on this machine: run `keryx.py setup --detect`, then ask the owner "
@@ -950,6 +958,172 @@ def next_executor(ladder: list[str], current: str) -> str:
         return ladder[0]
     rest = ladder[ladder.index(current) + 1:]
     return rest[0] if rest else "inline"
+
+
+# <n> minute(s) | hour(s) | day(s) | week(s). "an hour" and "soon" are not a time.
+_LIMIT_SPAN = re.compile(r"(\d+)\s+(minute|hour|day|week)s?", re.IGNORECASE)
+_LIMIT_STAMP = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _limits_path(environ: dict) -> Path:
+    """Machine-wide usage limits, beside the ladder: <config dir>/limits.json."""
+    return config_path(environ).parent / "limits.json"
+
+
+def _as_utc(at: dt.datetime) -> dt.datetime:
+    if at.tzinfo is None:
+        return at.replace(tzinfo=dt.timezone.utc)
+    return at.astimezone(dt.timezone.utc)
+
+
+def _stamp(at: dt.datetime) -> str:
+    return _as_utc(at).strftime(_LIMIT_STAMP)
+
+
+def _parse_stamp(value: object) -> dt.datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return dt.datetime.strptime(value, _LIMIT_STAMP).replace(tzinfo=dt.timezone.utc)
+    except ValueError:
+        return None
+
+
+def _until_from_limit(limit: dict, at: dt.datetime) -> str | None:
+    """The reset time: resetsAt when it is set, otherwise a span added to `at`. Anything else is None."""
+    if not isinstance(limit, dict):
+        return None
+    resets_at = limit.get("resetsAt")
+    if isinstance(resets_at, str) and resets_at.strip():
+        return resets_at
+    span = limit.get("resetsIn")
+    if not isinstance(span, str):
+        return None
+    match = _LIMIT_SPAN.fullmatch(span.strip())
+    if not match:
+        return None
+    count = int(match.group(1))
+    unit = match.group(2).lower()
+    delta = {
+        "minute": dt.timedelta(minutes=count),
+        "hour": dt.timedelta(hours=count),
+        "day": dt.timedelta(days=count),
+        "week": dt.timedelta(weeks=count),
+    }.get(unit)
+    if delta is None:
+        return None
+    try:
+        return _stamp(at + delta)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _read_limits(path: Path) -> dict:
+    """The limits file, or {} when it is missing, unreadable, or not a JSON object. Never raises."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _kept_limit(entry: object) -> dict | None:
+    """kind, until and recorded — the only fields a limits file may hold. A bad entry is no limit."""
+    if not isinstance(entry, dict):
+        return None
+    until = entry.get("until")
+    if _parse_stamp(until) is None or not isinstance(until, str) or looks_secret(until):
+        return None
+    kept: dict[str, str] = {"until": until}
+    for key in ("kind", "recorded"):
+        value = entry.get(key)
+        if isinstance(value, str) and value and not looks_secret(value):
+            kept[key] = value
+    return kept
+
+
+def _write_limits(path: Path, data: dict) -> None:
+    """Publish limits.json by replacing it: a reader sees the old file or the new one, never a torn write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".limits-", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def record_limit(environ: dict, runner: str, limit: dict, at: dt.datetime) -> str | None:
+    """Remember `runner`'s usage limit until it resets. A new record replaces that runner's old one.
+
+    Returns the "until" time, or None when the reset cannot be read (and then nothing is written).
+    Two sessions can record at once: the write is a temp file in the same folder plus os.replace,
+    under a lock so one record does not erase the other. The file holds runner names, kinds and
+    times only."""
+    until = _until_from_limit(limit, at)
+    if until is None or not isinstance(runner, str) or not runner:
+        return None
+    kind = limit.get("kind") if isinstance(limit, dict) else None
+    kind = kind if isinstance(kind, str) else ""
+    if looks_secret(runner) or looks_secret(kind) or looks_secret(until):
+        return None
+    path = _limits_path(environ)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with open(lock_path, "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            current: dict[str, dict] = {}
+            for name, entry in _read_limits(path).items():
+                if not isinstance(name, str) or looks_secret(name):
+                    continue
+                kept = _kept_limit(entry)
+                if kept is not None:
+                    current[name] = kept
+            current[runner] = {"kind": kind, "until": until, "recorded": _stamp(at)}
+            _write_limits(path, current)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    return until
+
+
+def limited_runners(environ: dict, at: dt.datetime) -> dict[str, str]:
+    """Runners whose limit resets after `at`, mapped to that time. A missing, unreadable or
+    malformed file, or a malformed entry, is no limit — this never raises."""
+    try:
+        moment = _as_utc(at)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return {}
+    found: dict[str, str] = {}
+    for name, entry in _read_limits(_limits_path(environ)).items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        until = entry.get("until")
+        parsed = _parse_stamp(until)
+        if parsed is not None and parsed > moment:
+            found[name] = until
+    return found
+
+
+def available_ladder(ladder: list[str], environ: dict, at: dt.datetime) -> list[str]:
+    """`ladder` in order, without the runners that are at a usage limit right now."""
+    limited = limited_runners(environ, at)
+    return [name for name in ladder if name not in limited]
+
+
+def _executor_after(ladder: list[str], current: str, environ: dict, at: dt.datetime) -> str:
+    """The first runner after `current` that is not at its limit. A runner outside the ladder
+    starts at the first available one; "inline" when none remain."""
+    limited = limited_runners(environ, at)
+    start = ladder.index(current) + 1 if current in ladder else 0
+    for name in ladder[start:]:
+        if name not in limited:
+            return name
+    return "inline"
 
 
 def can_switch(status) -> bool:
@@ -1490,11 +1664,22 @@ def cmd_setup(args) -> int:
 
 
 def cmd_executors(args) -> int:
-    note = setup_note(dict(os.environ))
+    """The ladder a session can use now. A runner at its usage limit is left out until that limit resets."""
+    environ = dict(os.environ)
+    note = setup_note(environ)
     if note:
         print(note, file=sys.stderr)
-    ladder = load_config(dict(os.environ))["executors"]
-    print(next_executor(ladder, args.after) if args.after else "\n".join(ladder))
+    ladder = load_config(environ)["executors"]
+    at = dt.datetime.now(dt.timezone.utc)
+    if args.after:
+        print(_executor_after(ladder, args.after, environ, at))
+        return 0
+    limited = limited_runners(environ, at)
+    for name in ladder:
+        if name in limited:
+            print(f"{name}: usage limit until {limited[name]}; left out until then", file=sys.stderr)
+    available = available_ladder(ladder, environ, at)
+    print("\n".join(available) if available else "inline")
     return 0
 
 
@@ -2206,9 +2391,10 @@ def committed_report(final: str, slug: str) -> str | None:
 
 
 def cmd_report(args) -> int:
-    """Draft the run report docs/keryx/<date>-<slug>.md from the run's own record; what only the
-    coordinator knows stays as <!-- --> placeholders, which `finish` refuses until they are gone.
-    The file is never overwritten once it exists."""
+    """Draft the run report docs/keryx/<date>-<slug>.md from the run's own record. The proof comes
+    first and a Now block (live, waiting on the owner, next) closes it; what only the coordinator
+    knows stays as <!-- --> placeholders, which `finish` refuses until they are gone. The file is
+    never overwritten once it exists."""
     d = slug_dir(args.slug, must_exist=False)
     log = d / "decisions.tsv"
     if not log.exists():
@@ -2314,9 +2500,6 @@ def cmd_report(args) -> int:
         "\n"
         f"{date} · keryx run `{args.slug}`\n"
         "\n"
-        "## What changed\n"
-        "<!-- For the person who uses it: what is different now, and where it lives (branch, commits, PR). -->\n"
-        "\n"
         "## Proof\n"
         + proof
         + (f"- Fresh review: `{repo_relative(review[0])}`: "
@@ -2326,6 +2509,9 @@ def cmd_report(args) -> int:
         + (f"- QA: `{repo_relative(qa)}` (kept where the run ran, not committed)\n" if qa.exists()
            else "- QA: <!-- what QA covered -->\n")
         + "<!-- Anything else that proves it: mutation probes, CI runs. -->\n"
+        "\n"
+        "## What changed\n"
+        "<!-- For the person who uses it: what is different now, and where it lives (branch, commits, PR). -->\n"
         "\n"
         "## Open\n"
         "<!-- What was not verified, and why. -->\n"
@@ -2338,6 +2524,11 @@ def cmd_report(args) -> int:
         + "\n"
         "## Run\n"
         f"{run_line}\n"
+        "\n"
+        "## Now\n"
+        "- Live: <!-- what is running or in use now, and where -->\n"
+        "- Waiting on you: <!-- what needs the owner now, or \"nothing\" -->\n"
+        "- Next: <!-- the next step, and who takes it -->\n"
     )
     (top / name).parent.mkdir(parents=True, exist_ok=True)
     (top / name).write_text(text)
@@ -2679,7 +2870,8 @@ def main(argv=None) -> int:
     su.add_argument("--executors", metavar="LIST", help="save this executor order, e.g. cli,glm,subagent")
     su.add_argument("--detect", action="store_true", help="print one line per executor: can this machine run it?")
     ex = sub.add_parser("executors")
-    ex.add_argument("--after", metavar="RUNNER", help="print only the executor after this one (inline = the coordinator)")
+    ex.add_argument("--after", metavar="RUNNER",
+                    help="print the next executor after this one that is not at a usage limit (inline = the coordinator)")
     rm = sub.add_parser("remember")
     rm.add_argument("--repo", action="store_true", help="save for this repository only")
     rm.add_argument("note")
