@@ -2617,8 +2617,10 @@ class UsageLimitsAreRememberedAcrossSessions(unittest.TestCase):
             cloud.record_limit(env, "cli", future, now)
             self.assertEqual(self._executors(env, "--after", "glm")[1], ["subagent"], "a limited rung is skipped")
             self.assertEqual(self._executors(env, "--after", "subagent")[1], ["inline"])
-            past = {"kind": "5 hour", "resetsAt": "2000-01-01T00:00:00Z", "resetsIn": None}
-            cloud.record_limit(env, "glm", past, now)
+            limits = Path(d) / "limits.json"
+            data = json.loads(limits.read_text())
+            data["glm"]["until"] = "2000-01-01T00:00:00Z"   # glm's reset has passed
+            limits.write_text(json.dumps(data))
             self.assertEqual(self._executors(env)[1], ["glm", "subagent"], "glm is back once its reset has passed")
         with tempfile.TemporaryDirectory() as d:
             env = self._env(d, ladder=("glm",))
@@ -2658,3 +2660,73 @@ class UsageLimitsAreRememberedAcrossSessions(unittest.TestCase):
             self.assertIn("USAGE_LIMIT", out.getvalue())
             before = datetime(2026, 10, 27, 11, 0, tzinfo=timezone.utc)
             self.assertEqual(cloud.limited_runners(env, before), {"glm": "2026-10-27T11:58:02Z"})
+
+
+class LimitsNeverBreakARun(unittest.TestCase):
+    """Remembering a usage limit is a convenience: it must never stop keryx from loading or a command from finishing,
+    and a stale message must never put a blocked runner back on the ladder (fresh review of 1.4.0 and its QA)."""
+
+    from datetime import datetime as _dt, timezone as _tz
+    AT = _dt(2026, 11, 2, 8, 0, tzinfo=_tz.utc)
+
+    def test_keryx_loads_and_records_without_fcntl(self):
+        # Windows has no fcntl; before 1.4.0 every top-level import of keryx.py was cross-platform.
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            scripts = str(Path(cloud.__file__).resolve().parent)
+            code = ("import sys, datetime; sys.modules['fcntl'] = None; sys.path.insert(0, " + repr(scripts) + "); "
+                    "import keryx; env = {'KERYX_CONFIG': " + repr(str(Path(d) / "config.json")) + "}; "
+                    "at = datetime.datetime(2026, 11, 2, 8, 0, tzinfo=datetime.timezone.utc); "
+                    "print(keryx.record_limit(env, 'glm', {'kind': 'k', 'resetsAt': '2099-01-01T00:00:00Z', "
+                    "'resetsIn': None}, at)); print(keryx.limited_runners(env, at))")
+            done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertIn("2099-01-01T00:00:00Z", done.stdout)
+            self.assertIn("'glm'", done.stdout)
+
+    def test_a_limit_that_cannot_be_saved_does_not_crash_status(self):
+        import contextlib
+        import io
+        import os
+        import subprocess
+        from unittest import mock
+        msg = "[1308][Usage limit reached for 5 hour. Your limit will reset at 2026-10-27 19:58:02]"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "not-a-folder").write_text("a file where the config folder should be\n")
+            env = {"KERYX_CONFIG": str(root / "not-a-folder" / "config.json")}
+            repo = root / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@x.invalid", "-c", "user.name=t",
+                            "commit", "-q", "--allow-empty", "-m", "work"], check=True)
+            gone = subprocess.Popen([sys.executable, "-c", "pass"])
+            gone.wait()
+            d = root / "loops" / "st"
+            (d / "rounds" / "01").mkdir(parents=True)
+            (d / "agent.json").write_text(json.dumps({"runner": "glm", "workspace": str(repo), "branch": "glm/st"}))
+            (d / "rounds" / "01" / "run.json").write_text(json.dumps({"pid": gone.pid, "status": "ERROR"}))
+            (d / "rounds" / "01" / "events.ndjson").write_text("")
+            (d / "rounds" / "01" / "stderr.log").write_text("API Error: Request rejected (429) · " + msg + "\n")
+            orig = cloud.state_root
+            cloud.state_root = lambda: root / "loops"
+            try:
+                with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(cloud.main(["status", "--slug", "st"]), 0)
+            finally:
+                cloud.state_root = orig
+            self.assertIn("USAGE_LIMIT", out.getvalue())
+            self.assertNotIn("recorded   glm", out.getvalue(), "nothing was saved, so nothing is claimed")
+
+    def test_a_stale_limit_never_erases_a_live_one(self):
+        # status on an old round can report a 5-hour reset long past while the weekly limit still holds
+        with tempfile.TemporaryDirectory() as d:
+            env = {"KERYX_CONFIG": str(Path(d) / "config.json")}
+            weekly = {"kind": "weekly/monthly", "resetsAt": "2026-11-04T03:24:16Z", "resetsIn": None}
+            old = {"kind": "5 hour", "resetsAt": "2026-10-27T11:58:02Z", "resetsIn": None}
+            cloud.record_limit(env, "glm", weekly, self.AT)
+            cloud.record_limit(env, "glm", old, self.AT)
+            self.assertEqual(cloud.limited_runners(env, self.AT), {"glm": "2026-11-04T03:24:16Z"})
+            later = {"kind": "5 hour", "resetsAt": "2026-11-05T01:00:00Z", "resetsIn": None}
+            cloud.record_limit(env, "glm", later, self.AT)
+            self.assertEqual(cloud.limited_runners(env, self.AT), {"glm": "2026-11-05T01:00:00Z"},
+                             "a live record still replaces a live one")
