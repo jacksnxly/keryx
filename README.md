@@ -6,6 +6,7 @@
 
 **keryx makes a coding agent prove its work.** It is a [Claude Code](https://code.claude.com/docs) plugin for fixing bugs and red CI jobs, building features from a spec, and reviewing pull requests: the agent writes an acceptance check that fails first, locks the tests, lets a cheaper model write the code, checks the result mechanically, runs QA on the real app, breaks the change on purpose to see that the tests notice, and gets one fresh code review before anything counts as done.
 
+- **Measured on real work**: in its first 71 real runs, keryx scored 91/100 against 83 for the plan-and-subagent skill pack used before. A "done" later proved untrue in 11 % of runs instead of 36 %, and the owner had to correct it about a quarter as often ([field results](docs/bench/2026-11-field.md)).
 - **Test-driven by default**: the acceptance check fails before the work and passes after; locked tests cannot be edited by the agent that writes the code.
 - **Cheaper executors**: a Sonnet subagent ships with the plugin; the Cursor CLI, a GLM Coding Plan or Cursor Cloud can take over, with automatic fallback when one fails or hits a usage limit.
 - **Real QA and code review**: scripted and exploratory QA with kept evidence, mutation probes, and a review with a written bar (P0–P3), a production-reach question and two reviewers for risky changes. The reviewer's brief ships with the plugin, so the bar is the same in every run.
@@ -65,6 +66,8 @@ When an executor fails (an error, a stop, a dispatch that never starts), keryx m
 
 **How do I make Claude Code write tests first?** Install keryx and ask for the change with `/keryx:keryx`. Every M or L task starts with a check that fails on the current code, then locked tests the executor must make pass without editing them.
 
+**How do I stop Claude Code from saying a task is done when it is not?** Make "done" something it has to prove. In keryx an acceptance check fails before the work and passes after it, and QA runs on the real surface. `keryx.py finish` refuses to call a run finished until the run log records what shipped and a fresh review covers the shipped commit. Across 71 real keryx runs, a "done" was later found untrue in 11 % of runs; with the plan-and-subagent skill pack used before, it was 36 % of 47 tasks ([how this was measured](docs/bench/2026-11-field.md)).
+
 **Can a cheaper model write the code?** Yes. Run the one-time setup and keryx uses your executors in order: the bundled Sonnet subagent, the Cursor CLI, a GLM Coding Plan or a Cursor Cloud Agent. If one errors or hits a usage limit, the next one continues on the same task.
 
 **Will it push, merge or deploy on its own?** Only as far as you allow at the start of the run, and never past your repository's own rules.
@@ -116,6 +119,7 @@ The executors that run another company's model read less of it: a GLM executor r
 - `agents/executor.md` — the Sonnet executor agent.
 - `bench/` — a replay benchmark that compares workflow versions on recorded tasks.
 - `field/` — reads a real run's transcript and run log into one record: time, tokens, questions, executor runs.
+- `docs/bench/` — published results: the replay baseline and the field comparison on real work.
 
 ## Tests
 
