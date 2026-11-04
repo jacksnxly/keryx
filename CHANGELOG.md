@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.0 — 2026-11-04
+
+- **Reset order** (opt-in): with `"order": "resets"` in `config.json`, `keryx.py executors` lists first the executor whose plan resets soonest, so a quota that lapses at its reset is used up before one that keeps. Executors without a reset date follow in the saved order, a runner at its usage limit is still left out, and stderr says which reset put each one where. Turn it on with `keryx.py setup --order resets --reset cli=2026-11-06/month --reset glm=2026-11-11T03:24:16Z/week`; each date rolls forward by its period (`month`, `week`, or none for once), and `--order ladder` turns it off while keeping the dates. keryx never asks a provider for usage: the dates are the owner's. Seen in the field: every round of a day went to GLM, which resets on the 11th, while Cursor's quota was due to lapse on the 6th.
+- With the reset order off (the default, or `"order": "ladder"`), nothing changes: saved dates are ignored, even malformed ones.
+- `keryx.py setup` keeps every other setting in `config.json`, including keys it does not know, and saves only what keryx can read back: a bad value is refused and nothing is written, while `--order ladder` turns the reset order off even when a hand-edited date is broken. An order or a reset date is saved only next to a ladder someone chose, so on a new machine it needs `--executors` in the same call, and the first-use setup question still comes. A `config.json` that is not valid JSON is still replaced by a new ladder, as in 1.4.0, and now kept beside it as `config.json.broken`.
+
 ## 1.4.0 — 2026-11-02
 
 From a week of field data (71 runs): the owner's most common check-in was "where are we, what's next?", the second was a nudge after keryx stopped while it waited, and most false "done"s were UI builds that missed their design master.
