@@ -975,11 +975,11 @@ def _validated_resets(path: Path, resets: object) -> dict:
     return resets
 
 
-def _config_view(path: Path, data: object, strict: bool = False) -> dict:
+def _config_view(path: Path, data: object) -> dict:
     """executors, order and resets. Unknown keys are ignored. Every refusal names `path` first.
 
     While the order is `ladder` a bad `resets` is read as none, so the dates can never break the saved order;
-    `strict` (what setup checks before it writes) refuses it in either order."""
+    in the `resets` order it is refused."""
     if not isinstance(data, dict):
         raise LoopError(f'{path}: "executors" must be a list of names')
     names = data.get("executors")
@@ -995,7 +995,7 @@ def _config_view(path: Path, data: object, strict: bool = False) -> dict:
     try:
         resets = _validated_resets(path, data.get("resets", {}))
     except LoopError:
-        if strict or order == "resets":
+        if order == "resets":
             raise
         resets = {}
     return {"executors": ladder, "order": order, "resets": resets}
@@ -1806,22 +1806,25 @@ def _detect_executors() -> None:
         print(f"cloud  no  {exc}")
 
 
-def _setup_base(path: Path, new_ladder: bool) -> dict:
+def _setup_base(path: Path, new_ladder: bool) -> tuple[dict, str | None]:
     """What setup starts from: the saved file with every key kept. With no saved file, or one that is not a JSON
     object, only a new ladder may start one (as in 1.4.0): an order or a reset alone would save a ladder nobody
-    chose and silence the first-use setup note."""
-    data = None
-    if path.exists():
-        try:
-            data = json.loads(path.read_text())
-        except ValueError:
-            data = None
-        if isinstance(data, dict):
-            return data
+    chose and silence the first-use setup note. The second value says what is wrong with a file the new ladder
+    replaces; the caller keeps that file as <name>.broken once the new one is sure to be written."""
+    if not path.exists():
+        if not new_ladder:
+            raise LoopError(f"{path} does not exist yet: save the ladder first with setup --executors LIST")
+        return {}, None
+    try:
+        data = json.loads(path.read_text())
+        problem = None if isinstance(data, dict) else "is not a JSON object"
+    except ValueError as exc:
+        problem = f"is not valid JSON ({exc})"
+    if problem is None:
+        return data, None
     if not new_ladder:
-        state = "is not a valid config" if path.exists() else "does not exist yet"
-        raise LoopError(f"{path} {state}: save the ladder first with setup --executors LIST")
-    return {}
+        raise LoopError(f"{path} {problem}: fix it, or replace it with setup --executors LIST")
+    return {}, problem
 
 
 def _apply_reset(path: Path, resets: dict, text: str) -> None:
@@ -1865,13 +1868,14 @@ def cmd_setup(args) -> int:
     """Save the ladder, the order and when each plan resets, or print what is saved.
 
     Starts from the whole saved file, so a key keryx does not know stays. The file is written only
-    after the result passes the same checks as `load_config`."""
+    after `load_config` would read the result: setup never saves a file keryx then refuses, and the off
+    switch, `--order ladder`, works even while a bad date stops the reset order."""
     environ = dict(os.environ)
     path = config_path(environ)
     reset_args = list(args.reset or [])
     writing = bool(args.executors or args.order or reset_args)
     if writing:
-        data = _setup_base(path, bool(args.executors))
+        data, broken = _setup_base(path, bool(args.executors))
         if args.executors:
             data["executors"] = parse_executors(args.executors)
         if args.order:
@@ -1885,7 +1889,11 @@ def cmd_setup(args) -> int:
                 _apply_reset(path, resets, text)
             data["resets"] = resets
         data["updatedAt"] = now()
-        _config_view(path, data, strict=True)
+        _config_view(path, data)
+        if broken:
+            kept = path.with_name(path.name + ".broken")
+            os.replace(path, kept)
+            print(f"keryx: {path} {broken}; kept it as {kept} and started a new one", file=sys.stderr)
         save_json(path, data)
         print(path)
     if args.detect:
