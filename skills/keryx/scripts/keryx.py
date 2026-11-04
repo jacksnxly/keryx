@@ -31,7 +31,8 @@ writes prompt or are denied. Runs started before 1.2 keep <git-common-dir>/curso
 
 Usage (run from inside the target repository):
   keryx.py preflight [--runner cli|cloud|glm|subagent]
-  keryx.py setup     [--executors LIST] [--detect]   (save this machine's ladder; probe what works here)
+  keryx.py setup     [--executors LIST] [--order ladder|resets] [--reset RUNNER=WHEN[/EVERY]] [--detect]
+                     (save this machine's ladder; probe what works here)
   keryx.py executors [--after RUNNER]                (the ladder still available; the next executor after a runner)
   keryx.py remember [--repo] NOTE                   (keep a choice or trap for later runs; never a secret)
   keryx.py recall                                   (print the user's and this repository's keryx memory)
@@ -77,6 +78,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import calendar
 import datetime as dt
 import fnmatch
 import json
@@ -936,23 +938,143 @@ def parse_executors(text: str) -> list[str]:
     return out
 
 
-def load_config(environ: dict) -> dict:
-    """The saved ladder, or the Claude subagent alone when it was never saved."""
-    path = config_path(environ)
-    if not path.exists():
-        return {"executors": ["subagent"]}
+_ORDERS = ("ladder", "resets")
+_RESET_EVERY = ("month", "week")
+# A date alone is midnight UTC. Anything else, including a time with no Z, is not a reset.
+_RESET_NEXT = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})Z)?$")
+
+
+def _parse_next(value: object) -> dt.datetime | None:
+    """YYYY-MM-DD (midnight UTC) or YYYY-MM-DDTHH:MM:SSZ. None when it is neither, or not a real date."""
+    if not isinstance(value, str):
+        return None
+    match = _RESET_NEXT.fullmatch(value)
+    if not match:
+        return None
+    year, month, day, hour, minute, second = match.groups()
     try:
-        data = json.loads(path.read_text())
-    except ValueError as exc:
-        raise LoopError(f"{path} is not valid JSON: {exc}") from exc
-    names = data.get("executors") if isinstance(data, dict) else None
+        return dt.datetime(int(year), int(month), int(day), int(hour or 0), int(minute or 0),
+                           int(second or 0), tzinfo=dt.timezone.utc)
+    except ValueError:
+        return None
+
+
+def _validated_resets(path: Path, resets: object) -> dict:
+    """`resets` as saved. Every refusal names `path` first. `every` absent or null is a one-off."""
+    if not isinstance(resets, dict):
+        raise LoopError(f'{path}: "resets" must be an object')
+    for name, spec in resets.items():
+        if name not in EXECUTORS:
+            raise LoopError(f"{path}: unknown executor {name!r} in resets")
+        if not isinstance(spec, dict):
+            raise LoopError(f"{path}: reset for {name} must be an object")
+        if _parse_next(spec.get("next")) is None:
+            raise LoopError(f"{path}: reset for {name} needs next as YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ")
+        if "every" in spec and spec.get("every") is not None and spec.get("every") not in _RESET_EVERY:
+            raise LoopError(f"{path}: reset for {name} every must be month or week")
+    return resets
+
+
+def _config_view(path: Path, data: object) -> dict:
+    """executors, order and resets. Unknown keys are ignored. Every refusal names `path` first."""
+    if not isinstance(data, dict):
+        raise LoopError(f'{path}: "executors" must be a list of names')
+    names = data.get("executors")
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         raise LoopError(f'{path}: "executors" must be a list of names')
     try:
         ladder = parse_executors(",".join(names))
     except LoopError as exc:
         raise LoopError(f"{path}: {exc}") from exc
-    return {"executors": ladder}
+    order = data.get("order", "ladder")
+    if order not in _ORDERS:
+        raise LoopError(f"{path}: unknown order {order!r}; choose from {', '.join(_ORDERS)}")
+    return {"executors": ladder, "order": order, "resets": _validated_resets(path, data.get("resets", {}))}
+
+
+def load_config(environ: dict) -> dict:
+    """The saved ladder, or the Claude subagent alone when it was never saved.
+
+    `order` is `ladder` (the saved order) unless the file says `resets`. `resets` is read either way
+    and changes the order only when `order` is `resets`."""
+    path = config_path(environ)
+    if not path.exists():
+        return {"executors": ["subagent"], "order": "ladder", "resets": {}}
+    try:
+        data = json.loads(path.read_text())
+    except ValueError as exc:
+        raise LoopError(f"{path} is not valid JSON: {exc}") from exc
+    return _config_view(path, data)
+
+
+def _add_months(anchor: dt.datetime, k: int) -> dt.datetime:
+    """`anchor` plus `k` calendar months. The day is `anchor`'s own day, clamped to that month's end."""
+    index = (anchor.month - 1) + k
+    year = anchor.year + index // 12
+    month = index % 12 + 1
+    day = min(anchor.day, calendar.monthrange(year, month)[1])
+    return anchor.replace(year=year, month=month, day=day)
+
+
+def _month_after(anchor: dt.datetime, at: dt.datetime) -> dt.datetime:
+    """The monthly reset strictly after `at`. `k` is the month distance, not a step per month."""
+    k = (at.year - anchor.year) * 12 + (at.month - anchor.month)
+    if k < 0:
+        k = 0
+    when = _add_months(anchor, k)
+    if when <= at:
+        when = _add_months(anchor, k + 1)
+    return when
+
+
+def next_reset(spec: dict, at: dt.datetime) -> str | None:
+    """The first reset strictly after `at`, as YYYY-MM-DDTHH:MM:SSZ.
+
+    `week` adds 7 days and `month` adds calendar months, both counted from `next` itself
+    (31 January, then 28 February, then 31 March). A one-off at or before `at` is None.
+    A naive `at` is UTC, the same as a stamp with no zone. `k` is arithmetic, so an old `next`
+    does not walk one period at a time."""
+    if not isinstance(spec, dict):
+        return None
+    anchor = _parse_next(spec.get("next"))
+    if anchor is None:
+        return None
+    moment = _as_utc(at)
+    every = spec.get("every")
+    if every == "week":
+        elapsed = moment - anchor
+        period = 7 * 86400 * 1_000_000
+        microseconds = (elapsed.days * 86400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
+        when = anchor + dt.timedelta(days=7 * (microseconds // period + 1))
+    elif every == "month":
+        when = _month_after(anchor, moment)
+    elif anchor <= moment:
+        return None
+    else:
+        when = anchor
+    return _stamp(when)
+
+
+def ordered_ladder(config: dict, at: dt.datetime) -> list[str]:
+    """Who to try, in order. `ladder` is the saved order. `resets` puts soonest-reset first.
+
+    Executors with no reset still to come follow, in the saved order. A tie keeps the saved order.
+    Nothing is removed for a usage limit."""
+    ladder = list(config["executors"])
+    if config.get("order", "ladder") != "resets":
+        return ladder
+    resets = config.get("resets") if isinstance(config.get("resets"), dict) else {}
+    ranked: list[tuple[str, int, str]] = []
+    rest: list[str] = []
+    for index, name in enumerate(ladder):
+        spec = resets.get(name)
+        when = next_reset(spec, at) if isinstance(spec, dict) else None
+        if when is None:
+            rest.append(name)
+        else:
+            ranked.append((when, index, name))
+    ranked.sort()
+    return [name for _, _, name in ranked] + rest
 
 
 def next_executor(ladder: list[str], current: str) -> str:
@@ -1675,18 +1797,99 @@ def _detect_executors() -> None:
         print(f"cloud  no  {exc}")
 
 
+def _read_config_object(path: Path) -> dict:
+    """The saved file with every key kept. A missing file is the subagent alone. Bad JSON is refused."""
+    if not path.exists():
+        return {"executors": ["subagent"]}
+    try:
+        data = json.loads(path.read_text())
+    except ValueError as exc:
+        raise LoopError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise LoopError(f'{path}: "executors" must be a list of names')
+    return data
+
+
+def _apply_reset(path: Path, resets: dict, text: str) -> None:
+    """`RUNNER=WHEN[/EVERY]` saves that reset; `RUNNER=none` clears it. `next` is stored as given."""
+    if text.count("=") != 1:
+        raise LoopError(f"{path}: reset must be RUNNER=WHEN[/EVERY], not {text!r}")
+    runner, rest = text.split("=", 1)
+    runner = runner.strip()
+    if runner not in EXECUTORS:
+        raise LoopError(f"{path}: unknown executor {runner!r}; choose from {', '.join(EXECUTORS)}")
+    rest = rest.strip()
+    if rest == "none":
+        resets.pop(runner, None)
+        return
+    parts = rest.split("/")
+    if len(parts) > 2:
+        raise LoopError(f"{path}: reset {text!r} has an extra '/'")
+    when, every = parts[0].strip(), parts[1].strip() if len(parts) == 2 else None
+    if every is not None and every not in _RESET_EVERY:
+        raise LoopError(f"{path}: reset for {runner} every must be month or week")
+    if _parse_next(when) is None:
+        raise LoopError(f"{path}: reset for {runner} needs next as YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ")
+    spec = {"next": when}
+    if every:
+        spec["every"] = every
+    resets[runner] = spec
+
+
+def _print_setup(environ: dict) -> None:
+    cfg = load_config(environ)
+    print("\n".join(cfg["executors"]))
+    print(f"order: {cfg['order']}")
+    for name, spec in cfg["resets"].items():
+        every = spec.get("every") if isinstance(spec, dict) else None
+        nxt = spec.get("next") if isinstance(spec, dict) else ""
+        print(f"{name} {nxt}" + (f" {every}" if every else ""))
+    print(config_path(environ))
+
+
 def cmd_setup(args) -> int:
+    """Save the ladder, the order and when each plan resets, or print what is saved.
+
+    Starts from the whole saved file, so a key keryx does not know stays. The file is written only
+    after the result passes the same checks as `load_config`."""
     environ = dict(os.environ)
-    if args.executors:
-        ladder = parse_executors(args.executors)
-        save_json(config_path(environ), {"executors": ladder, "updatedAt": now()})
-        print(config_path(environ))
+    path = config_path(environ)
+    reset_args = list(args.reset or [])
+    writing = bool(args.executors or args.order or reset_args)
+    if writing:
+        data = _read_config_object(path)
+        if args.executors:
+            data["executors"] = parse_executors(args.executors)
+        if args.order:
+            data["order"] = args.order
+        if reset_args:
+            current = data.get("resets", {})
+            if not isinstance(current, dict):
+                raise LoopError(f'{path}: "resets" must be an object')
+            resets = dict(current)
+            for text in reset_args:
+                _apply_reset(path, resets, text)
+            data["resets"] = resets
+        data["updatedAt"] = now()
+        _config_view(path, data)
+        save_json(path, data)
+        print(path)
     if args.detect:
         _detect_executors()
-    if not args.executors and not args.detect:
-        print("\n".join(load_config(environ)["executors"]))
-        print(config_path(environ))
+    if not writing and not args.detect:
+        _print_setup(environ)
     return 0
+
+
+def _resets_line(config: dict, ladder: list[str], at: dt.datetime) -> str:
+    """One line: `order: resets`, then each executor's next reset or `no reset`."""
+    resets = config.get("resets") if isinstance(config.get("resets"), dict) else {}
+    parts = []
+    for name in ladder:
+        spec = resets.get(name)
+        when = next_reset(spec, at) if isinstance(spec, dict) else None
+        parts.append(f"{name} resets {when}" if when else f"{name} no reset")
+    return "order: resets " + ", ".join(parts)
 
 
 def cmd_executors(args) -> int:
@@ -1695,8 +1898,11 @@ def cmd_executors(args) -> int:
     note = setup_note(environ)
     if note:
         print(note, file=sys.stderr)
-    ladder = load_config(environ)["executors"]
+    config = load_config(environ)
     at = dt.datetime.now(dt.timezone.utc)
+    ladder = ordered_ladder(config, at)
+    if config.get("order") == "resets":
+        print(_resets_line(config, ladder, at), file=sys.stderr)
     if args.after:
         print(_executor_after(ladder, args.after, environ, at))
         return 0
@@ -2894,6 +3100,11 @@ def main(argv=None) -> int:
     pf.add_argument("--runner", choices=["cli", "cloud", "glm", "subagent"], default="cli")
     su = sub.add_parser("setup")
     su.add_argument("--executors", metavar="LIST", help="save this executor order, e.g. cli,glm,subagent")
+    su.add_argument("--order", choices=["ladder", "resets"],
+                    help="ladder (the saved order) or resets (the plan that resets soonest first)")
+    su.add_argument("--reset", action="append", default=None, metavar="RUNNER=WHEN[/EVERY]",
+                    help="when RUNNER's plan resets (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ, "
+                         "optionally /month or /week); RUNNER=none clears it")
     su.add_argument("--detect", action="store_true", help="print one line per executor: can this machine run it?")
     ex = sub.add_parser("executors")
     ex.add_argument("--after", metavar="RUNNER",
