@@ -975,8 +975,11 @@ def _validated_resets(path: Path, resets: object) -> dict:
     return resets
 
 
-def _config_view(path: Path, data: object) -> dict:
-    """executors, order and resets. Unknown keys are ignored. Every refusal names `path` first."""
+def _config_view(path: Path, data: object, strict: bool = False) -> dict:
+    """executors, order and resets. Unknown keys are ignored. Every refusal names `path` first.
+
+    While the order is `ladder` a bad `resets` is read as none, so the dates can never break the saved order;
+    `strict` (what setup checks before it writes) refuses it in either order."""
     if not isinstance(data, dict):
         raise LoopError(f'{path}: "executors" must be a list of names')
     names = data.get("executors")
@@ -989,7 +992,13 @@ def _config_view(path: Path, data: object) -> dict:
     order = data.get("order", "ladder")
     if order not in _ORDERS:
         raise LoopError(f"{path}: unknown order {order!r}; choose from {', '.join(_ORDERS)}")
-    return {"executors": ladder, "order": order, "resets": _validated_resets(path, data.get("resets", {}))}
+    try:
+        resets = _validated_resets(path, data.get("resets", {}))
+    except LoopError:
+        if strict or order == "resets":
+            raise
+        resets = {}
+    return {"executors": ladder, "order": order, "resets": resets}
 
 
 def load_config(environ: dict) -> dict:
@@ -1797,17 +1806,22 @@ def _detect_executors() -> None:
         print(f"cloud  no  {exc}")
 
 
-def _read_config_object(path: Path) -> dict:
-    """The saved file with every key kept. A missing file is the subagent alone. Bad JSON is refused."""
-    if not path.exists():
-        return {"executors": ["subagent"]}
-    try:
-        data = json.loads(path.read_text())
-    except ValueError as exc:
-        raise LoopError(f"{path} is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise LoopError(f'{path}: "executors" must be a list of names')
-    return data
+def _setup_base(path: Path, new_ladder: bool) -> dict:
+    """What setup starts from: the saved file with every key kept. With no saved file, or one that is not a JSON
+    object, only a new ladder may start one (as in 1.4.0): an order or a reset alone would save a ladder nobody
+    chose and silence the first-use setup note."""
+    data = None
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            return data
+    if not new_ladder:
+        state = "is not a valid config" if path.exists() else "does not exist yet"
+        raise LoopError(f"{path} {state}: save the ladder first with setup --executors LIST")
+    return {}
 
 
 def _apply_reset(path: Path, resets: dict, text: str) -> None:
@@ -1857,7 +1871,7 @@ def cmd_setup(args) -> int:
     reset_args = list(args.reset or [])
     writing = bool(args.executors or args.order or reset_args)
     if writing:
-        data = _read_config_object(path)
+        data = _setup_base(path, bool(args.executors))
         if args.executors:
             data["executors"] = parse_executors(args.executors)
         if args.order:
@@ -1871,7 +1885,7 @@ def cmd_setup(args) -> int:
                 _apply_reset(path, resets, text)
             data["resets"] = resets
         data["updatedAt"] = now()
-        _config_view(path, data)
+        _config_view(path, data, strict=True)
         save_json(path, data)
         print(path)
     if args.detect:
