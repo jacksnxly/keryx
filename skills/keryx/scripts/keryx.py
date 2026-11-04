@@ -1889,7 +1889,7 @@ def _resets_line(config: dict, ladder: list[str], at: dt.datetime) -> str:
         spec = resets.get(name)
         when = next_reset(spec, at) if isinstance(spec, dict) else None
         parts.append(f"{name} resets {when}" if when else f"{name} no reset")
-    return "order: resets " + ", ".join(parts)
+    return "order: resets, soonest first: " + ", ".join(parts)
 
 
 def cmd_executors(args) -> int:
