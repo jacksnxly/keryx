@@ -62,13 +62,21 @@ The first time it needs an executor, keryx runs a short setup: it shows which ex
 
 When an executor fails (an error, a stop, a dispatch that never starts), keryx moves the same work to the next one in your order, and writes the code itself after the last.
 
+Plans with a usage quota lose what is left of it at their reset. Turn on the reset order (say "keryx setup" and give each plan's reset date) and keryx uses first the executor whose plan resets soonest, then the next, falling back to your order for executors without a reset date. The setup saves it like this:
+
+```bash
+keryx.py setup --order resets --reset cli=2026-11-06/month --reset glm=2026-11-11T03:24:16Z/week
+```
+
+Each `--reset` is a plan's next reset in UTC and how often it repeats (`month`, `week`, or nothing for once); keryx rolls it forward on its own. `--order ladder` turns it off and keeps the dates. keryx never asks a provider for your usage: the dates are the ones you give it, and an executor that hits its limit is still skipped until its limit lifts.
+
 ## FAQ
 
 **How do I make Claude Code write tests first?** Install keryx and ask for the change with `/keryx:keryx`. Every M or L task starts with a check that fails on the current code, then locked tests the executor must make pass without editing them.
 
 **How do I stop Claude Code from saying a task is done when it is not?** Make "done" something it has to prove. In keryx an acceptance check fails before the work and passes after it, and QA runs on the real surface. `keryx.py finish` refuses to call a run finished until the run log records what shipped and a fresh review covers the shipped commit. Across 71 real keryx runs, a "done" was later found untrue in 11 % of runs; with the plan-and-subagent skill pack used before, it was 36 % of 47 tasks ([how this was measured](docs/bench/2026-11-field.md)).
 
-**Can a cheaper model write the code?** Yes. Run the one-time setup and keryx uses your executors in order: the bundled Sonnet subagent, the Cursor CLI, a GLM Coding Plan or a Cursor Cloud Agent. If one errors or hits a usage limit, the next one continues on the same task.
+**Can a cheaper model write the code?** Yes. Run the one-time setup and keryx uses your executors in order: the bundled Sonnet subagent, the Cursor CLI, a GLM Coding Plan or a Cursor Cloud Agent. If one errors or hits a usage limit, the next one continues on the same task. With the reset order on, keryx uses up first the plan whose quota lapses soonest.
 
 **Will it push, merge or deploy on its own?** Only as far as you allow at the start of the run, and never past your repository's own rules.
 

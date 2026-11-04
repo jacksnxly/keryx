@@ -24,6 +24,10 @@ A round stopped by a usage limit ends ERROR, and `wait` prints `USAGE_LIMIT` wit
 
 `wait` and `status` record the limit for every session on the machine (`limits.json` beside the config): `keryx.py executors` leaves that runner out, says until when, and lists it again once the reset has passed. Take every new round and slice from `keryx.py executors`, never from the runner the last round used. A limit that lifts early (the owner upgraded the plan) stays until its recorded time: delete that runner's entry from `limits.json`. *(evidence: the owner had to say "glm is free again" or "glm is back" 8 times in a week)*
 
+### The plan that resets first
+
+A plan's unused quota lapses at its reset. When the owner turns on the reset order (`config.json` `"order": "resets"`), `keryx.py executors` lists first the executor whose plan resets soonest, then the next; executors without a reset date follow in the saved order, and a runner at its usage limit is still left out. Its stderr names each executor's next reset. Ask the owner for each plan's next reset in UTC and how often it repeats, and save it with `setup --order resets --reset <runner>=<date or time>/<month|week>` (no period for a one-off, `<runner>=none` to drop one); keryx rolls the dates forward itself. `--order ladder` turns it off and keeps the dates. The dates come from the owner, never from a provider. *(owner; evidence: on 2026-11-04 every round went to GLM, whose quota resets on 11-11, while Cursor's lapses on 11-06)*
+
 ### On any executor error, the next rung
 
 A round that ends ERROR, EXPIRED or CANCELLED, a dispatch that fails, or a run that stalls a second time moves to `keryx.py executors --after <runner>` on the same slug: `create --slug <same> --runner <next> --prompt-file <brief>` keeps the plan, the locks, the base and the round count and starts from the last executor's commits (from GitHub's copy only: the cloud rung refuses commits that exist only here). A first stall usually left its commits: fetch, check, and follow up once on the same executor. Log the switch with its reason. *(owner; evidence: five runs re-created their slugs by hand after an executor stopped)*
@@ -32,6 +36,7 @@ A round that ends ERROR, EXPIRED or CANCELLED, a dispatch that fails, or a run t
 
 ```bash
 python3 "$SKILL_DIR/scripts/keryx.py" setup [--detect | --executors subagent,cli,glm]   # once per machine
+python3 "$SKILL_DIR/scripts/keryx.py" setup --order resets --reset cli=2026-11-06/month   # soonest reset first; --order ladder = off
 python3 "$SKILL_DIR/scripts/keryx.py" executors [--after <runner>]   # the ladder, or the next rung
 python3 "$SKILL_DIR/scripts/keryx.py" preflight            # every FAIL blocks; it lists the models
 python3 "$SKILL_DIR/scripts/keryx.py" preflight --runner glm   # key, endpoint, and a one-line probe answered by GLM
