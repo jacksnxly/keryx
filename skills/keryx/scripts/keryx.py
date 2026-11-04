@@ -1041,17 +1041,17 @@ def next_reset(spec: dict, at: dt.datetime) -> str | None:
         return None
     moment = _as_utc(at)
     every = spec.get("every")
-    if every == "week":
+    if anchor > moment:
+        when = anchor  # the next reset as saved: never counted back from it
+    elif every == "week":
         elapsed = moment - anchor
         period = 7 * 86400 * 1_000_000
         microseconds = (elapsed.days * 86400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
         when = anchor + dt.timedelta(days=7 * (microseconds // period + 1))
     elif every == "month":
         when = _month_after(anchor, moment)
-    elif anchor <= moment:
-        return None
     else:
-        when = anchor
+        return None  # a one-off reset that has passed
     return _stamp(when)
 
 
