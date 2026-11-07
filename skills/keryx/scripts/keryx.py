@@ -836,6 +836,16 @@ def codex_command(model: str, prompt: str, session_id: str | None, mode: str, ef
     return cmd + ["--", prompt]
 
 
+def codex_probe_command(model: str, effort: str | None) -> list[str]:
+    """The preflight probe, which runs in a temporary directory that is not a repository. Codex refuses
+    that unless `--skip-git-repo-check` is set, and the probe needs no write access, so the sandbox is
+    read-only. Executor rounds stay on `codex_command` inside their worktree."""
+    cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "-m", model]
+    if effort:
+        cmd += ["-c", f'model_reasoning_effort="{effort}"']
+    return cmd + ["-s", "read-only", "--", "Reply with exactly: KERYX_OK"]
+
+
 def codex_key_file(provider: dict, environ: dict) -> Path:
     """The provider's key file path, a leading ~ read against the run's HOME."""
     name = str(provider.get("keyFile") or "")
@@ -2037,8 +2047,9 @@ def _preflight_glm() -> int:
 
 
 def _preflight_codex(name: str, provider: dict) -> int:
-    """Codex CLI present, the provider's key readable and private, and one tiny `codex exec` probe through
-    the provider's own CODEX_HOME that answered KERYX_OK. Prints the model and base URL, never the key."""
+    """Codex CLI present, the provider's key readable and private, and one tiny read-only `codex exec`
+    probe through the provider's own CODEX_HOME that answered KERYX_OK. The probe runs outside a
+    repository, so it skips Codex's git-repository check. Prints the model and base URL, never the key."""
     problems = 0
     found = subprocess.run(["sh", "-c", "command -v codex"], capture_output=True, text=True)
     if found.returncode != 0:
@@ -2061,7 +2072,7 @@ def _preflight_codex(name: str, provider: dict) -> int:
     print(f"ok    worktrees go to {worktree_path('example').parent}/{name}-<slug>, branches {name}/<slug>")
     with tempfile.TemporaryDirectory() as tmp:  # the probe's own CODEX_HOME, thrown away with its session
         home = write_codex_home(Path(tmp), provider)
-        cmd = codex_command(provider["model"], "Reply with exactly: KERYX_OK", None, "agent", provider.get("effort"))
+        cmd = codex_probe_command(provider["model"], provider.get("effort"))
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, env=codex_env(environ, str(home), key),
                                  cwd=tmp, timeout=300, stdin=subprocess.DEVNULL)
