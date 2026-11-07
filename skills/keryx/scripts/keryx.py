@@ -639,8 +639,11 @@ def parse_env(pairs: list[str]) -> dict:
         key, sep, value = pair.partition("=")
         if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             raise LoopError(f"--env expects NAME=value, got {pair!r}")
-        if key in ("KUBECONFIG", "SSH_AUTH_SOCK", "PATH", "EXIT_FILE", "CURSOR_CONFIG_DIR", "CODEX_HOME",
-                   CODEX_KEY_ENV) or key.startswith(("GIT_CONFIG", "ANTHROPIC", "CLAUDE", "GLM_", "OPENAI", "CODEX")):
+        if (key in ("KUBECONFIG", "SSH_AUTH_SOCK", "PATH", "EXIT_FILE", "CURSOR_CONFIG_DIR", "CODEX_HOME",
+                    CODEX_KEY_ENV, "GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GIT_SSH_COMMAND",
+                    "GIT_TERMINAL_PROMPT")
+                or key.startswith(("GIT_CONFIG", "ANTHROPIC", "CLAUDE", "GLM_", "OPENAI", "CODEX"))
+                or "ASKPASS" in key.upper()):
             raise LoopError(f"--env may not set {key} (a guard rail of the local runners)")
         out[key] = value
     return out
@@ -864,10 +867,11 @@ def codex_key(provider: dict, environ: dict) -> str:
 
 def codex_env(base: dict, codex_home: str, key: str) -> dict:
     """The cli runner's guard rails, without credentials or any other runner's settings, with the provider's
-    key the only one reaching Codex — through its own CODEX_HOME and env_key. No GitHub login, no git
-    credential helper or askpass program, git over SSH off; the push URL still goes nowhere. These stop
-    mistakes, not a determined executor: a full-access round runs with the owner's rights (SSH keys, keychain).
-    NO_PUSH_ENV itself is unchanged (the cli and glm runners keep the one push pair)."""
+    key the only one reaching Codex — through its own CODEX_HOME and env_key. gh gets a placeholder token
+    so gh commands fail (an empty GH_CONFIG_DIR is not enough: `gh auth token` still reads the keychain);
+    no git credential helper, askpass program, or SSH. The push URL still goes nowhere. These stop mistakes,
+    not a determined executor that runs with the owner's rights (keychain, SSH keys). NO_PUSH_ENV itself is
+    unchanged (the cli and glm runners keep the one push pair)."""
     env = {k: v for k, v in cli_env(base).items()
            if not k.startswith(("CODEX", "OPENAI", "ANTHROPIC", "CLAUDE")) and not SECRET_ENV.search(k)
            and "ASKPASS" not in k}
@@ -879,6 +883,8 @@ def codex_env(base: dict, codex_home: str, key: str) -> dict:
     env["GIT_SSH_COMMAND"] = "false"
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GH_CONFIG_DIR"] = str(Path(codex_home) / "gh")
+    env.pop("GITHUB_TOKEN", None)  # gh prefers GH_TOKEN; a real GITHUB_TOKEN must not survive beside it
+    env["GH_TOKEN"] = "keryx-provider-round-has-no-github-access"
     env["CODEX_HOME"] = codex_home
     env[CODEX_KEY_ENV] = key
     return env
@@ -1628,11 +1634,35 @@ def _codex_error_message(event: dict) -> str:
     return str(event.get("message") or (event.get("error") or {}).get("message") or "")
 
 
+def _codex_agent_text(events: list[dict]) -> str:
+    """The last agent_message text in a Codex event stream."""
+    return next((str((e.get("item") or {}).get("text"))
+                 for e in reversed(events)
+                 if e.get("type") in ("item.started", "item.completed")
+                 and (e.get("item") or {}).get("type") == "agent_message"
+                 and (e.get("item") or {}).get("text")), "")
+
+
+def _codex_failure_text(events: list[dict], failed: dict | None) -> str:
+    """A failed turn's own error. Codex's `Reconnecting...` lines are retries, not the failure."""
+    if failed is not None:
+        message = _codex_error_message(failed)
+        if message:
+            return message
+    for event in reversed(events):
+        if event.get("type") != "error":
+            continue
+        message = _codex_error_message(event)
+        if message and not message.startswith("Reconnecting..."):
+            return message
+    return ""
+
+
 def codex_outcome(events: list[dict], exit_code: int | None) -> dict:
     """Status, thread and final text of a finished `codex exec` run, from its --json events, in the
-    cli_outcome shape. A finished turn's result is the last agent_message. A failed turn — `turn.failed`,
-    or a non-zero exit with no `turn.completed` — reports only its own error (the turn.failed message,
-    else the last top-level one), so a real limit reaches result.md and a model-written one does not."""
+    cli_outcome shape. The result is the last agent_message. Only an ERROR turn replaces that with its
+    own failure (a `turn.failed` message, else a top-level error that is not a `Reconnecting...` retry),
+    so a cancelled or stopped round keeps the executor's report and a real limit still reaches result.md."""
     session = next((e.get("thread_id") for e in events if e.get("thread_id")), None)
     failed = next((e for e in reversed(events) if e.get("type") == "turn.failed"), None)
     completed = any(e.get("type") == "turn.completed" for e in events)
@@ -1644,17 +1674,11 @@ def codex_outcome(events: list[dict], exit_code: int | None) -> dict:
         status = "CANCELLED"
     else:
         status = "ERROR"
-    if failed is not None or (exit_code not in (None, 0) and not completed):
-        text = _codex_error_message(failed) if failed is not None else ""
-        if not text:
-            text = next((_codex_error_message(e) for e in reversed(events)
-                         if e.get("type") == "error" and _codex_error_message(e)), "")
-    else:
-        text = next((str((e.get("item") or {}).get("text"))
-                     for e in reversed(events)
-                     if e.get("type") in ("item.started", "item.completed")
-                     and (e.get("item") or {}).get("type") == "agent_message"
-                     and (e.get("item") or {}).get("text")), "")
+    text = _codex_agent_text(events)
+    if status == "ERROR":
+        failure = _codex_failure_text(events, failed)
+        if failure:
+            text = failure
     return {"status": status, "session_id": session, "result": text, "durationMs": None, "exit": exit_code}
 
 
