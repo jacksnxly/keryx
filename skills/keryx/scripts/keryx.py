@@ -20,6 +20,10 @@ the coordinator. Two runners do the implementing:
          `create --runner subagent` prepares its worktree (.worktrees/sub-<slug>, branch sub/<slug>)
          and loop state but starts no process; the coordinator marks the round's outcome with `mark`.
          The subagent's worktree cannot push (a per-worktree push URL goes nowhere).
+  <name>  a provider declared in config.json ("providers": {name: {"runner": "codex", "baseUrl": …,
+         "keyFile": …, "model": …}}), run through `codex exec` against that provider's API. Same
+         worktree model: .worktrees/<name>-<slug>, branch <name>/<slug>. The key is read from keyFile
+         and passed only as $KERYX_CODEX_API_KEY in the executor's own CODEX_HOME; it is never printed.
 
 The ladder of executors a machine has, in the order to try them, is saved once with `setup`;
 after a failed run, `create` on the same slug hands it to the next executor (the last rung is
@@ -30,7 +34,7 @@ ignored by git through .keryx/.gitignore, and outside .git, a protected path whe
 writes prompt or are denied. Runs started before 1.2 keep <git-common-dir>/cursor-loop/<slug>/.
 
 Usage (run from inside the target repository):
-  keryx.py preflight [--runner cli|cloud|glm|subagent]
+  keryx.py preflight [--runner cli|cloud|glm|subagent|<provider>]
   keryx.py setup     [--executors LIST] [--order ladder|resets] [--reset RUNNER=WHEN[/EVERY]] [--detect]
                      (save this machine's ladder; probe what works here)
   keryx.py executors [--after RUNNER]                (the ladder still available; the next executor after a runner)
@@ -38,7 +42,7 @@ Usage (run from inside the target repository):
   keryx.py recall                                   (print the user's and this repository's keryx memory)
   keryx.py mark --slug S --status STATUS            (close a subagent round: FINISHED, ERROR, STALLED, CANCELLED)
   keryx.py models    [--runner cli|cloud|glm]
-  keryx.py create    --slug S --prompt-file F [--runner cli|cloud|glm|subagent] [--model ID] [--ref REF]
+  keryx.py create    --slug S --prompt-file F [--runner cli|cloud|glm|subagent|<provider>] [--model ID] [--ref REF]
                     [--env NAME=value]... [--param id=value]... [--mode agent|plan] [--image P]...
                     [--escalate]
                     (local runners only: --env; cloud-only: --param --image; on a failed run,
@@ -72,6 +76,8 @@ Cloud runner: the API key comes from $CURSOR_API_KEY or the macOS keychain item
 CLI runner: uses the CLI's own login (`agent login`).
 GLM runner: the plan key comes from $GLM_API_KEY or ~/.config/glm/coding-plan.key; it is never printed
 or written into the state dir by this script.
+Provider runner: the key comes from the provider's keyFile in config.json; it is never printed or
+written to disk by this script.
 """
 
 from __future__ import annotations
@@ -154,6 +160,16 @@ GLM_DENY = [f"Bash({c} *)" for c in (
     "Read(**/.env)", "Read(**/.env.*)", "Read(//**/.env)", "Read(//**/.env.*)", "Edit(**/.env*)", "Edit(//**/.env*)",
     "Bash(cp *.env*)", "Bash(cat *.env*)", "Bash(grep *.env*)", "Bash(source *.env*)",
 ]
+# A provider declared in config.json ("providers") runs on this machine through `codex exec`; Codex is the
+# only provider runner today. Its key file is named in the config, and the key itself reaches the executor
+# only as $KERYX_CODEX_API_KEY in the environment of its own CODEX_HOME.
+PROVIDER_RUNNERS = ("codex",)
+CODEX_KEY_ENV = "KERYX_CODEX_API_KEY"
+# A provider name is no built-in executor (EXECUTORS): lowercase, 2-31 characters, a letter first.
+PROVIDER_NAME = re.compile(r"[a-z][a-z0-9-]{1,30}")
+# codexConfig may carry any scalar Codex setting except the ones keryx writes itself.
+CODEX_OWNED_CONFIG = ("model_provider", "model_providers", "model", "model_reasoning_effort", "sandbox_mode",
+                      "approval_policy", "shell_environment_policy")
 
 
 class LoopError(RuntimeError):
@@ -623,8 +639,11 @@ def parse_env(pairs: list[str]) -> dict:
         key, sep, value = pair.partition("=")
         if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             raise LoopError(f"--env expects NAME=value, got {pair!r}")
-        if key in ("KUBECONFIG", "SSH_AUTH_SOCK", "PATH", "EXIT_FILE", "CURSOR_CONFIG_DIR") or key.startswith(
-                ("GIT_CONFIG", "ANTHROPIC", "CLAUDE", "GLM_")):
+        if (key in ("KUBECONFIG", "SSH_AUTH_SOCK", "PATH", "EXIT_FILE", "CURSOR_CONFIG_DIR", "CODEX_HOME",
+                    CODEX_KEY_ENV, "GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GIT_SSH_COMMAND",
+                    "GIT_TERMINAL_PROMPT")
+                or key.startswith(("GIT_CONFIG", "ANTHROPIC", "CLAUDE", "GLM_", "OPENAI", "CODEX"))
+                or "ASKPASS" in key.upper()):
             raise LoopError(f"--env may not set {key} (a guard rail of the local runners)")
         out[key] = value
     return out
@@ -800,6 +819,116 @@ def write_glm_config(d: Path) -> Path:
     return cfg_dir
 
 
+# ---------------------------------------------------------------- provider runner (codex exec)
+
+
+def codex_command(model: str, prompt: str, session_id: str | None, mode: str, effort: str | None) -> list[str]:
+    """The `codex exec` invocation for one provider run. Full access, not workspace-write: Codex's sandbox
+    refuses writes under .git even with the main .git in writable_roots, so it cannot commit from a linked
+    worktree (probed 2026-11-07); plan mode still gets read-only. `resume` takes no -s and no config of its
+    own after it, so a resumed turn carries its sandbox as -c sandbox_mode, and a prompt that starts with -
+    needs the `--` before it."""
+    sandbox = "read-only" if mode == "plan" else "danger-full-access"
+    cmd = ["codex", "exec", "--json", "-m", model]
+    if effort:
+        cmd += ["-c", f'model_reasoning_effort="{effort}"']
+    if session_id:
+        cmd += ["-c", f'sandbox_mode="{sandbox}"', "resume", session_id]
+    else:
+        cmd += ["-s", sandbox]
+    return cmd + ["--", prompt]
+
+
+def codex_probe_command(model: str, effort: str | None) -> list[str]:
+    """The preflight probe, which runs in a temporary directory that is not a repository. Codex refuses
+    that unless `--skip-git-repo-check` is set, and the probe needs no write access, so the sandbox is
+    read-only. Executor rounds stay on `codex_command` inside their worktree."""
+    cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "-m", model]
+    if effort:
+        cmd += ["-c", f'model_reasoning_effort="{effort}"']
+    return cmd + ["-s", "read-only", "--", "Reply with exactly: KERYX_OK"]
+
+
+def codex_key_file(provider: dict, environ: dict) -> Path:
+    """The provider's key file path, a leading ~ read against the run's HOME."""
+    name = str(provider.get("keyFile") or "")
+    home = str(environ.get("HOME") or os.path.expanduser("~"))
+    return Path(home + name[1:]) if name.startswith("~") else Path(name)
+
+
+def codex_key(provider: dict, environ: dict) -> str:
+    """The provider's key, read from its keyFile (~ is the run's HOME). Never printed or written to disk."""
+    path = codex_key_file(provider, environ)
+    key = path.read_text().strip() if path.is_file() else ""
+    if not key:
+        raise LoopError(f"the provider key file {path} is missing or empty; write the key to it (mode 600)")
+    return key
+
+
+def codex_env(base: dict, codex_home: str, key: str) -> dict:
+    """The cli runner's guard rails, without credentials or any other runner's settings, with the provider's
+    key the only one reaching Codex — through its own CODEX_HOME and env_key. gh gets a placeholder token
+    so gh commands fail (an empty GH_CONFIG_DIR is not enough: `gh auth token` still reads the keychain);
+    no git credential helper, askpass program, or SSH. The push URL still goes nowhere. These stop mistakes,
+    not a determined executor that runs with the owner's rights (keychain, SSH keys). NO_PUSH_ENV itself is
+    unchanged (the cli and glm runners keep the one push pair)."""
+    env = {k: v for k, v in cli_env(base).items()
+           if not k.startswith(("CODEX", "OPENAI", "ANTHROPIC", "CLAUDE")) and not SECRET_ENV.search(k)
+           and "ASKPASS" not in k}
+    env.update(NO_PUSH_ENV)  # GIT_CONFIG_KEY_0 matches the secret filter; half a guard breaks every git command
+    # A second pair after the push block: an empty credential helper, so git cannot use the owner's store.
+    env["GIT_CONFIG_COUNT"] = "2"
+    env["GIT_CONFIG_KEY_1"] = "credential.helper"
+    env["GIT_CONFIG_VALUE_1"] = ""
+    env["GIT_SSH_COMMAND"] = "false"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GH_CONFIG_DIR"] = str(Path(codex_home) / "gh")
+    env.pop("GITHUB_TOKEN", None)  # gh prefers GH_TOKEN; a real GITHUB_TOKEN must not survive beside it
+    env["GH_TOKEN"] = "keryx-provider-round-has-no-github-access"
+    env["CODEX_HOME"] = codex_home
+    env[CODEX_KEY_ENV] = key
+    return env
+
+
+def _codex_home_dir(d: Path) -> Path:
+    """Where a provider run's Codex config lives: beside the runs (.keryx/codex/<slug>/), like the GLM
+    runner's own config dir; a run folder somewhere else keeps it inside itself."""
+    if d.parent.name == "runs" and d.parent.parent.name == ".keryx":
+        return d.parent.parent / "codex" / d.name
+    return d / "codex-home"
+
+
+def _toml(value) -> str:
+    """One TOML scalar: strings quoted (inner quotes and backslashes escaped), numbers and booleans bare."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return str(value)
+
+
+def write_codex_home(d: Path, provider: dict) -> Path:
+    """A CODEX_HOME of the run's own: the provider's endpoint behind $KERYX_CODEX_API_KEY, its model and
+    effort, approvals off (keryx runs headless) and the key kept out of the executor's shells. No login,
+    no MCP servers, no user config, and never the key itself. Rewriting it takes the provider as passed,
+    so a follow-up sees a changed endpoint or codexConfig. `gh/` is an empty GH_CONFIG_DIR."""
+    if d.parent.name == "runs" and d.parent.parent.name == ".keryx":
+        ensure_ignored(d.parent.parent)  # .keryx/ ignores itself from its first file on
+    home = _codex_home_dir(d)
+    home.mkdir(parents=True, exist_ok=True)
+    lines = ['model_provider = "keryx"', f"model = {_toml(provider['model'])}"]
+    if provider.get("effort"):
+        lines.append(f"model_reasoning_effort = {_toml(provider['effort'])}")
+    lines.append('approval_policy = "never"')
+    lines += [f"{key} = {_toml(value)}" for key, value in (provider.get("codexConfig") or {}).items()]
+    lines += ["", "[model_providers.keryx]", 'name = "keryx"', f"base_url = {_toml(provider['baseUrl'])}",
+              f"env_key = {_toml(CODEX_KEY_ENV)}", 'wire_api = "responses"',
+              "", "[shell_environment_policy]", f"exclude = [{_toml(CODEX_KEY_ENV)}]"]
+    (home / "config.toml").write_text("\n".join(lines) + "\n")
+    (home / "gh").mkdir(exist_ok=True)
+    return home
+
+
 # ---------------------------------------------------------------- executor ladder + gates (tested)
 
 # The executors a person may have, in the order to try them: cli = Cursor CLI, glm = GLM Coding Plan,
@@ -835,12 +964,28 @@ GLM_LIMIT = re.compile(r"\[13\d\d\]\[(?:Usage limit reached for (?P<kind>[^.\]]+
                        r"Your limit will reset at (?P<at>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
 CURSOR_LIMIT = re.compile(r"(?P<kind>\w+) usage limit reached\. It resets in (?P<span>[^.]+?)\.", re.I)
 GLM_UTC_OFFSET = dt.timedelta(hours=8)  # Z.ai prints its reset time in UTC+8, no DST
+# A provider endpoint behind `codex exec`: an allowance spent answers HTTP 402 (Mistral's monthly Vibe
+# Code allowance with pay-as-you-go off) and a rate limit answers 429. Codex prints one of three shapes,
+# and only these: "unexpected status 402", "last status: 402" once retries are spent, or
+# "raw_status_code":402. The same three for 429. A looser "status 402" would match another runner's words.
+CODEX_ALLOWANCE = re.compile(r'unexpected status 402\b|last status: 402\b|"raw_status_code":402\b')
+CODEX_RATE = re.compile(r'unexpected status 429\b|last status: 429\b|"raw_status_code":429\b')
 
 
-def usage_limit(text: str) -> dict | None:
+def _first_of_next_month(at: dt.datetime) -> dt.datetime:
+    """00:00:00 UTC on the first day of the month after `at`: a monthly allowance resets then."""
+    moment = _as_utc(at)
+    year, month = (moment.year + 1, 1) if moment.month == 12 else (moment.year, moment.month + 1)
+    return dt.datetime(year, month, 1, tzinfo=dt.timezone.utc)
+
+
+def usage_limit(text: str, at: dt.datetime | None = None, codex: bool = True) -> dict | None:
     """Read a usage-limit message a run already printed: {"kind", "resetsAt", "resetsIn"}, else None.
 
-    Never probes anything: the GLM (Z.ai) and Cursor messages are the only two recognised."""
+    Never probes anything. GLM (Z.ai) and Cursor messages count for every runner. A codex provider's
+    HTTP 402 and 429 count only when `codex` is set, which is a codex round's own report: another
+    runner's words can contain the same text. A 402 lasts until the first of the next month after `at`
+    (now UTC); a 429 lasts ten minutes. 401 and 400 are not limits."""
     m = GLM_LIMIT.search(text or "")
     if m:
         local = dt.datetime.strptime(m.group("at"), "%Y-%m-%d %H:%M:%S")
@@ -850,18 +995,37 @@ def usage_limit(text: str) -> dict | None:
     m = CURSOR_LIMIT.search(text or "")
     if m:
         return {"kind": m.group("kind").lower(), "resetsAt": None, "resetsIn": m.group("span")}
+    if not codex:
+        return None
+    body = text or ""
+    if CODEX_ALLOWANCE.search(body):
+        moment = at or dt.datetime.now(dt.timezone.utc)
+        return {"kind": "allowance", "resetsAt": _stamp(_first_of_next_month(moment)), "resetsIn": None}
+    if CODEX_RATE.search(body):
+        return {"kind": "rate", "resetsAt": None, "resetsIn": "10 minutes"}
     return None
+
+
+def _round_is_codex(r: Path) -> bool:
+    """True when the run that owns this round folder was started on a codex provider."""
+    try:
+        agent = json.loads((r.parent.parent / "agent.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(agent, dict) and agent.get("runnerKind") == "codex"
 
 
 def round_usage_limit(r: Path) -> dict | None:
     """The usage limit a finished round ran into, from its own report (result.md, stderr.log) only: the event
-    log can quote a limit message from a file the executor read."""
+    log can quote a limit message from a file the executor read. Codex's 402 and 429 wording counts only
+    for a round whose runnerKind is codex."""
+    codex = _round_is_codex(r)
     texts = []
     for name in ("result.md", "stderr.log"):
         if (r / name).exists():
             texts.append((r / name).read_text(errors="replace"))
     for text in texts:
-        found = usage_limit(text)
+        found = usage_limit(text, codex=codex)
         if found:
             return found
     return None
@@ -923,14 +1087,18 @@ def legacy_memory_file() -> Path | None:
         return None
 
 
-def parse_executors(text: str) -> list[str]:
-    """Comma-separated executor names: whitespace stripped, duplicates dropped keeping the first."""
+def parse_executors(text: str, providers=()) -> list[str]:
+    """Comma-separated executor names: whitespace stripped, duplicates dropped keeping the first. A provider
+    declared in `providers` (the config's name -> entry mapping, or the names alone) is an executor; bare
+    `codex` never is: a provider has a name of its own."""
+    declared = list(providers)  # a dict yields its names, the config view yields the same
     out: list[str] = []
     for name in (part.strip() for part in text.split(",")):
         if not name:
             continue
-        if name not in EXECUTORS:
-            raise LoopError(f"unknown executor {name!r}; choose from {', '.join(EXECUTORS)}")
+        if name not in EXECUTORS and name not in declared:
+            choose = ", ".join(EXECUTORS + tuple(declared))
+            raise LoopError(f"unknown executor {name!r}; choose from {choose}")
         if name not in out:
             out.append(name)
     if not out:
@@ -959,12 +1127,12 @@ def _parse_next(value: object) -> dt.datetime | None:
         return None
 
 
-def _validated_resets(path: Path, resets: object) -> dict:
+def _validated_resets(path: Path, resets: object, providers=()) -> dict:
     """`resets` as saved. Every refusal names `path` first. `every` absent or null is a one-off."""
     if not isinstance(resets, dict):
         raise LoopError(f'{path}: "resets" must be an object')
     for name, spec in resets.items():
-        if name not in EXECUTORS:
+        if name not in EXECUTORS and name not in providers:
             raise LoopError(f"{path}: unknown executor {name!r} in resets")
         if not isinstance(spec, dict):
             raise LoopError(f"{path}: reset for {name} must be an object")
@@ -975,8 +1143,54 @@ def _validated_resets(path: Path, resets: object) -> dict:
     return resets
 
 
+def _validated_providers(path: Path, providers: object) -> dict:
+    """`providers` as saved: name -> a normalised entry (runner, baseUrl, keyFile, model, effort?,
+    codexConfig?). Every refusal names `path` first. A provider names a key file, never a key."""
+    if not isinstance(providers, dict):
+        raise LoopError(f'{path}: "providers" must be an object')
+    out: dict[str, dict] = {}
+    for name, spec in providers.items():
+        if name in EXECUTORS or not PROVIDER_NAME.fullmatch(name):
+            raise LoopError(f"{path}: provider name {name!r} must be 2-31 characters of lowercase letters, "
+                            f"digits and dashes, and not a built-in executor ({', '.join(EXECUTORS)})")
+        where = f"{path}: provider {name}"
+        if not isinstance(spec, dict):
+            raise LoopError(f"{where} must be an object")
+        if spec.get("runner") not in PROVIDER_RUNNERS:
+            raise LoopError(f'{where} "runner" must be one of: {", ".join(PROVIDER_RUNNERS)}')
+        if "key" in spec:
+            raise LoopError(f'{where} names a key file (keyFile), never a key ("key")')
+        if not isinstance(spec.get("baseUrl"), str) or not spec["baseUrl"].startswith("https://"):
+            raise LoopError(f'{where} "baseUrl" must be an https:// URL')
+        if not isinstance(spec.get("keyFile"), str) or not spec["keyFile"].strip():
+            raise LoopError(f'{where} needs "keyFile" as a path holding the API key')
+        if not isinstance(spec.get("model"), str) or not spec["model"].strip():
+            raise LoopError(f'{where} needs "model" as the model id to run')
+        if spec.get("effort") is not None and not isinstance(spec["effort"], str):
+            raise LoopError(f'{where} "effort" must be a string (the model\'s reasoning effort)')
+        config = spec.get("codexConfig")
+        if config is not None:
+            if not isinstance(config, dict):
+                raise LoopError(f'{where} "codexConfig" must be an object of Codex settings')
+            for key, value in config.items():
+                if key in CODEX_OWNED_CONFIG:
+                    raise LoopError(f'{where} "codexConfig" may not set {key} (keryx owns it)')
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key):
+                    raise LoopError(f"{where} codexConfig setting {key!r} is not a plain setting name")
+                if not isinstance(value, (str, int, float, bool)):
+                    raise LoopError(f"{where} codexConfig setting {key!r} needs a string, number or boolean value")
+        entry = {"runner": spec["runner"], "baseUrl": spec["baseUrl"], "keyFile": spec["keyFile"],
+                 "model": spec["model"]}
+        if spec.get("effort") is not None:
+            entry["effort"] = spec["effort"]
+        if config is not None:
+            entry["codexConfig"] = config
+        out[name] = entry
+    return out
+
+
 def _config_view(path: Path, data: object) -> dict:
-    """executors, order and resets. Unknown keys are ignored. Every refusal names `path` first.
+    """executors, order, resets and providers. Unknown keys are ignored. Every refusal names `path` first.
 
     While the order is `ladder` a bad `resets` is read as none, so the dates can never break the saved order;
     in the `resets` order it is refused."""
@@ -985,30 +1199,32 @@ def _config_view(path: Path, data: object) -> dict:
     names = data.get("executors")
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         raise LoopError(f'{path}: "executors" must be a list of names')
+    providers = _validated_providers(path, data.get("providers", {}))
     try:
-        ladder = parse_executors(",".join(names))
+        ladder = parse_executors(",".join(names), providers)
     except LoopError as exc:
         raise LoopError(f"{path}: {exc}") from exc
     order = data.get("order", "ladder")
     if order not in _ORDERS:
         raise LoopError(f"{path}: unknown order {order!r}; choose from {', '.join(_ORDERS)}")
     try:
-        resets = _validated_resets(path, data.get("resets", {}))
+        resets = _validated_resets(path, data.get("resets", {}), providers)
     except LoopError:
         if order == "resets":
             raise
         resets = {}
-    return {"executors": ladder, "order": order, "resets": resets}
+    return {"executors": ladder, "order": order, "resets": resets, "providers": providers}
 
 
 def load_config(environ: dict) -> dict:
     """The saved ladder, or the Claude subagent alone when it was never saved.
 
     `order` is `ladder` (the saved order) unless the file says `resets`. `resets` is read either way
-    and changes the order only when `order` is `resets`."""
+    and changes the order only when `order` is `resets`. `providers` is the declared provider runners,
+    an empty mapping when none are declared."""
     path = config_path(environ)
     if not path.exists():
-        return {"executors": ["subagent"], "order": "ladder", "resets": {}}
+        return {"executors": ["subagent"], "order": "ladder", "resets": {}, "providers": {}}
     try:
         data = json.loads(path.read_text())
     except ValueError as exc:
@@ -1313,8 +1529,16 @@ def gate_hits(paths: list[str], globs: list[str]) -> list[str]:
 
 def tool_calls(event: dict) -> list[tuple[str, str, str]]:
     """("start" | "end", call id, command) for each tool call an event opens or closes: Cursor sends tool_call
-    events; Claude Code puts tool_use parts in assistant messages and tool_result parts in user messages."""
+    events; Claude Code puts tool_use parts in assistant messages and tool_result parts in user messages;
+    Codex opens a command_execution item on item.started and closes it on item.completed."""
     kind = event.get("type")
+    if kind in ("item.started", "item.completed"):
+        item = event.get("item") or {}
+        if item.get("type") != "command_execution":
+            return []
+        if kind == "item.started":
+            return [("start", item.get("id"), str(item.get("command") or "command_execution"))]
+        return [("end", item.get("id"), "")]
     if kind == "tool_call":
         if event.get("subtype") != "started":
             return [("end", event.get("call_id"), "")]
@@ -1333,8 +1557,22 @@ def tool_calls(event: dict) -> list[tuple[str, str, str]]:
 
 
 def cli_summary(event: dict) -> str | None:
-    """One progress line for a CLI stream-json event (https://cursor.com/docs/cli/reference/output-format)."""
+    """One progress line for a CLI stream-json event (https://cursor.com/docs/cli/reference/output-format),
+    or for a `codex exec --json` event: init with the thread id, a tool line per command_execution item and
+    a result line for the turn."""
     kind = event.get("type")
+    if kind == "thread.started":
+        return f"init  thread={event.get('thread_id')}"
+    if kind == "item.started":
+        item = event.get("item") or {}
+        if item.get("type") == "command_execution":
+            return f"tool  shell {str(item.get('command') or '')[:140]}".rstrip()
+        return None
+    if kind == "turn.completed":
+        return "result completed"
+    if kind == "turn.failed":
+        message = str((event.get("error") or {}).get("message") or "")
+        return f"result failed {message[:140]}".rstrip()
     if kind == "system" and event.get("subtype") == "init":
         return f"init  model={event.get('model')} session={event.get('session_id')}"
     if kind == "tool_call" and event.get("subtype") == "started":
@@ -1391,11 +1629,65 @@ def cli_outcome(events: list[dict], exit_code: int | None) -> dict:
             "durationMs": (result or {}).get("duration_ms"), "exit": exit_code}
 
 
+def _codex_error_message(event: dict) -> str:
+    """A Codex error event's message: top-level `message`, or `error.message`."""
+    return str(event.get("message") or (event.get("error") or {}).get("message") or "")
+
+
+def _codex_agent_text(events: list[dict]) -> str:
+    """The last agent_message text in a Codex event stream."""
+    return next((str((e.get("item") or {}).get("text"))
+                 for e in reversed(events)
+                 if e.get("type") in ("item.started", "item.completed")
+                 and (e.get("item") or {}).get("type") == "agent_message"
+                 and (e.get("item") or {}).get("text")), "")
+
+
+def _codex_failure_text(events: list[dict], failed: dict | None) -> str:
+    """A failed turn's own error. Codex's `Reconnecting...` lines are retries, not the failure."""
+    if failed is not None:
+        message = _codex_error_message(failed)
+        if message:
+            return message
+    for event in reversed(events):
+        if event.get("type") != "error":
+            continue
+        message = _codex_error_message(event)
+        if message and not message.startswith("Reconnecting..."):
+            return message
+    return ""
+
+
+def codex_outcome(events: list[dict], exit_code: int | None) -> dict:
+    """Status, thread and final text of a finished `codex exec` run, from its --json events, in the
+    cli_outcome shape. The result is the last agent_message. Only an ERROR turn replaces that with its
+    own failure (a `turn.failed` message, else a top-level error that is not a `Reconnecting...` retry),
+    so a cancelled or stopped round keeps the executor's report and a real limit still reaches result.md."""
+    session = next((e.get("thread_id") for e in events if e.get("thread_id")), None)
+    failed = next((e for e in reversed(events) if e.get("type") == "turn.failed"), None)
+    completed = any(e.get("type") == "turn.completed" for e in events)
+    if completed and failed is None and exit_code == 0:
+        status = "FINISHED"
+    elif exit_code is None:
+        status = "RUNNING"
+    elif exit_code < 0 or exit_code in (130, 137, 143):
+        status = "CANCELLED"
+    else:
+        status = "ERROR"
+    text = _codex_agent_text(events)
+    if status == "ERROR":
+        failure = _codex_failure_text(events, failed)
+        if failure:
+            text = failure
+    return {"status": status, "session_id": session, "result": text, "durationMs": None, "exit": exit_code}
+
+
 # ---------------------------------------------------------------- cli runner
 
 
 def worktree_path(slug: str, runner: str = "cli") -> Path:
-    return main_worktree() / ".worktrees" / f"{WORKTREE_PREFIX.get(runner, 'cursor')}-{slug}"
+    """A local runner's worktree: .worktrees/<prefix>-<slug>. A provider is its own prefix (mistral-vibe-<slug>)."""
+    return main_worktree() / ".worktrees" / f"{WORKTREE_PREFIX.get(runner, runner)}-{slug}"
 
 
 def ensure_excluded(pattern: str) -> None:
@@ -1408,8 +1700,8 @@ def ensure_excluded(pattern: str) -> None:
 
 
 ATTRIBUTION_TRAILER = re.compile(
-    r"(?im)^(co-authored-by:[^\n]*(cursor|claude|anthropic|glm|z\.ai|zhipu)[^\n]*|made with cursor[^\n]*"
-    r"|\W*generated with \[?claude code[^\n]*)\n?")
+    r"(?im)^(co-authored-by:[^\n]*(cursor|claude|anthropic|glm|z\.ai|zhipu|codex|openai|mistral)[^\n]*"
+    r"|made with cursor[^\n]*|\W*generated with \[?claude code[^\n]*)\n?")
 
 
 def write_cli_config(d: Path) -> Path:
@@ -1476,7 +1768,28 @@ def disable_mcp(workspace: str) -> list[str]:
     return sorted(names)
 
 
+def _codex_provider(agent: dict, environ: dict) -> dict:
+    """The declared provider a codex round runs on, re-read at every launch (a follow-up picks up a rotated
+    key file or endpoint); the runner names it and runnerKind says codex."""
+    providers = load_config(environ).get("providers") or {}
+    provider = providers.get(agent.get("runner"))
+    if not provider:
+        raise LoopError(f"provider {agent.get('runner')!r} is not declared in {config_path(environ)} anymore; "
+                        "add it back, or switch the slug to another executor")
+    return provider
+
+
 def cli_launch(d: Path, r: Path, agent: dict, prompt: str, mode: str) -> int:
+    if agent.get("runnerKind") in PROVIDER_RUNNERS:
+        environ = dict(os.environ)
+        provider = _codex_provider(agent, environ)
+        # create and followup both launch here, so a changed baseUrl or codexConfig is written first.
+        home = write_codex_home(d, provider)
+        agent["configDir"] = str(home)
+        cmd = codex_command(agent["model"], prompt, agent.get("sessionId"), mode, provider.get("effort"))
+        env = codex_env(environ, str(home), codex_key(provider, environ))
+        env.update(agent.get("env") or {})
+        return _spawn(r, agent, cmd, env, mode, "none (own CODEX_HOME)")
     if agent.get("runner") == "glm":
         settings = str(Path(agent["configDir"]) / "settings.json")
         cmd = glm_command(agent["model"], prompt, agent.get("sessionId"), mode, settings)
@@ -1623,23 +1936,38 @@ def read_events(path: Path) -> list[dict]:
 # ---------------------------------------------------------------- commands
 
 
+def _resolve_runner(name: str, environ: dict) -> tuple[str, dict | None]:
+    """A --runner value: a built-in executor name, or a declared provider. Returns (the name, the
+    provider's entry or None), with the same error text as an unknown executor."""
+    if name in EXECUTORS:
+        return name, None
+    providers = load_config(environ).get("providers") or {}
+    if name in providers:
+        return name, providers[name]
+    raise LoopError(f"unknown runner {name!r}; choose from {', '.join(EXECUTORS + tuple(providers))}")
+
+
 def cmd_preflight(args) -> int:
-    if args.runner == "subagent":
+    environ = dict(os.environ)
+    runner, provider = _resolve_runner(args.runner, environ)
+    if runner == "subagent":
         # The coordinator's own Claude session runs it; there is nothing on this machine to check.
         print("ok    Claude subagent: the coordinator dispatches it with the keryx executor agent")
         return 0
     problems = 0
     repo = ""
-    if args.runner == "cloud":  # only a cloud agent clones from GitHub; a local run works in any checkout
+    if runner == "cloud":  # only a cloud agent clones from GitHub; a local run works in any checkout
         try:
             repo = normalize_repo_url(git("remote", "get-url", "origin"))
             print(f"ok    origin = {repo}")
         except LoopError as exc:
             print(f"FAIL  {exc}")
             return 1
-    if args.runner == "glm":
+    if runner == "glm":
         return _preflight_glm()
-    if args.runner == "cli":
+    if provider is not None:
+        return _preflight_codex(runner, provider)
+    if runner == "cli":
         env = cli_env(dict(os.environ))
         found = subprocess.run(["sh", "-c", "command -v agent"], capture_output=True, text=True, env=env)
         if found.returncode != 0:
@@ -1781,6 +2109,55 @@ def _preflight_glm() -> int:
     return 1 if problems else 0
 
 
+def _preflight_codex(name: str, provider: dict) -> int:
+    """Codex CLI present, the provider's key readable and private, and one tiny read-only `codex exec`
+    probe through the provider's own CODEX_HOME that answered KERYX_OK. The probe runs outside a
+    repository, so it skips Codex's git-repository check. Prints the model and base URL, never the key."""
+    problems = 0
+    found = subprocess.run(["sh", "-c", "command -v codex"], capture_output=True, text=True)
+    if found.returncode != 0:
+        print("FAIL  Codex CLI (`codex`) not found: install it, then declare the provider in config.json")
+        return 1
+    version = subprocess.run(["codex", "--version"], capture_output=True, text=True).stdout.strip()
+    print(f"ok    Codex CLI {version} at {found.stdout.strip()}")
+    environ = dict(os.environ)
+    try:
+        key = codex_key(provider, environ)
+    except LoopError as exc:
+        print(f"FAIL  {exc}")
+        return 1
+    print("ok    provider key found (not shown)")
+    key_file = codex_key_file(provider, environ)
+    if key_file.is_file() and key_file.stat().st_mode & 0o077:
+        print(f"WARN  {key_file} is readable by others: chmod 600 it")
+        problems += 1
+    print(f"ok    model {provider['model']} at {provider['baseUrl']}")
+    print(f"ok    worktrees go to {worktree_path('example').parent}/{name}-<slug>, branches {name}/<slug>")
+    with tempfile.TemporaryDirectory() as tmp:  # the probe's own CODEX_HOME, thrown away with its session
+        home = write_codex_home(Path(tmp), provider)
+        cmd = codex_probe_command(provider["model"], provider.get("effort"))
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, env=codex_env(environ, str(home), key),
+                                 cwd=tmp, timeout=300, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            print("FAIL  probe run did not answer within 300s")
+            return problems + 1
+        events = []
+        for line in res.stdout.splitlines():
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                continue
+        outcome = codex_outcome(events, res.returncode)
+        if outcome["status"] == "FINISHED" and "KERYX_OK" in outcome["result"]:
+            print(f"ok    probe run answered {outcome['result'][:30]!r}")
+        else:
+            detail = outcome["result"] or res.stderr or res.stdout or ""
+            print(f"FAIL  probe run: exit {res.returncode}, {outcome['status']}: {redact(str(detail)[-300:])}")
+            problems += 1
+    return 1 if problems else 0
+
+
 def _detect_executors() -> None:
     """One line per executor: can this machine run it? Keys are looked up, never printed."""
     print("subagent  yes  always available")
@@ -1804,6 +2181,23 @@ def _detect_executors() -> None:
         print("cloud  yes  Cursor API key found (not shown)")
     except LoopError as exc:
         print(f"cloud  no  {exc}")
+    environ = dict(os.environ)
+    try:
+        providers = load_config(environ).get("providers") or {}
+    except LoopError as exc:  # detect is a probe: a bad config is one more finding, not a dead command
+        print(f"provider  no  {exc}")
+        providers = {}
+    for name, provider in providers.items():
+        installed = subprocess.run(["sh", "-c", "command -v codex"], capture_output=True, text=True).returncode == 0
+        try:
+            codex_key(provider, environ)
+            key_state = "key file present"
+            usable = installed
+        except LoopError as exc:
+            key_state = str(exc)
+            usable = False
+        codex_state = "codex installed" if installed else "codex not installed"
+        print(f"{name}  {'yes' if usable else 'no'}  {codex_state}, {key_state}")
 
 
 def _setup_base(path: Path, new_ladder: bool) -> tuple[dict, str | None]:
@@ -1827,14 +2221,16 @@ def _setup_base(path: Path, new_ladder: bool) -> tuple[dict, str | None]:
     return {}, problem
 
 
-def _apply_reset(path: Path, resets: dict, text: str) -> None:
-    """`RUNNER=WHEN[/EVERY]` saves that reset; `RUNNER=none` clears it. `next` is stored as given."""
+def _apply_reset(path: Path, resets: dict, text: str, providers=()) -> None:
+    """`RUNNER=WHEN[/EVERY]` saves that reset; `RUNNER=none` clears it. `next` is stored as given.
+    A declared provider has a reset date like any plan."""
     if text.count("=") != 1:
         raise LoopError(f"{path}: reset must be RUNNER=WHEN[/EVERY], not {text!r}")
     runner, rest = text.split("=", 1)
     runner = runner.strip()
-    if runner not in EXECUTORS:
-        raise LoopError(f"{path}: unknown executor {runner!r}; choose from {', '.join(EXECUTORS)}")
+    if runner not in EXECUTORS and runner not in providers:
+        raise LoopError(f"{path}: unknown executor {runner!r}; "
+                        f"choose from {', '.join(EXECUTORS + tuple(providers))}")
     rest = rest.strip()
     if rest == "none":
         resets.pop(runner, None)
@@ -1876,8 +2272,10 @@ def cmd_setup(args) -> int:
     writing = bool(args.executors or args.order or reset_args)
     if writing:
         data, broken = _setup_base(path, bool(args.executors))
+        providers = data.get("providers")
+        providers = providers if isinstance(providers, dict) else {}
         if args.executors:
-            data["executors"] = parse_executors(args.executors)
+            data["executors"] = parse_executors(args.executors, providers)
         if args.order:
             data["order"] = args.order
         if reset_args:
@@ -1886,7 +2284,7 @@ def cmd_setup(args) -> int:
                 raise LoopError(f'{path}: "resets" must be an object')
             resets = dict(current)
             for text in reset_args:
-                _apply_reset(path, resets, text)
+                _apply_reset(path, resets, text, providers)
             data["resets"] = resets
         data["updatedAt"] = now()
         _config_view(path, data)
@@ -1926,6 +2324,7 @@ def cmd_executors(args) -> int:
     if config.get("order") == "resets":
         print(_resets_line(config, ladder, at), file=sys.stderr)
     if args.after:
+        _resolve_runner(args.after, environ)  # a typo'd rung is an error, not the ladder's first rung
         print(_executor_after(ladder, args.after, environ, at))
         return 0
     limited = limited_runners(environ, at)
@@ -1955,7 +2354,7 @@ def _handover_commit(d: Path, agent: dict) -> str:
     The branch survives its worktree being removed; if neither exists there is nothing to name."""
     base = agent["baseSha"]
     head = ""
-    if agent.get("runner") in LOCAL_RUNNERS:
+    if agent_is_local(agent):
         if agent.get("workspace") and Path(agent["workspace"]).is_dir():
             head = git("rev-parse", "HEAD", cwd=agent["workspace"], check=False)
         if not head:
@@ -2051,36 +2450,47 @@ def _refuse_subagent(agent: dict) -> None:
         raise LoopError("a Claude subagent reports to the coordinator; there is nothing to wait for")
 
 
+def agent_is_local(agent: dict) -> bool:
+    """A round this machine runs in a worktree: a built-in local runner, or a declared provider (whose
+    agent.json carries a runnerKind). Rounds from before providers have no runnerKind and resolve by name."""
+    return agent.get("runner") in LOCAL_RUNNERS or agent.get("runnerKind") in PROVIDER_RUNNERS
+
+
 def cmd_create(args) -> int:
+    runner, provider = _resolve_runner(args.runner, dict(os.environ))
     d = slug_dir(args.slug, must_exist=False)
-    switch = _switch_plan(d, args.slug, args.runner, args.escalate) if (d / "agent.json").exists() else None
+    switch = _switch_plan(d, args.slug, runner, args.escalate) if (d / "agent.json").exists() else None
     if switch:
         # A handover keeps the loop's base and ignores --ref entirely: it does not even resolve it.
         start, base_sha = switch["start"], switch["baseSha"]
-        if args.runner == "cloud" and start != base_sha:
+        if runner == "cloud" and start != base_sha:
             raise LoopError(f"the cloud runner clones from GitHub and cannot start from {start[:12]}, which "
                             "exists only on this machine; switch to a local rung (cli, glm or subagent) instead")
     else:
         start = base_sha = pin_base(args.ref)
-    if args.runner in LOCAL_RUNNERS:
+    if runner in LOCAL_RUNNERS or provider is not None:
         if args.param or args.image:
             raise LoopError("--param and --image are cloud-runner options")
-        glm = args.runner == "glm"
-        sub = args.runner == "subagent"
-        model = args.model or ("sonnet" if sub else DEFAULT_GLM_MODEL if glm else DEFAULT_CLI_MODEL)
+        glm = runner == "glm"
+        sub = runner == "subagent"
+        model = args.model or (provider["model"] if provider else
+                               "sonnet" if sub else DEFAULT_GLM_MODEL if glm else DEFAULT_CLI_MODEL)
         read_prompt(args.prompt_file)
-        wt = worktree_path(args.slug, args.runner)
-        branch = f"{WORKTREE_PREFIX[args.runner]}/{args.slug}"
+        wt = worktree_path(args.slug, runner)
+        branch = f"{WORKTREE_PREFIX.get(runner, runner)}/{args.slug}"
         if args.dry_run:
             shown = (f"keryx:executor with worktree {wt}" if sub
                      else glm_command(model, "<prompt>", None, args.mode, str(glm_config_dir(d) / "settings.json")) if glm
+                     else codex_command(model, "<prompt>", None, args.mode, (provider or {}).get("effort")) if provider
                      else cli_command(model, str(wt), "<prompt>", None, args.mode))
-            print(json.dumps({"runner": args.runner, "worktree": str(wt), "branch": branch, "base": start,
+            print(json.dumps({"runner": runner, "worktree": str(wt), "branch": branch, "base": start,
                               "model": model, "command": shown}, indent=2))
             return 0
         extra_env = parse_env(args.env)
         if glm:
             glm_env(dict(os.environ), "")  # no key, or a wrong endpoint: fail before a worktree exists
+        if provider:
+            codex_key(provider, dict(os.environ))  # no key file: fail before a worktree exists
         ensure_ignored(wt.parent)  # .worktrees/ ignores itself before a worktree lands in it, as .keryx/ does
         if switch:
             _reuse_worktree(wt, branch, start)
@@ -2088,7 +2498,7 @@ def cmd_create(args) -> int:
             if wt.exists():
                 raise LoopError(f"{wt} already exists")
             git("worktree", "add", "-b", branch, str(wt), start)
-        if args.runner == "cli":
+        if runner == "cli":
             write_cli_permissions(wt)
         if sub:
             block_pushes(wt)
@@ -2097,7 +2507,7 @@ def cmd_create(args) -> int:
             ensure_ignored(runs.parent)
         if switch:
             # Everything that can fail has succeeded; only now does the loop change hands.
-            _archive_switch(d, switch, args.runner)
+            _archive_switch(d, switch, runner)
         if sub:
             agent = {"slug": args.slug, "runner": "subagent", "workspace": str(wt), "branch": branch,
                      "baseSha": base_sha, "baseRef": (switch or {}).get("baseRef", args.ref),
@@ -2110,14 +2520,18 @@ def cmd_create(args) -> int:
                        f"branch {branch}, base {start[:12]}", "DISPATCHED")
             print(f"run {r.name} prepared: dispatch keryx:executor with worktree {wt}\nbranch   {branch}")
             return 0
-        agent = {"slug": args.slug, "runner": args.runner, "workspace": str(wt), "branch": branch, "baseSha": base_sha,
+        agent = {"slug": args.slug, "runner": runner, "workspace": str(wt), "branch": branch, "baseSha": base_sha,
                  "baseRef": (switch or {}).get("baseRef", args.ref), "model": model, "sessionId": None,
                  "createdAt": now(), "env": extra_env,
-                 "configDir": str(write_glm_config(d) if glm else write_cli_config(d))}
+                 "configDir": str(write_glm_config(d) if glm else
+                                  write_codex_home(d, provider) if provider else write_cli_config(d))}
+        if provider:
+            agent["runnerKind"] = "codex"
         save_json(d / "agent.json", agent)
         r = new_round(d, args.prompt_file)
         pid = cli_launch(d, r, agent, read_prompt(args.prompt_file), args.mode)
-        who = "GLM (Claude Code on the GLM Coding Plan)" if glm else "Cursor CLI"
+        who = (f"{runner} (codex exec on {provider['model']} at {provider['baseUrl']})" if provider
+               else "GLM (Claude Code on the GLM Coding Plan)" if glm else "Cursor CLI")
         append_log(d, "dispatch", f"run {r.name}: started {who} ({args.mode} mode, model {model})", "keryx create",
                    f"pid {pid}, worktree {wt}, branch {branch}, base {start[:12]}", "RUNNING")
         print(f"run {r.name} started: pid {pid}\nworktree {wt}\nbranch   {branch}\nevents   {r / 'events.ndjson'}")
@@ -2151,7 +2565,7 @@ def cmd_create(args) -> int:
     if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
         ensure_ignored(runs.parent)
     if switch:
-        _archive_switch(d, switch, args.runner)
+        _archive_switch(d, switch, runner)
     save_json(d / "agent.json", {
         "slug": args.slug, "runner": "cloud", "agentId": agent["id"], "url": agent.get("url"),
         "repo": body["repos"][0]["url"], "baseSha": base_sha,
@@ -2183,7 +2597,7 @@ def cmd_followup(args) -> int:
                    "keryx followup", f"round {r.name}, branch {agent['branch']}", "DISPATCHED")
         print(f"run {r.name} prepared: dispatch keryx:executor with worktree {agent['workspace']}")
         return 0
-    if agent.get("runner") in LOCAL_RUNNERS:
+    if agent_is_local(agent):
         prev = current_round(d)
         if not (prev / "exit.code").exists() and pid_alive(json.loads((prev / "run.json").read_text())["pid"]):
             raise LoopError(f"run {prev.name} is still going; `wait` for it or `cancel` it first")
@@ -2228,6 +2642,9 @@ def _wait_cli(d: Path, args) -> int:
     r = current_round(d)
     run = json.loads((r / "run.json").read_text())
     pid, events_path, exit_file = run["pid"], r / "events.ndjson", r / "exit.code"
+    codex = agent.get("runnerKind") in PROVIDER_RUNNERS
+    # Codex ends a turn with turn.completed or turn.failed where the CLIs send one `result` event.
+    result_types = ("turn.completed", "turn.failed") if codex else ("result",)
     deadline = time.monotonic() + args.timeout
     offset = 0
     timed_out = is_stalled = lingered = False
@@ -2249,7 +2666,7 @@ def _wait_cli(d: Path, args) -> int:
                     except ValueError:
                         continue
                     calls = tool_calls(event)
-                    if calls or event.get("type") == "result":
+                    if calls or event.get("type") in result_types:
                         seen.append(event)
                     for action, call_id, command in calls:
                         if action == "start":
@@ -2258,7 +2675,7 @@ def _wait_cli(d: Path, args) -> int:
                             in_flight[call_id] = (started, command)
                         else:
                             in_flight.pop(call_id, None)
-                    if event.get("type") == "result":
+                    if event.get("type") in result_types:
                         result_at = time.time()
                     summary = cli_summary(event)
                     if summary:
@@ -2289,9 +2706,10 @@ def _wait_cli(d: Path, args) -> int:
         code = -15
     events_all = read_events(events_path)
     if lingered:  # it finished; only its exit was missing
-        last = next((e for e in reversed(events_all) if e.get("type") == "result"), {})
-        code = 0 if not last.get("is_error") else 1
-    outcome = cli_outcome(events_all, code)
+        last = next((e for e in reversed(events_all) if e.get("type") in result_types), {})
+        code = (0 if last.get("type") != "turn.failed" and not last.get("is_error") else 1) if codex \
+            else (0 if not last.get("is_error") else 1)
+    outcome = codex_outcome(events_all, code) if codex else cli_outcome(events_all, code)
     if timed_out:
         outcome["status"] = "CANCELLED"
     if is_stalled:
@@ -2334,7 +2752,7 @@ def cmd_wait(args) -> int:
     d = slug_dir(args.slug)
     agent = load_agent(d)
     _refuse_subagent(agent)
-    if agent.get("runner") in LOCAL_RUNNERS:
+    if agent_is_local(agent):
         return _wait_cli(d, args)
     r = current_round(d)
     run = json.loads((r / "run.json").read_text())
@@ -2403,7 +2821,7 @@ def cmd_status(args) -> int:
         return 0
     r = current_round(d)
     run = json.loads((r / "run.json").read_text())
-    if agent.get("runner") in LOCAL_RUNNERS:
+    if agent_is_local(agent):
         alive = pid_alive(run["pid"]) and not (r / "exit.code").exists()
         if not alive and run.get("status") == "ERROR":
             limit = run.get("usageLimit") or round_usage_limit(r)
@@ -2442,7 +2860,7 @@ def branch_of(d: Path) -> str:
 def cmd_fetch(args) -> int:
     d = slug_dir(args.slug)
     agent = load_agent(d)
-    if agent.get("runner") in LOCAL_RUNNERS:
+    if agent_is_local(agent):
         branch = agent["branch"]
         head = git("rev-parse", "HEAD", cwd=agent["workspace"])
         git("update-ref", f"refs/keryx/{args.slug}", head)
@@ -2951,7 +3369,7 @@ def cmd_scrub(args) -> int:
     """Rewrite the messages of base..head without an assistant's attribution lines; trees, authors and dates stay."""
     d = slug_dir(args.slug)
     agent = load_agent(d)
-    if agent.get("runner") not in LOCAL_RUNNERS:
+    if not agent_is_local(agent):
         raise LoopError("scrub works on a local runner's branch; a pushed cloud branch needs the owner's call")
     wt, branch, base = agent["workspace"], agent["branch"], agent["baseSha"]
     if git("status", "--porcelain", cwd=wt):
@@ -2995,7 +3413,7 @@ def cmd_cancel(args) -> int:
     _refuse_subagent(agent)
     r = current_round(d)
     run = json.loads((r / "run.json").read_text())
-    if agent.get("runner") in LOCAL_RUNNERS:
+    if agent_is_local(agent):
         if pid_alive(run["pid"]):
             kill_tree(run["pid"])
         else:
@@ -3119,7 +3537,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="keryx.py", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     pf = sub.add_parser("preflight")
-    pf.add_argument("--runner", choices=["cli", "cloud", "glm", "subagent"], default="cli")
+    pf.add_argument("--runner", metavar="RUNNER", default="cli",
+                    help="cli, cloud, glm, subagent, or a provider declared in config.json")
     su = sub.add_parser("setup")
     su.add_argument("--executors", metavar="LIST", help="save this executor order, e.g. cli,glm,subagent")
     su.add_argument("--order", choices=["ladder", "resets"],
@@ -3140,7 +3559,8 @@ def main(argv=None) -> int:
     c = sub.add_parser("create")
     c.add_argument("--slug", required=True)
     c.add_argument("--prompt-file", required=True)
-    c.add_argument("--runner", choices=list(LOCAL_RUNNERS) + ["cloud"], default="cli")
+    c.add_argument("--runner", metavar="RUNNER", default="cli",
+                   help="cli, glm, subagent, cloud, or a provider declared in config.json")
     c.add_argument("--model")
     c.add_argument("--param", action="append", default=[], help="cloud: model parameter id=value, e.g. reasoning_effort=xhigh")
     c.add_argument("--ref", default="main")

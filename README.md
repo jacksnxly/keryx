@@ -51,13 +51,14 @@ Ask for the work and say keryx, or call it directly:
 
 keryx remembers the choices you make that will come up again (your executor order, how far it may go, a repository's traps) in `~/.config/keryx/memory.md` and, per repository, in `.keryx/memory.md`. It never stores a secret; edit or delete either file at any time.
 
-The first time it needs an executor, keryx runs a short setup: it shows which executors it found on this machine and asks which to use, in which order. The answer is saved in `~/.config/keryx/config.json`; say "keryx setup" to change it.
+The first time it needs an executor, keryx runs a short setup: it shows which executors it found on this machine and asks which to use, in which order. The answer is saved in `~/.config/keryx/config.json`; say "keryx setup" to change it. A provider joins the ladder the same way once its entry is in the file — for example a monthly-allowance plan on another vendor's API, run through `codex exec` under a name of its own.
 
 | Executor | What you need |
 |---|---|
 | `subagent` | Nothing: the plugin's `keryx:executor` agent on Sonnet. Always available. It runs with your session's environment, without MCP tools, and cannot push from its worktree. |
 | `cli` | The [Cursor CLI](https://cursor.com/cli), logged in (`agent login`). |
 | `glm` | A GLM Coding Plan key in `$GLM_API_KEY` or `~/.config/glm/coding-plan.key`. |
+| `<provider>` | A provider declared in `~/.config/keryx/config.json` (`"runner": "codex"`): the [Codex CLI](https://developers.openai.com/codex/) driving any model behind an https API, with the key in a file (`keyFile`) — never in the config, never printed. |
 | `cloud` | A Cursor API key and the repository on GitHub. |
 
 When an executor fails (an error, a stop, a dispatch that never starts), keryx moves the same work to the next one in your order, and writes the code itself after the last.

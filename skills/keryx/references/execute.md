@@ -9,6 +9,7 @@ keryx works with Claude Code alone. Which executors a person has, and in which o
 | A Claude subagent | `subagent` | `keryx.py create --runner subagent` makes its worktree (`.worktrees/sub-<slug>`, branch `sub/<slug>`) and loop state and starts nothing; you dispatch the plugin's `keryx:executor` agent (Sonnet) through the Agent tool in the background with that worktree path in its brief. Its completion notice is its report; `keryx.py mark --slug S --status FINISHED|ERROR` closes the round. It runs with your session's environment and permission mode and reads what your session reads, `.keryx/` included (a plugin agent cannot carry its own deny rules), without MCP tools, and its worktree cannot push; put `cli` or `glm` first for work that must not see your credentials. Always available. |
 | Cursor CLI | `cli` | `keryx.py create --runner cli`: `.worktrees/cursor-<slug>`, branch `cursor/<slug>`; commits stay local. Its permission rules refuse it the runs' QA evidence and reproductions and the memory. |
 | GLM Coding Plan | `glm` | `keryx.py create --runner glm`: headless Claude Code on a GLM Coding Plan, `.worktrees/glm-<slug>`, branch `glm/<slug>`. The model is a third party's: it sees the repository, never credentials (secret variables stripped, `.env` files and key folders denied, no MCP servers); its permission rules refuse it every run and the memory in `.keryx/` (its own config is `.keryx/glm/<slug>/`). Permission rules cover its file tools and commands such as `cat`, not a script that opens a file itself. |
+| A Codex provider | `<name>` | `keryx.py create --runner <name>`: a provider declared in `config.json` (`"runner": "codex"`), run through `codex exec` — `.worktrees/<name>-<slug>`, branch `<name>/<slug>`. Full access on this machine (it can read the provider's key file and the run records under `.keryx/` — unlike the glm runner's read rules), a scrubbed environment and its own `CODEX_HOME` (`.keryx/codex/<slug>/`, no MCP servers). gh gets a placeholder token so gh commands fail (`GH_CONFIG_DIR` stays an empty folder). No git credentials over HTTPS, git over SSH off (`GIT_SSH_COMMAND=false`); pushes go nowhere. These guards stop mistakes, not a determined executor that runs with your user's rights (keychain, SSH keys). The key comes from the provider's `keyFile` and never reaches its shells' environment. |
 | Cursor Cloud Agent | `cloud` | `keryx.py create --runner cloud`: on Cursor's machines; the repository must be on GitHub. |
 | You, inline | `inline` | S work, M work that is mostly judgement, and the rung after the last executor. |
 
@@ -17,6 +18,14 @@ The executor never dispatches its own subagents, never reviews itself in your pl
 ### First use: setup
 
 When nothing is set up, `keryx.py executors` says so on stderr. Then, once: run `keryx.py setup --detect`, show the owner what it found, and ask which executors to use and in which order — the cheapest available first, the subagent last. Save the answer with `keryx.py setup --executors <list>`, and `keryx.py remember` it. Never probe or guess usage limits. *(owner; evidence: a run skipped the question because nothing told it the setup was missing)*
+
+A provider (a model behind an https API that Codex can drive) is declared by the owner in the same `config.json`, and joins the ladder like any executor — `setup --detect` says whether its key file is there:
+
+```json
+"providers": {"mistral-vibe": {"runner": "codex", "baseUrl": "https://api.mistral.ai/v1",
+                               "keyFile": "~/.config/mistral/vibe.key", "model": "zai-glm-5-3",
+                               "effort": "high", "codexConfig": {"web_search": "disabled"}}}
+```
 
 ### A usage limit
 
@@ -40,6 +49,7 @@ python3 "$SKILL_DIR/scripts/keryx.py" setup --order resets --reset cli=2026-11-0
 python3 "$SKILL_DIR/scripts/keryx.py" executors [--after <runner>]   # the ladder, or the next rung
 python3 "$SKILL_DIR/scripts/keryx.py" preflight            # every FAIL blocks; it lists the models
 python3 "$SKILL_DIR/scripts/keryx.py" preflight --runner glm   # key, endpoint, and a one-line probe answered by GLM
+python3 "$SKILL_DIR/scripts/keryx.py" preflight --runner <provider>   # a declared provider: codex, key file, one probe run
 python3 "$SKILL_DIR/scripts/keryx.py" create --slug S --prompt-file <state>/rounds-in/01.md --model <id> --ref <base sha>
 python3 "$SKILL_DIR/scripts/keryx.py" wait --slug S        # run in the background; you are notified (not for subagents)
 python3 "$SKILL_DIR/scripts/keryx.py" mark --slug S --status ERROR   # a subagent round that failed
@@ -53,7 +63,7 @@ python3 "$SKILL_DIR/scripts/keryx.py" report --slug S                  # draft d
 python3 "$SKILL_DIR/scripts/keryx.py" finish --slug S [--head R] [--findings-only]   # FINISHED, or what the run still lacks
 ```
 
-For Cursor, pick the cheapest model preflight lists that has done this kind of work. For GLM, `create --runner glm` with no `--model` runs glm-5.3; every other command takes only `--slug`, since the loop remembers its runner. Never poll in short loops; while it runs, prepare the QA script and the review package. *(owner; fact)*
+For Cursor, pick the cheapest model preflight lists that has done this kind of work. For GLM, `create --runner glm` with no `--model` runs glm-5.3; a provider runs the model its entry declares; every other command takes only `--slug`, since the loop remembers its runner. Never poll in short loops; while it runs, prepare the QA script and the review package. *(owner; fact)*
 
 ## The brief
 
