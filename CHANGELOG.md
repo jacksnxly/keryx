@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Provider executors**: a provider declared in `config.json` (`"providers": {name: {"runner": "codex", "baseUrl": …, "keyFile": …, "model": …}}`) runs as a keryx executor through `codex exec`, under its own name: `create --runner <name>` works like any local runner (`.worktrees/<name>-<slug>`, branch `<name>/<slug>`), takes part in the ladder, the reset order and usage limits, and `followup` resumes its thread. The key is read from `keyFile` (a `key` field is refused) and reaches the executor only as `$KERYX_CODEX_API_KEY`, in a `CODEX_HOME` keryx writes per run (`.keryx/codex/<slug>/`) with the provider's endpoint, no login and no MCP servers; it is never printed or written anywhere a run keeps. `preflight --runner <name>` checks the Codex CLI, the key file's mode and one probe run. An HTTP 402 from the provider is read as an allowance that resets on the first of the next month; a 429 as a ten-minute rate limit.
+- The `description` frontmatter of both skills is quoted, so strict YAML parsers read it (it contains a colon plus space).
+
 ## 1.5.0 — 2026-11-04
 
 - **Reset order** (opt-in): with `"order": "resets"` in `config.json`, `keryx.py executors` lists first the executor whose plan resets soonest, so a quota that lapses at its reset is used up before one that keeps. Executors without a reset date follow in the saved order, a runner at its usage limit is still left out, and stderr says which reset put each one where. Turn it on with `keryx.py setup --order resets --reset cli=2026-11-06/month --reset glm=2026-11-11T03:24:16Z/week`; each date rolls forward by its period (`month`, `week`, or none for once), and `--order ladder` turns it off while keeping the dates. keryx never asks a provider for usage: the dates are the owner's. Seen in the field: every round of a day went to GLM, which resets on the 11th, while Cursor's quota was due to lapse on the 6th.
