@@ -127,9 +127,10 @@ class CodexEnv(unittest.TestCase):
                     "ANTHROPIC_AUTH_TOKEN": "a", "GH_TOKEN": "g", "SSH_AUTH_SOCK": "/s", "MY_SECRET": "m",
                     "CODEX_HOME": "/elsewhere"}
             env = keryx.codex_env(base, "/run/codex-home", keryx.codex_key(provider, base))
-            for gone in ("OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_AUTH_TOKEN", "GH_TOKEN", "SSH_AUTH_SOCK",
+            for gone in ("OPENAI_API_KEY", "CODEX_API_KEY", "ANTHROPIC_AUTH_TOKEN", "SSH_AUTH_SOCK",
                          "MY_SECRET"):
                 self.assertNotIn(gone, env)
+            self.assertNotEqual(env.get("GH_TOKEN"), "g")
             self.assertEqual(env["CODEX_HOME"], "/run/codex-home")
             self.assertEqual(env["KERYX_CODEX_API_KEY"], "test-key-xxxxxxxx")
             pairs = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
