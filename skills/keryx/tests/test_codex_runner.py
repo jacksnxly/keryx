@@ -132,8 +132,9 @@ class CodexEnv(unittest.TestCase):
                 self.assertNotIn(gone, env)
             self.assertEqual(env["CODEX_HOME"], "/run/codex-home")
             self.assertEqual(env["KERYX_CODEX_API_KEY"], "test-key-xxxxxxxx")
-            for k, v in keryx.NO_PUSH_ENV.items():
-                self.assertEqual(env[k], v)
+            pairs = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
+                     for i in range(int(env["GIT_CONFIG_COUNT"]))}
+            self.assertEqual(pairs["remote.origin.pushurl"], "https://push-disabled.invalid/keryx")
 
     def test_a_key_file_under_tilde_uses_home(self):
         with tempfile.TemporaryDirectory() as d:
