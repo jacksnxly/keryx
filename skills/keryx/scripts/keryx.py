@@ -864,11 +864,13 @@ def codex_key(provider: dict, environ: dict) -> str:
 
 def codex_env(base: dict, codex_home: str, key: str) -> dict:
     """The cli runner's guard rails, without credentials or any other runner's settings, with the provider's
-    key the only one reaching Codex — through its own CODEX_HOME and env_key. GitHub's login, git's
-    credential helper and SSH stay out of reach; the push URL still goes nowhere. NO_PUSH_ENV itself is
-    unchanged (the cli and glm runners keep the one push pair)."""
+    key the only one reaching Codex — through its own CODEX_HOME and env_key. No GitHub login, no git
+    credential helper or askpass program, git over SSH off; the push URL still goes nowhere. These stop
+    mistakes, not a determined executor: a full-access round runs with the owner's rights (SSH keys, keychain).
+    NO_PUSH_ENV itself is unchanged (the cli and glm runners keep the one push pair)."""
     env = {k: v for k, v in cli_env(base).items()
-           if not k.startswith(("CODEX", "OPENAI", "ANTHROPIC", "CLAUDE")) and not SECRET_ENV.search(k)}
+           if not k.startswith(("CODEX", "OPENAI", "ANTHROPIC", "CLAUDE")) and not SECRET_ENV.search(k)
+           and "ASKPASS" not in k}
     env.update(NO_PUSH_ENV)  # GIT_CONFIG_KEY_0 matches the secret filter; half a guard breaks every git command
     # A second pair after the push block: an empty credential helper, so git cannot use the owner's store.
     env["GIT_CONFIG_COUNT"] = "2"
