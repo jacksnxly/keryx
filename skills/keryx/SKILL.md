@@ -1,6 +1,6 @@
 ---
 name: keryx
-description: Use for any code change worth more than a one-line edit — fixing a bug or a red CI job, building a feature from a spec, or reviewing and fixing a PR or branch. One loop for all three: agree what "done" looks like and prove it fails now, change the code (yourself or a cheaper executor), check it mechanically, QA it on the real surface, get one fresh review, and finish within the autonomy the owner gave.
+description: "Use for any code change worth more than a one-line edit — fixing a bug or a red CI job, building a feature from a spec, or reviewing and fixing a PR or branch. One loop for all three: agree what \"done\" looks like and prove it fails now, change the code (yourself or a cheaper executor), check it mechanically, QA it on the real surface, get one fresh review, and finish within the autonomy the owner gave."
 ---
 
 # keryx

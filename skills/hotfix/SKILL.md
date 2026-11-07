@@ -1,6 +1,6 @@
 ---
 name: hotfix
-description: Use only when the owner asks for a hotfix or an urgent fix, or says production is broken right now — keryx's hotfix lane: the session fixes it fast and safely itself, then opens a follow-up run for the lasting fix. Never for work that is merely small or "quick" (that is keryx size S).
+description: "Use only when the owner asks for a hotfix or an urgent fix, or says production is broken right now — keryx's hotfix lane: the session fixes it fast and safely itself, then opens a follow-up run for the lasting fix. Never for work that is merely small or \"quick\" (that is keryx size S)."
 ---
 
 # keryx hotfix
