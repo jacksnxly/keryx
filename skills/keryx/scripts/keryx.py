@@ -864,10 +864,19 @@ def codex_key(provider: dict, environ: dict) -> str:
 
 def codex_env(base: dict, codex_home: str, key: str) -> dict:
     """The cli runner's guard rails, without credentials or any other runner's settings, with the provider's
-    key the only one reaching Codex — through its own CODEX_HOME and env_key."""
+    key the only one reaching Codex — through its own CODEX_HOME and env_key. GitHub's login, git's
+    credential helper and SSH stay out of reach; the push URL still goes nowhere. NO_PUSH_ENV itself is
+    unchanged (the cli and glm runners keep the one push pair)."""
     env = {k: v for k, v in cli_env(base).items()
            if not k.startswith(("CODEX", "OPENAI", "ANTHROPIC", "CLAUDE")) and not SECRET_ENV.search(k)}
     env.update(NO_PUSH_ENV)  # GIT_CONFIG_KEY_0 matches the secret filter; half a guard breaks every git command
+    # A second pair after the push block: an empty credential helper, so git cannot use the owner's store.
+    env["GIT_CONFIG_COUNT"] = "2"
+    env["GIT_CONFIG_KEY_1"] = "credential.helper"
+    env["GIT_CONFIG_VALUE_1"] = ""
+    env["GIT_SSH_COMMAND"] = "false"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GH_CONFIG_DIR"] = str(Path(codex_home) / "gh")
     env["CODEX_HOME"] = codex_home
     env[CODEX_KEY_ENV] = key
     return env
@@ -893,7 +902,8 @@ def _toml(value) -> str:
 def write_codex_home(d: Path, provider: dict) -> Path:
     """A CODEX_HOME of the run's own: the provider's endpoint behind $KERYX_CODEX_API_KEY, its model and
     effort, approvals off (keryx runs headless) and the key kept out of the executor's shells. No login,
-    no MCP servers, no user config, and never the key itself."""
+    no MCP servers, no user config, and never the key itself. Rewriting it takes the provider as passed,
+    so a follow-up sees a changed endpoint or codexConfig. `gh/` is an empty GH_CONFIG_DIR."""
     if d.parent.name == "runs" and d.parent.parent.name == ".keryx":
         ensure_ignored(d.parent.parent)  # .keryx/ ignores itself from its first file on
     home = _codex_home_dir(d)
@@ -907,6 +917,7 @@ def write_codex_home(d: Path, provider: dict) -> Path:
               f"env_key = {_toml(CODEX_KEY_ENV)}", 'wire_api = "responses"',
               "", "[shell_environment_policy]", f"exclude = [{_toml(CODEX_KEY_ENV)}]"]
     (home / "config.toml").write_text("\n".join(lines) + "\n")
+    (home / "gh").mkdir(exist_ok=True)
     return home
 
 
@@ -946,10 +957,11 @@ GLM_LIMIT = re.compile(r"\[13\d\d\]\[(?:Usage limit reached for (?P<kind>[^.\]]+
 CURSOR_LIMIT = re.compile(r"(?P<kind>\w+) usage limit reached\. It resets in (?P<span>[^.]+?)\.", re.I)
 GLM_UTC_OFFSET = dt.timedelta(hours=8)  # Z.ai prints its reset time in UTC+8, no DST
 # A provider endpoint behind `codex exec`: an allowance spent answers HTTP 402 (Mistral's monthly Vibe
-# Code allowance with pay-as-you-go off) and a rate limit answers 429. Codex prints the status line
-# ("unexpected status 402 Payment Required: …"), and the provider's body carries "raw_status_code".
-PAYMENT_REQUIRED = re.compile(r'(?:\bstatus 402\b|"raw_status_code"\s*:\s*402\b)')
-RATE_LIMITED = re.compile(r'(?:\bstatus 429\b|"raw_status_code"\s*:\s*429\b)')
+# Code allowance with pay-as-you-go off) and a rate limit answers 429. Codex prints one of three shapes,
+# and only these: "unexpected status 402", "last status: 402" once retries are spent, or
+# "raw_status_code":402. The same three for 429. A looser "status 402" would match another runner's words.
+CODEX_ALLOWANCE = re.compile(r'unexpected status 402\b|last status: 402\b|"raw_status_code":402\b')
+CODEX_RATE = re.compile(r'unexpected status 429\b|last status: 429\b|"raw_status_code":429\b')
 
 
 def _first_of_next_month(at: dt.datetime) -> dt.datetime:
@@ -959,11 +971,13 @@ def _first_of_next_month(at: dt.datetime) -> dt.datetime:
     return dt.datetime(year, month, 1, tzinfo=dt.timezone.utc)
 
 
-def usage_limit(text: str, at: dt.datetime | None = None) -> dict | None:
+def usage_limit(text: str, at: dt.datetime | None = None, codex: bool = True) -> dict | None:
     """Read a usage-limit message a run already printed: {"kind", "resetsAt", "resetsIn"}, else None.
 
-    Never probes anything: the GLM (Z.ai), Cursor and provider-endpoint (HTTP 402/429) messages are the
-    only ones recognised. A provider's 402 lasts until the first of the next month after `at` (now UTC)."""
+    Never probes anything. GLM (Z.ai) and Cursor messages count for every runner. A codex provider's
+    HTTP 402 and 429 count only when `codex` is set, which is a codex round's own report: another
+    runner's words can contain the same text. A 402 lasts until the first of the next month after `at`
+    (now UTC); a 429 lasts ten minutes. 401 and 400 are not limits."""
     m = GLM_LIMIT.search(text or "")
     if m:
         local = dt.datetime.strptime(m.group("at"), "%Y-%m-%d %H:%M:%S")
@@ -973,24 +987,37 @@ def usage_limit(text: str, at: dt.datetime | None = None) -> dict | None:
     m = CURSOR_LIMIT.search(text or "")
     if m:
         return {"kind": m.group("kind").lower(), "resetsAt": None, "resetsIn": m.group("span")}
+    if not codex:
+        return None
     body = text or ""
-    if PAYMENT_REQUIRED.search(body):
+    if CODEX_ALLOWANCE.search(body):
         moment = at or dt.datetime.now(dt.timezone.utc)
         return {"kind": "allowance", "resetsAt": _stamp(_first_of_next_month(moment)), "resetsIn": None}
-    if RATE_LIMITED.search(body):
+    if CODEX_RATE.search(body):
         return {"kind": "rate", "resetsAt": None, "resetsIn": "10 minutes"}
     return None
 
 
+def _round_is_codex(r: Path) -> bool:
+    """True when the run that owns this round folder was started on a codex provider."""
+    try:
+        agent = json.loads((r.parent.parent / "agent.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(agent, dict) and agent.get("runnerKind") == "codex"
+
+
 def round_usage_limit(r: Path) -> dict | None:
     """The usage limit a finished round ran into, from its own report (result.md, stderr.log) only: the event
-    log can quote a limit message from a file the executor read."""
+    log can quote a limit message from a file the executor read. Codex's 402 and 429 wording counts only
+    for a round whose runnerKind is codex."""
+    codex = _round_is_codex(r)
     texts = []
     for name in ("result.md", "stderr.log"):
         if (r / name).exists():
             texts.append((r / name).read_text(errors="replace"))
     for text in texts:
-        found = usage_limit(text)
+        found = usage_limit(text, codex=codex)
         if found:
             return found
     return None
@@ -1594,10 +1621,16 @@ def cli_outcome(events: list[dict], exit_code: int | None) -> dict:
             "durationMs": (result or {}).get("duration_ms"), "exit": exit_code}
 
 
+def _codex_error_message(event: dict) -> str:
+    """A Codex error event's message: top-level `message`, or `error.message`."""
+    return str(event.get("message") or (event.get("error") or {}).get("message") or "")
+
+
 def codex_outcome(events: list[dict], exit_code: int | None) -> dict:
     """Status, thread and final text of a finished `codex exec` run, from its --json events, in the
-    cli_outcome shape. The result is the last agent_message text; a failed turn reports its error (or the
-    last top-level one), so a usage-limit message lands in result.md."""
+    cli_outcome shape. A finished turn's result is the last agent_message. A failed turn — `turn.failed`,
+    or a non-zero exit with no `turn.completed` — reports only its own error (the turn.failed message,
+    else the last top-level one), so a real limit reaches result.md and a model-written one does not."""
     session = next((e.get("thread_id") for e in events if e.get("thread_id")), None)
     failed = next((e for e in reversed(events) if e.get("type") == "turn.failed"), None)
     completed = any(e.get("type") == "turn.completed" for e in events)
@@ -1609,16 +1642,17 @@ def codex_outcome(events: list[dict], exit_code: int | None) -> dict:
         status = "CANCELLED"
     else:
         status = "ERROR"
-    text = next((str((e.get("item") or {}).get("text"))
-                 for e in reversed(events)
-                 if e.get("type") in ("item.started", "item.completed")
-                 and (e.get("item") or {}).get("type") == "agent_message" and (e.get("item") or {}).get("text")), "")
-    if not text:
-        text = str((failed.get("error") or {}).get("message") or "") if failed is not None else ""
-    if not text and status == "ERROR":
-        text = next((str(e.get("message") or (e.get("error") or {}).get("message") or "")
-                     for e in reversed(events) if e.get("type") == "error" and
-                     (e.get("message") or (e.get("error") or {}).get("message"))), "")
+    if failed is not None or (exit_code not in (None, 0) and not completed):
+        text = _codex_error_message(failed) if failed is not None else ""
+        if not text:
+            text = next((_codex_error_message(e) for e in reversed(events)
+                         if e.get("type") == "error" and _codex_error_message(e)), "")
+    else:
+        text = next((str((e.get("item") or {}).get("text"))
+                     for e in reversed(events)
+                     if e.get("type") in ("item.started", "item.completed")
+                     and (e.get("item") or {}).get("type") == "agent_message"
+                     and (e.get("item") or {}).get("text")), "")
     return {"status": status, "session_id": session, "result": text, "durationMs": None, "exit": exit_code}
 
 
@@ -1723,8 +1757,11 @@ def cli_launch(d: Path, r: Path, agent: dict, prompt: str, mode: str) -> int:
     if agent.get("runnerKind") in PROVIDER_RUNNERS:
         environ = dict(os.environ)
         provider = _codex_provider(agent, environ)
+        # create and followup both launch here, so a changed baseUrl or codexConfig is written first.
+        home = write_codex_home(d, provider)
+        agent["configDir"] = str(home)
         cmd = codex_command(agent["model"], prompt, agent.get("sessionId"), mode, provider.get("effort"))
-        env = codex_env(environ, agent["configDir"], codex_key(provider, environ))
+        env = codex_env(environ, str(home), codex_key(provider, environ))
         env.update(agent.get("env") or {})
         return _spawn(r, agent, cmd, env, mode, "none (own CODEX_HOME)")
     if agent.get("runner") == "glm":
