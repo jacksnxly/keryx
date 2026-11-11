@@ -410,6 +410,32 @@ def read_log_rows(d: Path) -> list[tuple[int, list[str]]]:
             if len(c) >= 6]
 
 
+STANDARD_PHASES = {
+    "intake", "size", "ground-truth", "plan", "dispatch", "execute", "check", "qa", "probe", "review",
+    "ruling", "waiting", "answer", "next", "ci", "ship", "deploy", "release", "merge", "cleanup",
+    "followup", "finish", "done", "note", "repro",
+}
+PHASE = re.compile(r"[a-z][a-z-]{1,19}")
+FINISH_PHASE = re.compile(r"finish-[a-z][a-z0-9-]{1,19}")
+
+
+def normalise_phase(phase: str) -> str:
+    """The one spelling a program can read, before the shape is checked."""
+    phase = phase.strip().lower()
+    if phase in {"ground truth", "ground", "groundtruth"}:
+        return "ground-truth"
+    return phase
+
+
+def standard_phase(phase: str) -> bool:
+    return phase in STANDARD_PHASES or phase.startswith("finish-")
+
+
+def run_size(rows: list[tuple[int, list[str]]]) -> str | None:
+    """The latest size row's letter, or None when the run never logged one."""
+    return next((c[2] for _, c in reversed(rows) if c[1] == "size" and c[2] in {"S", "M", "L"}), None)
+
+
 def is_ruling(phase: str, decision: str) -> bool:
     """A ruling row: the phase says so, or the decision starts with "Ruling"."""
     return phase == "ruling" or decision.lower().startswith("ruling")
@@ -545,9 +571,15 @@ def current_round(d: Path) -> Path:
 
 
 def new_round(d: Path, prompt_file: str) -> Path:
+    try:
+        prompt = Path(prompt_file).read_text()
+    except OSError as exc:
+        raise LoopError(f"cannot read the brief {prompt_file}: {exc.strerror or exc}") from exc
+    if not prompt.strip():
+        raise LoopError(f"{prompt_file} is empty")
     r = d / "rounds" / f"{len(rounds(d)) + 1:02d}"
     r.mkdir(parents=True, exist_ok=False)
-    (r / "prompt.md").write_text(Path(prompt_file).read_text())
+    (r / "prompt.md").write_text(prompt)
     return r
 
 
@@ -660,7 +692,27 @@ def squash_ws(text: str) -> str:
 
 def locked_block_present(block: str, file_text: str) -> bool:
     """A locked test block counts as present when it appears with only whitespace changes."""
-    return squash_ws(block) in squash_ws(file_text)
+    body = squash_ws(file_text)
+    if squash_ws(block) in body:
+        return True
+    if block.rstrip().endswith(","):
+        return squash_ws(block.rstrip()[:-1]) in body
+    return False
+
+
+def inherited(d: Path, name: str) -> Path:
+    """A slice's own file, else the same file in the nearest run it belongs to, else its own path."""
+    own = d / name
+    if own.exists():
+        return own
+    prefixes = sorted((p for p in d.parent.iterdir()
+                       if p != d and p.is_dir() and d.name.startswith(p.name + "-")),
+                      key=lambda p: len(p.name), reverse=True)
+    for folder in prefixes:
+        candidate = folder / name
+        if candidate.exists():
+            return candidate
+    return own
 
 
 # A finding's last fields: <sep> P<0-3> <sep> <confidence from 0 to 1>, where the separator is an em or en
@@ -1190,7 +1242,8 @@ def _validated_providers(path: Path, providers: object) -> dict:
 
 
 def _config_view(path: Path, data: object) -> dict:
-    """executors, order, resets and providers. Unknown keys are ignored. Every refusal names `path` first.
+    """executors, order, resets, providers, caps and roots. Unknown keys are ignored. Every refusal names
+    `path` first.
 
     While the order is `ladder` a bad `resets` is read as none, so the dates can never break the saved order;
     in the `resets` order it is refused."""
@@ -1213,7 +1266,16 @@ def _config_view(path: Path, data: object) -> dict:
         if order == "resets":
             raise
         resets = {}
-    return {"executors": ladder, "order": order, "resets": resets, "providers": providers}
+    caps = data.get("maxParallel", {})
+    if not isinstance(caps, dict) or not all(isinstance(name, str) and name
+                                             and isinstance(value, int) and not isinstance(value, bool)
+                                             and value >= 1 for name, value in caps.items()):
+        raise LoopError(f'{path}: "maxParallel" must map each runner to a whole number of at least 1')
+    roots = data.get("roots", [])
+    if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
+        raise LoopError(f'{path}: "roots" must be a list of folders that hold repositories')
+    return {"executors": ladder, "order": order, "resets": resets, "providers": providers,
+            "maxParallel": caps, "roots": roots}
 
 
 def load_config(environ: dict) -> dict:
@@ -1224,7 +1286,8 @@ def load_config(environ: dict) -> dict:
     an empty mapping when none are declared."""
     path = config_path(environ)
     if not path.exists():
-        return {"executors": ["subagent"], "order": "ladder", "resets": {}, "providers": {}}
+        return {"executors": ["subagent"], "order": "ladder", "resets": {}, "providers": {},
+                "maxParallel": {}, "roots": []}
     try:
         data = json.loads(path.read_text())
     except ValueError as exc:
@@ -1497,6 +1560,70 @@ def _executor_after(ladder: list[str], current: str, environ: dict, at: dt.datet
         if name not in limited:
             return name
     return "inline"
+
+
+def _refuse_limited_runner(config: dict, runner: str, environ: dict) -> None:
+    at = dt.datetime.now(dt.timezone.utc)
+    until = limited_runners(environ, at).get(runner)
+    if until is None:
+        return
+    next_rung = _executor_after(config["executors"], runner, environ, at)
+    raise LoopError(f"{runner} is at its usage limit until {until}; next rung: {next_rung}")
+
+
+def _running_round_count(config: dict, runner: str) -> int:
+    roots = [state_root()]
+    for root in config.get("roots", []):
+        folder = Path(root)
+        if not folder.is_dir():
+            continue
+        roots.extend(child / ".keryx" / "runs" for child in folder.iterdir()
+                     if (child / ".keryx" / "runs").is_dir())
+    counted = 0
+    seen = set()
+    for runs in roots:
+        resolved = runs.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        for d in runs.iterdir():
+            if not d.is_dir():
+                continue
+            try:
+                agent = json.loads((d / "agent.json").read_text())
+            except (OSError, ValueError):
+                agent = {}
+            for r in rounds(d):
+                try:
+                    run = json.loads((r / "run.json").read_text())
+                except (OSError, ValueError):
+                    continue
+                pid = run.get("pid")
+                round_runner = run.get("runner") or (agent.get("runner") if isinstance(agent, dict) else None)
+                if (run.get("status") == "RUNNING" and round_runner == runner
+                        and isinstance(pid, int) and pid_alive(pid)):
+                    counted += 1
+    return counted
+
+
+def _refuse_parallel_cap(config: dict, runner: str, environ: dict) -> None:
+    cap = config.get("maxParallel", {}).get(runner)
+    if cap is None:
+        return
+    count = _running_round_count(config, runner)
+    if count < cap:
+        return
+    at = dt.datetime.now(dt.timezone.utc)
+    next_rung = _executor_after(config["executors"], runner, environ, at)
+    plural = "s" if count != 1 else ""
+    raise LoopError(f"maxParallel: {runner} already has {count} round{plural} running; next rung: {next_rung}")
+
+
+def _refuse_busy_runner(config: dict, runner: str, environ: dict, ignore_limit: bool) -> None:
+    if ignore_limit:
+        return
+    _refuse_limited_runner(config, runner, environ)
+    _refuse_parallel_cap(config, runner, environ)
 
 
 def can_switch(status) -> bool:
@@ -2457,7 +2584,10 @@ def agent_is_local(agent: dict) -> bool:
 
 
 def cmd_create(args) -> int:
-    runner, provider = _resolve_runner(args.runner, dict(os.environ))
+    environ = dict(os.environ)
+    runner, provider = _resolve_runner(args.runner, environ)
+    config = load_config(environ)
+    _refuse_busy_runner(config, runner, environ, args.ignore_limit)
     d = slug_dir(args.slug, must_exist=False)
     switch = _switch_plan(d, args.slug, runner, args.escalate) if (d / "agent.json").exists() else None
     if switch:
@@ -2582,8 +2712,11 @@ def cmd_create(args) -> int:
 
 
 def cmd_followup(args) -> int:
+    environ = dict(os.environ)
+    config = load_config(environ)
     d = slug_dir(args.slug)
     agent = load_agent(d)
+    _refuse_busy_runner(config, str(agent.get("runner") or ""), environ, args.ignore_limit)
     if agent.get("runner") == "subagent":
         # A subagent's fix round: the coordinator dispatches it; this script only opens the round.
         prev = current_round(d)
@@ -2739,8 +2872,6 @@ def _wait_cli(d: Path, args) -> int:
     append_log(d, "dispatch", f"run {r.name}: ended", why, f"exit {outcome['exit']}, {r / 'result.md'}",
                f"{outcome['status']} in {outcome['durationMs']} ms")
     print(f"run {r.name} {outcome['status']} (exit {outcome['exit']}); result saved to {r / 'result.md'}")
-    if limit:
-        report_usage_limit(d, r, limit)
     if is_stalled:
         print("the executor stopped talking without a final report; its commits are on the branch above: "
               "fetch and check them, and follow up for anything missing")
@@ -2748,12 +2879,39 @@ def _wait_cli(d: Path, args) -> int:
     return 0 if outcome["status"] == "FINISHED" else (3 if timed_out else 2)
 
 
+def _wait_local(d: Path, args) -> int:
+    retries = max(0, args.rate_retries)
+    while True:
+        code = _wait_cli(d, args)
+        r = current_round(d)
+        run = json.loads((r / "run.json").read_text())
+        limit = run.get("usageLimit")
+        if not (isinstance(limit, dict) and limit.get("kind") == "rate" and retries > 0):
+            if isinstance(limit, dict):
+                report_usage_limit(d, r, limit)
+            return code
+        next_name = f"{len(rounds(d)) + 1:02d}"
+        print(f"RATE_LIMIT  rate limit; retrying as run {next_name} in {args.rate_wait}s")
+        append_log(d, "dispatch", f"run {r.name}: rate limit; retrying as run {next_name}",
+                   "a rate limit clears within minutes, so the same brief is tried again",
+                   f"{r / 'result.md'}", "retry")
+        retries -= 1
+        if args.rate_wait:
+            time.sleep(args.rate_wait)
+        prompt_path = r / "prompt.md"
+        prompt = prompt_path.read_text()
+        next_round = new_round(d, str(prompt_path))
+        cli_launch(d, next_round, load_agent(d), prompt, run.get("mode") or "agent")
+
+
 def cmd_wait(args) -> int:
+    if args.rate_wait < 0 or args.rate_retries < 0:
+        raise LoopError("--rate-wait and --rate-retries must be zero or more")
     d = slug_dir(args.slug)
     agent = load_agent(d)
     _refuse_subagent(agent)
     if agent_is_local(agent):
-        return _wait_cli(d, args)
+        return _wait_local(d, args)
     r = current_round(d)
     run = json.loads((r / "run.json").read_text())
     run_id, agent_id = run["id"], agent["agentId"]
@@ -2903,7 +3061,7 @@ def cmd_gates(args) -> int:
     base = load_agent(d)["baseSha"]
     head = resolve_head(d, args.ref)
     globs = list(DEFAULT_GATE_GLOBS)
-    extra = d / "gates.txt"
+    extra = inherited(d, "gates.txt")
     if extra.exists():
         globs += [ln.strip() for ln in extra.read_text().splitlines()
                   if ln.strip() and not ln.lstrip().startswith("#")]
@@ -2925,7 +3083,7 @@ def cmd_locked(args) -> int:
     """Check locked test blocks: <state>/locked/<n>.json = {"path": ..., "block": ...}."""
     d = slug_dir(args.slug)
     head = resolve_head(d, args.ref)
-    specs = sorted((d / "locked").glob("*.json"))
+    specs = sorted(inherited(d, "locked").glob("*.json"))
     if not specs:
         print("no locked test blocks registered (write <state>/locked/NN.json)")
         return 1
@@ -2979,7 +3137,8 @@ def cmd_review_brief(args) -> int:
                          f"{git('diff', '--stat', base, head)}\n\n"
                          f"{git('diff', base, head)}\n")
     toplevel = git("rev-parse", "--show-toplevel")
-    task = (f"{d / 'PLAN.md'} (it holds the acceptance check)" if (d / "PLAN.md").exists()
+    plan = inherited(d, "PLAN.md")
+    task = (f"{plan} (it holds the acceptance check)" if plan.exists()
             else f"no plan file: take the commit messages (git log {base[:12]}..{head[:12]}) "
                  f"and the PR description as the task")
     rules_paths = [str(Path(toplevel) / entry) for entry in RULE_FILES if (Path(toplevel) / entry).exists()]
@@ -3062,6 +3221,31 @@ def committed_report(final: str, slug: str) -> str | None:
     return max(listed) if listed else None
 
 
+def _report_checkout(head: str, into: str | None) -> Path:
+    """The checkout a report ships from: the named one, the one holding the shipped head, or this one."""
+    current = Path(git("rev-parse", "--show-toplevel")).resolve()
+    if into:
+        top = git("rev-parse", "--show-toplevel", cwd=into, check=False)
+        common = git("rev-parse", "--git-common-dir", cwd=into, check=False)
+        if not top or not common:
+            raise LoopError(f"{into} is not a checkout of this repository")
+        common_path = Path(common)
+        common_path = common_path.resolve() if common_path.is_absolute() else (Path(into) / common_path).resolve()
+        if common_path != common_dir():
+            raise LoopError(f"{into} is not a checkout of this repository")
+        return Path(top).resolve()
+    if head != git("rev-parse", "HEAD"):
+        where = None
+        for line in git("worktree", "list", "--porcelain").splitlines():
+            if line.startswith("worktree "):
+                where = Path(line[len("worktree "):]).resolve()
+            elif where is not None and line.startswith("HEAD ") and line[5:] == head:
+                if where != current:
+                    return where
+                where = None
+    return current
+
+
 def cmd_report(args) -> int:
     """Draft the run report docs/keryx/<date>-<slug>.md from the run's own record. The proof comes
     first and a Now block (live, waiting on the owner, next) closes it; what only the coordinator
@@ -3077,7 +3261,7 @@ def cmd_report(args) -> int:
             raise LoopError(f"cannot resolve {args.head!r}")
     else:
         final = git("rev-parse", "HEAD")  # the branch that ships, where the report gets committed
-    top = Path(git("rev-parse", "--show-toplevel"))
+    top = _report_checkout(final, args.into)
     date = dt.date.today().isoformat()
     name = f"docs/keryx/{date}-{args.slug}.md"
     if (top / name).exists():
@@ -3097,7 +3281,7 @@ def cmd_report(args) -> int:
     def committed(text: str) -> str:
         """The report is committed, often to a public repository: nothing it copies names a local path."""
         # this checkout first (a bare repository's worktree lies outside its main folder), then the main one
-        return strip_local_paths(text, list(dict.fromkeys((top.resolve(), main_worktree()))), Path.home())
+        return strip_local_paths(text, list(dict.fromkeys((top, main_worktree()))), Path.home())
 
     title = next((re.sub(r"^#{1,6}\s+", "", line).strip() for line in plan.splitlines() if line.strip()),
                  args.slug)
@@ -3204,7 +3388,7 @@ def cmd_report(args) -> int:
     )
     (top / name).parent.mkdir(parents=True, exist_ok=True)
     (top / name).write_text(text)
-    print(name)
+    print(top / name)
     return 0
 
 
@@ -3476,6 +3660,11 @@ def cmd_archive(args) -> int:
 
 
 def cmd_log(args) -> int:
+    phase = normalise_phase(args.phase)
+    if not PHASE.fullmatch(phase) and not FINISH_PHASE.fullmatch(phase):
+        raise LoopError("phase must be one word ([a-z][a-z-]{1,19}); the decision is the next argument")
+    if phase == "size" and args.decision not in {"S", "M", "L"}:
+        raise LoopError("a size row's decision must be S, M or L")
     d = slug_dir(args.slug, must_exist=False)
     runs = state_root()
     if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
@@ -3491,9 +3680,11 @@ def cmd_log(args) -> int:
             r = REPLACES_ROW.search(c[2])
             if r and int(r.group(1)) == n:
                 raise LoopError(f"row {n} was already replaced by row {i}; replace row {i} instead")
-    append_log(d, args.phase, args.decision, args.why, args.evidence, args.result)
+    append_log(d, phase, args.decision, args.why, args.evidence, args.result)
     lines = (d / "decisions.tsv").read_text().splitlines()
     print(f"{d / 'decisions.tsv'}  row {len(lines) - 1}")  # the header is not a row
+    if not standard_phase(phase):
+        print(f"{phase} is not a standard phase", file=sys.stderr)
     return 0
 
 
@@ -3570,10 +3761,14 @@ def main(argv=None) -> int:
     c.add_argument("--image", action="append", default=[], help="cloud: image for the prompt")
     c.add_argument("--env", action="append", default=[], help="cli/glm: extra environment NAME=value for every run, e.g. CARGO_BUILD_JOBS=6")
     c.add_argument("--dry-run", action="store_true")
+    c.add_argument("--ignore-limit", action="store_true",
+                   help="skip the usage-limit and parallel-cap checks (a limit that lifted early)")
     f = sub.add_parser("followup")
     f.add_argument("--slug", required=True)
     f.add_argument("--prompt-file", required=True)
     f.add_argument("--mode", choices=["agent", "plan"], default="agent")
+    f.add_argument("--ignore-limit", action="store_true",
+                   help="skip the usage-limit and parallel-cap checks (a limit that lifted early)")
     w = sub.add_parser("wait")
     w.add_argument("--slug", required=True)
     w.add_argument("--timeout", type=int, default=3 * 3600)
@@ -3583,6 +3778,10 @@ def main(argv=None) -> int:
                    help="cli: stop a run when one tool call runs this many seconds")
     w.add_argument("--result-grace", type=int, default=RESULT_GRACE_S,
                    help="cli: seconds a run may stay alive after reporting its result")
+    w.add_argument("--rate-wait", type=int, default=600,
+                   help="cli: seconds to wait before retrying a provider rate limit")
+    w.add_argument("--rate-retries", type=int, default=2,
+                   help="cli: how many times to retry a provider rate limit")
     for name in ("status", "fetch", "usage", "cancel", "archive", "scrub"):
         sub.add_parser(name).add_argument("--slug", required=True)
     gt = sub.add_parser("gates")
@@ -3609,6 +3808,7 @@ def main(argv=None) -> int:
     rep = sub.add_parser("report")
     rep.add_argument("--slug", required=True)
     rep.add_argument("--head", help="the shipped commit (default: HEAD of this checkout, the branch that ships)")
+    rep.add_argument("--into", help="write the report into this checkout of the repository")
     fn = sub.add_parser("finish")
     fn.add_argument("--slug", required=True)
     fn.add_argument("--head", help="the shipped commit (default: the head `fetch` recorded)")
