@@ -17,7 +17,7 @@ From five days of field data after 1.6.0 (162 run folders in 11 repositories, 32
 - **Run-log rows a program can read**: the phase is one word (a sentence in its place is refused; `ground truth` and `ground` become `ground-truth`; an unknown word is kept with a note), and a `size` row takes `S`, `M` or `L`.
 - Fixes: a `followup` whose brief file is missing no longer leaves an empty round folder that breaks every later command; a locked block that ends in a comma is found; `locked`, `gates`, `review-brief` and `finish` on a slice read the run's locks, gate list, plan and QA file; `report` writes into the checkout that holds the shipped head (`--into <path>` names one).
 - **The plan and the place in it**: a run declares its steps once (`keryx.py steps`), ticks them as they start and end (`keryx.py step`), and `keryx.py progress --slug <slug> --live … --next …` prints the status block that closes every message: a table with the step the run is on, a bar with one segment per step, the plan with the current step marked, what is live, the owner's open questions straight from the inbox, and what is next. `--full` prints the whole plan as a table. No emoji; the same table reads in a terminal and in the apps.
-- The owner's commands (`grant`, `repo --ci`, `repo --report`, `answer`, `cleanup`) refuse to run inside an executor round (`KERYX_EXECUTOR=1` in every executor's environment).
+- The owner's commands (`grant`, `repo --ci`, `repo --report`, `ask`, `answer`, `cleanup`, and `answer` or `next` rows through `log`) refuse to run inside a Cursor, GLM or provider round (`KERYX_EXECUTOR=1` in its environment).
 - Briefs are written with the file tool, never through a shell heredoc: an unquoted one ran the commands a brief quoted.
 
 ## 1.6.0 — 2026-11-07

@@ -19,7 +19,7 @@ Origin tags: *fact* cannot be otherwise · *owner* the owner's rule · *evidence
 
 Risk list: money, auth, privacy, migrations, concurrency, data deletion, public contracts. *(owner)*
 Size by the work, not the wording; when an S grows, stop and re-size. *(evidence: per-task plans and reviews cost ~0.85× the implementation; a subagent-per-task turn used ~4 M fresh tokens in the field log)*
-Log the size as its own row, and again when it changes: `keryx.py log --slug <slug> size M "<why>" - -` (the letter first; `M — several files` reads too). `finish` reads the latest one. *(evidence: 53 of 104 field runs logged no size a program could read)*
+Log the size as its own row, and again when it changes — the size the run has now, never `S → M`: `keryx.py log --slug <slug> size M "<why>" - -` (the letter first; `M — several files` reads too). `finish` reads the latest one. *(evidence: 53 of 104 field runs logged no size a program could read)*
 
 **Urgency is a second axis.** When harm is happening now — the owner says hotfix, urgent or prod is down, or you find a failing production check, live errors or an outage and the owner agrees to the lane — take the **hotfix lane** (`references/hotfix.md`): you fix it yourself, fast, with no plan file and no executor, behind a regression test and a fast review; then the lasting fix runs as its own keryx run, and `finish` waits for it. Never for work that is merely small or "quick". *(owner)*
 
@@ -89,4 +89,4 @@ Write each ruling as `Ruling: <what> — …`; one that overturns an earlier rul
 - **`.keryx/runs/owner-inbox/`**: the questions asked between runs (`keryx.py ask` without `--slug`).
 - **`docs/keryx/<date>-<slug>.md`**: the run's report, committed with the change (`keryx.py report`); `<state>/REPORT.md` in a repository whose setting says `local`. Screenshots, executor logs and the plan never leave `.keryx/`. *(owner)*
 - **`.worktrees/<runner>-<slug>`**: each executor's worktree, on branch `<runner>/<slug>`; its fetched head is `refs/keryx/<slug>`. The folder ignores itself, as `.keryx/` does. A GLM executor's own Claude Code config is in `.keryx/glm/<slug>/`, outside the runs its permission rules refuse it.
-- Name an L run's slices `<slug>-<name>` and list them in the plan: the report and `finish` count their executor rounds with the run's, and a slice's `locked`, `gates`, `review-brief` and `finish` read the run's locks, gate list, plan and QA file when the slice has none of its own.
+- Name an L run's slices `<slug>-<name>` and list them in the plan: the report and `finish` count their executor rounds with the run's, and a slice's `locked`, `gates`, `review-brief` and `finish` read the run's locks, gate list, plan and QA file when the slice has none of its own — only from a run that names the slice in its plan or its log.
