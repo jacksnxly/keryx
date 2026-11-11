@@ -705,9 +705,14 @@ def inherited(d: Path, name: str) -> Path:
     own = d / name
     if own.exists():
         return own
-    prefixes = sorted((p for p in d.parent.iterdir()
-                       if p != d and p.is_dir() and d.name.startswith(p.name + "-")),
-                      key=lambda p: len(p.name), reverse=True)
+    if not d.parent.is_dir():
+        return own
+    try:
+        prefixes = sorted((p for p in d.parent.iterdir()
+                           if p != d and p.is_dir() and d.name.startswith(p.name + "-")),
+                          key=lambda p: len(p.name), reverse=True)
+    except OSError:
+        return own
     for folder in prefixes:
         candidate = folder / name
         if candidate.exists():
@@ -1535,10 +1540,14 @@ def _grant_value(data: dict, action: str, repository: str) -> tuple[str, str]:
     default_value = "none" if action == "followups" else "ask"
     repo_values = data.get("repos", {}).get(repository, {})
     if isinstance(repo_values, dict) and action in repo_values:
-        return str(repo_values[action]), "this repository"
+        value = str(repo_values[action])
+        if _valid_grant(action, value):
+            return value, "this repository"
     default_values = data.get("default", {})
     if isinstance(default_values, dict) and action in default_values:
-        return str(default_values[action]), "default"
+        value = str(default_values[action])
+        if _valid_grant(action, value):
+            return value, "default"
     return default_value, "not granted"
 
 
@@ -1642,7 +1651,13 @@ def _print_inbox(environ: dict, include_roots: bool) -> None:
     questions = []
     followups = []
     for repository, runs in _inbox_repositories(environ, include_roots):
-        for folder in runs.iterdir():
+        if not runs.is_dir():
+            continue
+        try:
+            folders = list(runs.iterdir())
+        except OSError:
+            continue
+        for folder in folders:
             if not folder.is_dir():
                 continue
             try:
@@ -1766,17 +1781,21 @@ def _refuse_limited_runner(config: dict, runner: str, environ: dict) -> None:
     until = limited_runners(environ, at).get(runner)
     if until is None:
         return
-    next_rung = _executor_after(config["executors"], runner, environ, at)
+    next_rung = _executor_after(ordered_ladder(config, at), runner, environ, at)
     raise LoopError(f"{runner} is at its usage limit until {until}; next rung: {next_rung}")
 
 
 def _running_round_count(config: dict, runner: str) -> int:
-    roots = [state_root()]
+    roots = [state_root()] if state_root().is_dir() else []
     for root in config.get("roots", []):
         folder = Path(root)
         if not folder.is_dir():
             continue
-        roots.extend(child / ".keryx" / "runs" for child in folder.iterdir()
+        try:
+            children = list(folder.iterdir())
+        except OSError:
+            continue
+        roots.extend(child / ".keryx" / "runs" for child in children
                      if (child / ".keryx" / "runs").is_dir())
     counted = 0
     seen = set()
@@ -1785,7 +1804,11 @@ def _running_round_count(config: dict, runner: str) -> int:
         if resolved in seen:
             continue
         seen.add(resolved)
-        for d in runs.iterdir():
+        try:
+            folders = list(runs.iterdir())
+        except OSError:
+            continue
+        for d in folders:
             if not d.is_dir():
                 continue
             try:
@@ -1813,7 +1836,7 @@ def _refuse_parallel_cap(config: dict, runner: str, environ: dict) -> None:
     if count < cap:
         return
     at = dt.datetime.now(dt.timezone.utc)
-    next_rung = _executor_after(config["executors"], runner, environ, at)
+    next_rung = _executor_after(ordered_ladder(config, at), runner, environ, at)
     plural = "s" if count != 1 else ""
     raise LoopError(f"maxParallel: {runner} already has {count} round{plural} running; next rung: {next_rung}")
 
@@ -2787,7 +2810,7 @@ def cmd_create(args) -> int:
     environ = dict(os.environ)
     runner, provider = _resolve_runner(args.runner, environ)
     config = load_config(environ)
-    _refuse_busy_runner(config, runner, environ, getattr(args, "ignore_limit", True))
+    _refuse_busy_runner(config, runner, environ, getattr(args, "ignore_limit", False))
     d = slug_dir(args.slug, must_exist=False)
     switch = _switch_plan(d, args.slug, runner, args.escalate) if (d / "agent.json").exists() else None
     if switch:
@@ -2916,7 +2939,7 @@ def cmd_followup(args) -> int:
     config = load_config(environ)
     d = slug_dir(args.slug)
     agent = load_agent(d)
-    _refuse_busy_runner(config, str(agent.get("runner") or ""), environ, getattr(args, "ignore_limit", True))
+    _refuse_busy_runner(config, str(agent.get("runner") or ""), environ, getattr(args, "ignore_limit", False))
     if agent.get("runner") == "subagent":
         # A subagent's fix round: the coordinator dispatches it; this script only opens the round.
         prev = current_round(d)
@@ -3082,11 +3105,13 @@ def _wait_cli(d: Path, args) -> int:
 def _wait_local(d: Path, args) -> int:
     retries = max(0, args.rate_retries)
     while True:
+        initial_run = json.loads((current_round(d) / "run.json").read_text())
+        was_running = initial_run.get("status") == "RUNNING"
         code = _wait_cli(d, args)
         r = current_round(d)
         run = json.loads((r / "run.json").read_text())
         limit = run.get("usageLimit")
-        if not (isinstance(limit, dict) and limit.get("kind") == "rate" and retries > 0):
+        if not (was_running and isinstance(limit, dict) and limit.get("kind") == "rate" and retries > 0):
             if isinstance(limit, dict):
                 report_usage_limit(d, r, limit)
             return code
@@ -3334,7 +3359,7 @@ def cmd_review_brief(args) -> int:
     if len(past) >= 3 and not args.extra:
         raise LoopError(f"three review rounds already done for {args.slug}; "
                         "name why another is needed with --extra WHY")
-    if args.extra:
+    if len(past) >= 3 and args.extra:
         append_log(d, "ruling", f"Ruling: review round {len(past) + 1} — {args.extra}",
                    "a fourth review round needs the owner's reason", f"{len(past)} earlier rounds", "standing")
     rv = d / "review"
@@ -3722,11 +3747,11 @@ def cmd_finish(args) -> int:
     followups = standing_followups(rows, rulings)
     hotfix = is_hotfix_run(rows)
     size = run_size(rows)
-    if args.umbrella:
+    if not hotfix and args.umbrella:
         return _finish_umbrella(d, args.slug, final, rows, finish_rows)
-    if args.qa_only:
+    if not hotfix and args.qa_only:
         return _finish_qa_only(d, args.slug, final, rows, finish_rows)
-    if size == "S":
+    if not hotfix and size == "S":
         return _finish_size_s(d, args.slug, final, rows, finish_rows)
 
     def commits_behind(sha: str) -> int:
@@ -3760,7 +3785,8 @@ def cmd_finish(args) -> int:
                 problems.append(f"missing  the second finder's findings: {path}")
     qa = inherited(d, "qa") / "QA.md"
     qa_waived = any(cells[2].startswith("Ruling: no QA file") for _, cells in rulings)
-    if size in {"M", "L"} and not qa_waived and (not qa.exists() or not qa.read_text().strip()):
+    if (size in {"M", "L"} and not args.findings_only and not qa_waived
+            and (not qa.exists() or not qa.read_text().strip())):
         problems.append(f"missing  the QA file: {qa} — write what was opened and where its evidence lives, "
                         'or rule it out with "Ruling: no QA file — …"')
     report = None
@@ -4005,7 +4031,10 @@ def cmd_archive(args) -> int:
 def cmd_log(args) -> int:
     phase = normalise_phase(args.phase)
     if not PHASE.fullmatch(phase) and not FINISH_PHASE.fullmatch(phase):
-        raise LoopError("phase must be one word ([a-z][a-z-]{1,19}); the decision is the next argument")
+        corrected = "ruling" if args.phase.strip().lower().startswith("ruling") else "note"
+        raise LoopError("phase must be one word ([a-z][a-z-]{1,19}); the decision is the next argument — "
+                        f'write it as keryx.py log --slug {args.slug} {corrected} "{args.phase}" '
+                        "WHY EVIDENCE RESULT")
     if phase == "size" and args.decision not in {"S", "M", "L"}:
         raise LoopError("a size row's decision must be S, M or L")
     if phase == "next" and args.result not in {"safe", "risk", "price"}:
@@ -4214,27 +4243,29 @@ def _cleanup_records(d: Path) -> list[tuple[Path, dict]]:
 
 
 def cmd_cleanup(args) -> int:
-    d = slug_dir(args.slug)
+    d = slug_dir(args.slug, must_exist=False)
     target = _cleanup_target(args.target)
-    grant = _grant_lookup(dict(os.environ), "branch-delete", main_worktree().name)
+    repository = main_worktree().name
+    grant = _grant_lookup(dict(os.environ), "branch-delete", repository)
     worktree_branches = _worktree_branches()
     main = main_worktree().resolve()
     refused = False
     for folder, record in _cleanup_records(d):
         branch, workspace = record["branch"], record["workspace"]
+        if branch == target:
+            print(f"kept      {branch}: the cleanup target is never deleted")
+            continue
         if not _merged(target, branch):
             print(f"kept      {branch}: not merged into {target}")
             continue
-        if not Path(workspace).is_dir():
-            print(f"kept      {branch}: worktree not found at {workspace}")
-            continue
-        if git("status", "--porcelain", cwd=workspace):
-            print(f"kept      {branch}: uncommitted changes in {workspace}")
-            continue
-        if Path(workspace).resolve() == main:
-            print(f"kept      {branch}: {workspace} is the main checkout")
-            continue
         checked_out = worktree_branches.get(branch)
+        if Path(workspace).is_dir():
+            if git("status", "--porcelain", cwd=workspace):
+                print(f"kept      {branch}: uncommitted changes in {workspace}")
+                continue
+            if Path(workspace).resolve() == main:
+                print(f"kept      {branch}: {workspace} is the main checkout")
+                continue
         if checked_out is not None and checked_out.resolve() != Path(workspace).resolve():
             print(f"kept      {branch}: checked out in {checked_out}")
             continue
@@ -4245,9 +4276,16 @@ def cmd_cleanup(args) -> int:
         if args.dry_run:
             print(f"would remove  {branch} ({workspace})")
             continue
-        git("worktree", "remove", workspace)
-        git("branch", "-D", branch)
-        git("update-ref", "-d", f"refs/keryx/{record.get('slug') or folder.name}")
+        try:
+            if Path(workspace).is_dir():
+                git("worktree", "remove", workspace)
+            else:
+                git("worktree", "prune")
+            git("branch", "-D", branch)
+            git("update-ref", "-d", f"refs/keryx/{record.get('slug') or folder.name}")
+        except LoopError as exc:
+            print(f"kept      {branch}: {str(exc).splitlines()[0]}")
+            continue
         print(f"removed   {branch} ({workspace})")
         append_log(folder, "cleanup", f"removed {branch}", "the branch was merged and its worktree clean",
                    workspace, "removed")
@@ -4259,6 +4297,10 @@ def cmd_cleanup(args) -> int:
 
 def cmd_recall(args) -> int:
     env = dict(os.environ)
+    try:
+        repository = main_worktree().name
+    except LoopError:
+        repository = None
     for scope, title in (("user", "user"), ("repo", "this repository")):
         path = memory_file(scope, env)
         if scope == "repo" and path is not None and not path.exists():
@@ -4269,12 +4311,13 @@ def cmd_recall(args) -> int:
             continue
         print(f"# keryx memory ({title})")
         print(path.read_text().rstrip("\n"))
-    settings_path = _repo_settings_path()
-    if settings_path.exists():
+    settings_path = _repo_settings_path() if repository is not None else None
+    if settings_path is not None and settings_path.exists():
         print("# keryx repository settings")
         print("\n".join(_repo_settings_lines(_read_repo_settings())))
-    print(f"# keryx grants ({main_worktree().name})")
-    print("\n".join(_grant_lines(env, main_worktree().name)))
+    grants_title = repository or "default"
+    print(f"# keryx grants ({grants_title})")
+    print("\n".join(_grant_lines(env, grants_title)))
     return 0
 
 
