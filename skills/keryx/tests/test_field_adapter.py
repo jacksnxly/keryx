@@ -83,19 +83,19 @@ class LockedBlockEndingInAComma(unittest.TestCase):
 
 
 class SlicesReadTheirRun(unittest.TestCase):
-    def test_inherited_takes_the_slices_own_file_then_the_nearest_run(self):
+    def test_inherited_takes_the_slices_own_file_then_the_run_that_names_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / ".keryx" / "runs"
             (runs / "big" / "locked").mkdir(parents=True)
-            (runs / "big" / "PLAN.md").write_text("plan")
+            (runs / "big" / "PLAN.md").write_text("## Slices\n- big-api: owns the API\n")
             (runs / "big-api").mkdir()
-            (runs / "big-api-v2").mkdir()
+            (runs / "big-other").mkdir()
             self.assertEqual(keryx.inherited(runs / "big-api", "PLAN.md"), runs / "big" / "PLAN.md")
             self.assertEqual(keryx.inherited(runs / "big-api", "locked"), runs / "big" / "locked")
-            self.assertEqual(keryx.inherited(runs / "big-api-v2", "PLAN.md"), runs / "big" / "PLAN.md")
+            self.assertEqual(keryx.inherited(runs / "big-other", "PLAN.md"), runs / "big-other" / "PLAN.md",
+                             "sharing a prefix does not make a slice")
             (runs / "big-api" / "PLAN.md").write_text("own")
             self.assertEqual(keryx.inherited(runs / "big-api", "PLAN.md"), runs / "big-api" / "PLAN.md")
-            self.assertEqual(keryx.inherited(runs / "big-api-v2", "PLAN.md"), runs / "big-api" / "PLAN.md")
             self.assertEqual(keryx.inherited(runs / "big", "gates.txt"), runs / "big" / "gates.txt")
 
     def test_locked_on_a_slice_checks_the_runs_blocks(self):
@@ -103,6 +103,7 @@ class SlicesReadTheirRun(unittest.TestCase):
             repo, run, base, head = _two_commit_repo(tmp)
             runs = repo / ".keryx" / "runs"
             (runs / "big" / "locked").mkdir(parents=True)
+            (runs / "big" / "PLAN.md").write_text("## Slices\n- big-api: owns the API\n")
             (runs / "big" / "locked" / "01.json").write_text(
                 json.dumps({"path": "app.py", "block": "def f():\n    return 2"}))
             (runs / "big-api" / "rounds" / "01").mkdir(parents=True)
