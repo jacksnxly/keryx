@@ -13,7 +13,7 @@ keryx works with Claude Code alone. Which executors a person has, and in which o
 | Cursor Cloud Agent | `cloud` | `keryx.py create --runner cloud`: on Cursor's machines; the repository must be on GitHub. |
 | You, inline | `inline` | S work, M work that is mostly judgement, and the rung after the last executor. |
 
-The executor never dispatches its own subagents, never reviews itself in your place, never pushes. *(evidence; owner)*
+The executor never dispatches its own subagents, never reviews itself in your place, never pushes. The owner's commands (`grant`, `repo --ci`, `repo --report`, `answer`, `cleanup`) refuse to run inside an executor round: every executor's environment carries `KERYX_EXECUTOR=1`. Like the other guards, this stops mistakes, not a determined executor. *(evidence; owner; borrowed: found by the security pass of this change's own review)*
 
 ### First use: setup
 
