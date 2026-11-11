@@ -1685,6 +1685,56 @@ def _print_inbox(environ: dict, include_roots: bool) -> None:
         print("inbox empty")
 
 
+def _markdown_cell(text: str) -> str:
+    return text.replace("\r", " ").replace("\n", " ").replace("|", "\\|")
+
+
+def _question_summary(cells: list[str]) -> str:
+    question = cells[2][len("owner: "):]
+    options = [] if cells[4] in {"-", "'-"} else cells[4].split(" | ")
+    rendered = []
+    for option in options:
+        if option.endswith(" (recommended)"):
+            option = option[:-len(" (recommended)")]
+            rendered.append(f"**{option}** (recommended)")
+        else:
+            rendered.append(option)
+    if cells[3] not in {"-", "'-"}:
+        question += f" (blocks: {cells[3]})"
+    return " · ".join([f"**{question}**", *rendered])
+
+
+def _repository_questions(environ: dict) -> list[tuple[int, list[str]]]:
+    runs = state_root()
+    if not runs.is_dir():
+        return []
+    try:
+        folders = list(runs.iterdir())
+    except OSError:
+        return []
+    questions = []
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        try:
+            rows = read_log_rows(folder)
+        except (OSError, ValueError):
+            continue
+        questions.extend(_open_questions(rows))
+    return questions
+
+
+def _waiting_line(environ: dict) -> str:
+    questions = _repository_questions(environ)
+    if not questions:
+        return "Nothing"
+    summaries = [_question_summary(cells) for _, cells in questions]
+    if len(summaries) == 1:
+        return summaries[0]
+    return f"{len(summaries)} decisions — " + " — ".join(
+        f"({number}) {summary}" for number, summary in enumerate(summaries, 1))
+
+
 def _saved_limits(path: Path) -> dict[str, dict]:
     current: dict[str, dict] = {}
     for name, entry in _read_limits(path).items():
@@ -4188,6 +4238,106 @@ def cmd_inbox(args) -> int:
     return 0
 
 
+def _steps_path(slug: str) -> Path:
+    return slug_dir(slug, must_exist=False) / "steps.json"
+
+
+def _read_steps(slug: str) -> list[dict]:
+    path = _steps_path(slug)
+    if not path.exists():
+        raise LoopError(f"no steps declared for {slug!r} (run keryx.py steps --slug {slug} NAME NAME…)")
+    try:
+        data = json.loads(path.read_text())
+    except ValueError as exc:
+        raise LoopError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("steps"), list):
+        raise LoopError(f"{path} must hold a steps object")
+    steps = data["steps"]
+    if not steps or not all(isinstance(step, dict) and isinstance(step.get("name"), str)
+                            and step.get("status") in {"done", "running", "todo", "failed"}
+                            for step in steps):
+        raise LoopError(f"{path} holds an invalid step")
+    return steps
+
+
+def cmd_steps(args) -> int:
+    names = args.names
+    if len(names) < 2:
+        raise LoopError("steps needs two or more names")
+    if len(names) != len(set(names)):
+        raise LoopError("steps need different names")
+    path = _steps_path(args.slug)
+    old = {step["name"]: step for step in _read_steps(args.slug)} if path.exists() else {}
+    steps = []
+    for name in names:
+        step = old.get(name, {"name": name, "status": "todo", "note": ""})
+        steps.append(step)
+    save_json(path, {"steps": steps})
+    print(path)
+    return 0
+
+
+def cmd_step(args) -> int:
+    steps = _read_steps(args.slug)
+    wanted = args.which.strip().casefold()
+    matches = [(number, step) for number, step in enumerate(steps, 1)
+               if (wanted == str(number)
+                   or wanted == step["name"].casefold()
+                   or wanted == step["name"].partition(":")[0].strip().casefold())]
+    if not matches:
+        raise LoopError(f"no step {args.which!r}")
+    _, step = matches[0]
+    step["status"] = args.status
+    if args.note is not None:
+        step["note"] = args.note
+    save_json(_steps_path(args.slug), {"steps": steps})
+    return 0
+
+
+def cmd_progress(args) -> int:
+    steps = _read_steps(args.slug)
+    if args.full:
+        print("| # | Step | Status | Note |")
+        print("|---|---|---|---|")
+        for number, step in enumerate(steps, 1):
+            status = step["status"]
+            shown_status = "to do" if status == "todo" else status
+            active = status in {"running", "failed"}
+            name = f"**{step['name']}**" if active else step["name"]
+            shown_status = f"**{shown_status}**" if active else shown_status
+            note = step.get("note") or ""
+            print(f"| {number} | {_markdown_cell(name)} | {_markdown_cell(shown_status)} | "
+                  f"{_markdown_cell(note)} |")
+        return 0
+    if args.live is None or args.next is None:
+        raise LoopError("progress needs --live TEXT and --next TEXT (or --full)")
+    current = next((number for number, step in enumerate(steps, 1)
+                    if step["status"] in {"running", "failed"}), None)
+    if current is None:
+        current = next((number for number, step in enumerate(steps, 1) if step["status"] == "todo"), None)
+    total = len(steps)
+    if current is None:
+        heading = f"{total} of {total} done"
+    else:
+        heading = f"Step {current} of {total}"
+    symbols = {"done": "■", "running": "▶", "failed": "x", "todo": "·"}
+    width = 2 if total > 10 else 4
+    bar = " ".join(symbols[step["status"]] * width for step in steps)
+    names = [step["name"].partition(":")[0] for step in steps]
+    if current is None:
+        plan = " → ".join(names)
+    else:
+        plan = " → ".join(f"**[ {name} ]**" if number == current else name
+                          for number, name in enumerate(names, 1))
+    print(f"| {heading} | `{bar}` |")
+    print("|---|---|")
+    print(f"| **Plan** | {_markdown_cell(plan)} |")
+    print(f"| **Live** | {_markdown_cell(args.live)} |")
+    print(f"| **Waiting on you** | {_markdown_cell(_waiting_line(dict(os.environ)))} |")
+    print(f"| **Next** | {_markdown_cell(args.next)} |")
+    return 0
+
+
 def _cleanup_target(ref: str | None) -> str:
     target = ref
     if target is None:
@@ -4363,6 +4513,19 @@ def main(argv=None) -> int:
     answer.add_argument("text")
     inbox = sub.add_parser("inbox")
     inbox.add_argument("--all", action="store_true", help="read every repository under the configured roots")
+    steps = sub.add_parser("steps")
+    steps.add_argument("--slug", required=True)
+    steps.add_argument("names", nargs="+", metavar="NAME")
+    step = sub.add_parser("step")
+    step.add_argument("--slug", required=True)
+    step.add_argument("which", metavar="WHICH")
+    step.add_argument("status", choices=["done", "running", "todo", "failed"])
+    step.add_argument("--note")
+    progress = sub.add_parser("progress")
+    progress.add_argument("--slug", required=True)
+    progress.add_argument("--live")
+    progress.add_argument("--next")
+    progress.add_argument("--full", action="store_true")
     repo = sub.add_parser("repo")
     repo.add_argument("--ci", help="the command this repository uses for CI")
     repo.add_argument("--report", choices=["committed", "local"], help="where this repository keeps run reports")
