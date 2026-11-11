@@ -1471,6 +1471,205 @@ def _write_limits(path: Path, data: dict) -> None:
         raise
 
 
+def _write_json_atomic(path: Path, data: dict, prefix: str) -> None:
+    """Publish a JSON file by replacing it, so a reader never sees a torn write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+GRANT_ACTIONS = ("push", "pr", "merge", "deploy-staging", "deploy-production", "production-data",
+                 "branch-delete", "followups")
+
+
+def _grants_path(environ: dict) -> Path:
+    return config_path(environ).parent / "grants.json"
+
+
+def _empty_grants() -> dict:
+    return {"default": {}, "repos": {}, "sources": {"default": {}, "repos": {}}}
+
+
+def _read_grants(path: Path, *, strict: bool = True) -> dict:
+    if not path.exists():
+        return _empty_grants()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        if strict:
+            raise LoopError(f"{path} is not valid JSON: {exc}") from exc
+        return _empty_grants()
+    if not isinstance(data, dict):
+        if strict:
+            raise LoopError(f"{path} must hold a JSON object")
+        return _empty_grants()
+    grants = _empty_grants()
+    for scope in ("default", "repos"):
+        values = data.get(scope, {})
+        source_data = data.get("sources", {})
+        sources = source_data.get(scope, {}) if isinstance(source_data, dict) else {}
+        if not isinstance(values, dict) or not isinstance(sources, dict):
+            if strict:
+                raise LoopError(f'{path}: "{scope}" and "sources.{scope}" must both be objects')
+            continue
+        grants[scope] = values
+        grants["sources"][scope] = sources
+    return grants
+
+
+def _valid_grant(action: str, value: str) -> bool:
+    if action not in GRANT_ACTIONS:
+        return False
+    return value in ({"none", "safe", "all"} if action == "followups" else {"allow", "ask"})
+
+
+def _grant_value(data: dict, action: str, repository: str) -> tuple[str, str]:
+    default_value = "none" if action == "followups" else "ask"
+    repo_values = data.get("repos", {}).get(repository, {})
+    if isinstance(repo_values, dict) and action in repo_values:
+        return str(repo_values[action]), "this repository"
+    default_values = data.get("default", {})
+    if isinstance(default_values, dict) and action in default_values:
+        return str(default_values[action]), "default"
+    return default_value, "not granted"
+
+
+def _save_grant(environ: dict, action: str, value: str, source: str, repository: str, repo_scope: bool) -> None:
+    if not _valid_grant(action, value):
+        raise LoopError(f"unknown grant {action} {value!r}")
+    if looks_secret(source):
+        raise LoopError("the grant source looks like a credential; keryx never stores secrets")
+    path = _grants_path(environ)
+    data = _read_grants(path)
+    scope = "repos" if repo_scope else "default"
+    if repo_scope:
+        data["repos"].setdefault(repository, {})[action] = value
+        data["sources"]["repos"].setdefault(repository, {})[action] = source
+    else:
+        data["default"][action] = value
+        data["sources"]["default"][action] = source
+    _write_json_atomic(path, data, ".grants-")
+
+
+def _grant_lines(environ: dict, repository: str) -> list[str]:
+    data = _read_grants(_grants_path(environ))
+    lines = []
+    for action in GRANT_ACTIONS:
+        value, origin = _grant_value(data, action, repository)
+        lines.append(f"{action}  {value}  ({origin})")
+    return lines
+
+
+def _grant_lookup(environ: dict, action: str, repository: str) -> str:
+    if action not in GRANT_ACTIONS:
+        raise LoopError(f"unknown grant action {action!r}")
+    data = _read_grants(_grants_path(environ), strict=False)
+    return _grant_value(data, action, repository)[0]
+
+
+ANSWER_ROW = re.compile(r"^row (\d+):")
+
+
+def _answered_rows(rows: list[tuple[int, list[str]]]) -> set[int]:
+    answered = set()
+    for _, cells in rows:
+        if cells[1] == "answer":
+            match = ANSWER_ROW.match(cells[2])
+            if match:
+                answered.add(int(match.group(1)))
+    return answered
+
+
+def _open_questions(rows: list[tuple[int, list[str]]]) -> list[tuple[int, list[str]]]:
+    answered = _answered_rows(rows)
+    return [(number, cells) for number, cells in rows
+            if cells[1] == "waiting" and cells[5] == "open"
+            and cells[2].startswith("owner:") and number not in answered]
+
+
+def _open_followups(rows: list[tuple[int, list[str]]]) -> list[tuple[int, list[str]]]:
+    answered = _answered_rows(rows)
+    return [(number, cells) for number, cells in rows
+            if cells[1] == "next" and cells[5] in {"safe", "risk", "price"}
+            and number not in answered]
+
+
+def _short_age(timestamp: str) -> str:
+    try:
+        moment = dt.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    except ValueError:
+        return ""
+    seconds = max(0, int((dt.datetime.now(dt.timezone.utc) - moment).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _inbox_repositories(environ: dict, include_roots: bool) -> list[tuple[str, Path]]:
+    repositories = [(main_worktree().name, state_root())]
+    if not include_roots:
+        return repositories
+    config = load_config(environ)
+    roots = [Path(root) for root in config.get("roots", [])] or [main_worktree().parent]
+    seen = {state_root().resolve()}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            runs = child / ".keryx" / "runs"
+            resolved = runs.resolve()
+            if (child.is_dir() and runs.is_dir()
+                    and git("rev-parse", "--show-toplevel", cwd=child, check=False)
+                    and resolved not in seen):
+                seen.add(resolved)
+                repositories.append((child.name, runs))
+    return repositories
+
+
+def _print_inbox(environ: dict, include_roots: bool) -> None:
+    questions = []
+    followups = []
+    for repository, runs in _inbox_repositories(environ, include_roots):
+        for folder in runs.iterdir():
+            if not folder.is_dir():
+                continue
+            try:
+                rows = read_log_rows(folder)
+            except (OSError, ValueError):
+                continue
+            questions.extend((repository, folder.name, number, cells)
+                             for number, cells in _open_questions(rows))
+            followups.extend((repository, folder.name, number, cells)
+                             for number, cells in _open_followups(rows))
+    for repository, slug, number, cells in questions:
+        print(f"{repository}/{slug} row {number}  {_short_age(cells[0])}  {cells[2][len('owner: '):]}")
+        if cells[4] != "-":
+            for option in cells[4].split(" | "):
+                print(f"    {option}")
+        if cells[3] != "-":
+            print(f"    blocks: {cells[3]}")
+    for repository, slug, number, cells in followups:
+        grant = _grant_lookup(environ, "followups", repository)
+        starts = ((grant == "safe" and cells[5] == "safe")
+                  or (grant == "all" and cells[5] in {"safe", "risk"}))
+        verdict = "start" if starts else "ask"
+        print(f"{verdict}  {repository}/{slug} row {number}  {cells[2]}")
+    if not questions and not followups:
+        print("inbox empty")
+
+
 def _saved_limits(path: Path) -> dict[str, dict]:
     current: dict[str, dict] = {}
     for name, entry in _read_limits(path).items():
@@ -3666,6 +3865,8 @@ def cmd_log(args) -> int:
         raise LoopError("phase must be one word ([a-z][a-z-]{1,19}); the decision is the next argument")
     if phase == "size" and args.decision not in {"S", "M", "L"}:
         raise LoopError("a size row's decision must be S, M or L")
+    if phase == "next" and args.result not in {"safe", "risk", "price"}:
+        raise LoopError('a next row\'s result must be "safe", "risk" or "price"')
     d = slug_dir(args.slug, must_exist=False)
     runs = state_root()
     if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
@@ -3710,6 +3911,111 @@ def cmd_remember(args) -> int:
     return 0
 
 
+def _repo_settings_path() -> Path:
+    return main_worktree() / ".keryx" / "config.json"
+
+
+def _read_repo_settings() -> dict:
+    path = _repo_settings_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except ValueError as exc:
+        raise LoopError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise LoopError(f"{path} must hold a JSON object")
+    if "ci" in data and not isinstance(data["ci"], str):
+        raise LoopError(f'{path}: "ci" must be a command string')
+    if "report" in data and data["report"] not in {"committed", "local"}:
+        raise LoopError(f'{path}: "report" must be committed or local')
+    return data
+
+
+def _repo_settings_lines(settings: dict) -> list[str]:
+    ci = settings.get("ci") or "not set"
+    report = settings.get("report") or "committed"
+    return [f"ci      {ci}", f"report  {report}"]
+
+
+def cmd_repo(args) -> int:
+    settings = _read_repo_settings()
+    if args.ci is not None or args.report is not None:
+        if args.ci is not None:
+            if not args.ci.strip():
+                raise LoopError("--ci needs a command")
+            settings["ci"] = args.ci
+        if args.report is not None:
+            settings["report"] = args.report
+        path = _repo_settings_path()
+        ensure_ignored(path.parent)
+        _write_json_atomic(path, settings, ".repo-config-")
+        return 0
+    print("\n".join(_repo_settings_lines(settings)))
+    return 0
+
+
+def cmd_grant(args) -> int:
+    environ = dict(os.environ)
+    _save_grant(environ, args.action, args.value, args.source, main_worktree().name, args.repo)
+    return 0
+
+
+def cmd_grants(args) -> int:
+    environ = dict(os.environ)
+    if args.action is not None:
+        if args.action not in GRANT_ACTIONS:
+            raise LoopError(f"unknown grant action {args.action!r}")
+        data = _read_grants(_grants_path(environ))
+        print(_grant_value(data, args.action, main_worktree().name)[0])
+        return 0
+    print("\n".join(_grant_lines(environ, main_worktree().name)))
+    return 0
+
+
+def _append_owner_row(slug: str, phase: str, decision: str, why: str, evidence: str, result: str) -> tuple[Path, int]:
+    folder = slug_dir(slug, must_exist=False)
+    runs = state_root()
+    if folder.parent == runs:
+        ensure_ignored(runs.parent)
+    append_log(folder, phase, decision, why, evidence, result)
+    lines = (folder / "decisions.tsv").read_text().splitlines()
+    return folder, len(lines) - 1
+
+
+def cmd_ask(args) -> int:
+    options = list(args.option)
+    if args.recommend is not None:
+        match = next((option for option in options
+                      if option == args.recommend or option.partition(":")[0].strip() == args.recommend), None)
+        if match is None:
+            raise LoopError("--recommend must name one of the options")
+        options.remove(match)
+        options.insert(0, f"{match} (recommended)")
+    evidence = " | ".join(options) if options else "-"
+    folder, number = _append_owner_row(args.slug, "waiting", f"owner: {args.question}",
+                                       args.blocks or "-", evidence, "open")
+    print(f"{folder / 'decisions.tsv'}  row {number}")
+    return 0
+
+
+def cmd_answer(args) -> int:
+    folder = slug_dir(args.slug, must_exist=False)
+    rows = read_log_rows(folder)
+    open_rows = {number for number, _ in _open_questions(rows)}
+    open_rows.update(number for number, _ in _open_followups(rows))
+    if args.row not in open_rows:
+        raise LoopError(f"row {args.row} is not an open question or follow-up")
+    _, number = _append_owner_row(args.slug, "answer", f"row {args.row}: {args.text}", "-", "-", "closed")
+    print(f"{folder / 'decisions.tsv'}  row {number}")
+    return 0
+
+
+def cmd_inbox(args) -> int:
+    _print_inbox(dict(os.environ), args.all)
+    return 0
+
+
 def cmd_recall(args) -> int:
     env = dict(os.environ)
     for scope, title in (("user", "user"), ("repo", "this repository")):
@@ -3722,6 +4028,12 @@ def cmd_recall(args) -> int:
             continue
         print(f"# keryx memory ({title})")
         print(path.read_text().rstrip("\n"))
+    settings_path = _repo_settings_path()
+    if settings_path.exists():
+        print("# keryx repository settings")
+        print("\n".join(_repo_settings_lines(_read_repo_settings())))
+    print(f"# keryx grants ({main_worktree().name})")
+    print("\n".join(_grant_lines(env, main_worktree().name)))
     return 0
 
 
@@ -3748,6 +4060,28 @@ def main(argv=None) -> int:
     sub.add_parser("recall")
     mo = sub.add_parser("models")
     mo.add_argument("--runner", choices=["cli", "cloud", "glm"], default="cli")
+    grant = sub.add_parser("grant")
+    grant.add_argument("action")
+    grant.add_argument("value")
+    grant.add_argument("--repo", action="store_true", help="save this grant for this repository only")
+    grant.add_argument("--source", required=True, help="the owner's words and date")
+    grants = sub.add_parser("grants")
+    grants.add_argument("--action")
+    ask = sub.add_parser("ask")
+    ask.add_argument("--slug", default="owner-inbox")
+    ask.add_argument("question")
+    ask.add_argument("--option", action="append", default=[])
+    ask.add_argument("--recommend")
+    ask.add_argument("--blocks")
+    answer = sub.add_parser("answer")
+    answer.add_argument("--slug", required=True)
+    answer.add_argument("row", type=int)
+    answer.add_argument("text")
+    inbox = sub.add_parser("inbox")
+    inbox.add_argument("--all", action="store_true", help="read every repository under the configured roots")
+    repo = sub.add_parser("repo")
+    repo.add_argument("--ci", help="the command this repository uses for CI")
+    repo.add_argument("--report", choices=["committed", "local"], help="where this repository keeps run reports")
     c = sub.add_parser("create")
     c.add_argument("--slug", required=True)
     c.add_argument("--prompt-file", required=True)
