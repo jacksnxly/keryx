@@ -142,6 +142,7 @@ GLM_ENV = {
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "DISABLE_AUTOUPDATER": "1",
 }
+EXECUTOR_ENV = {"KERYX_EXECUTOR": "1"}
 # The model behind this runner is a third party's: it gets the repository, never the owner's credentials.
 SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL", re.I)
 # Deny rules block in every permission mode, bypassPermissions included (https://code.claude.com/docs/en/permission-modes).
@@ -150,6 +151,7 @@ GLM_DENY = [f"Bash({c} *)" for c in (
     "wrangler", "flyctl", "aws", "gcloud", "git push",
 )] + [f"Bash({c})" for c in ("kubectl", "ssh", "gh", "vercel", "env", "printenv")] + [
     "Read(~/.ssh/**)", "Read(~/.config/glm/**)", "Read(~/.kube/**)", "Read(~/.cursor/**)",
+    "Edit(~/.config/keryx/**)",
     "Read(~/Library/Application Support/com.vercel.cli/**)",
     # A third party's model reads no run (a run's QA evidence and reproductions can show real people) and not
     # the repository's memory; its own config lives in .keryx/glm/<slug>/, beside the runs and still readable
@@ -396,6 +398,19 @@ def rounds(d: Path) -> list[Path]:
     return sorted(p for p in (d / "rounds").glob("[0-9][0-9]") if p.is_dir())
 
 
+def round_modes(d: Path) -> list[str | None]:
+    modes = []
+    for round_path in rounds(d):
+        try:
+            text = (round_path / "prompt.md").read_text()
+        except OSError:
+            modes.append(None)
+            continue
+        match = re.search(r"(?im)^Mode:\s*(\S+)", text)
+        modes.append(match.group(1).upper() if match else None)
+    return modes
+
+
 # A later row may retire an earlier one: "Ruling (replaces row 3): …" stands in for row 3.
 REPLACES_ROW = re.compile(r"(?i)\breplaces row (\d+)\b")
 
@@ -433,7 +448,15 @@ def standard_phase(phase: str) -> bool:
 
 def run_size(rows: list[tuple[int, list[str]]]) -> str | None:
     """The latest size row's letter, or None when the run never logged one."""
-    return next((c[2] for _, c in reversed(rows) if c[1] == "size" and c[2] in {"S", "M", "L"}), None)
+    return next((letter for _, c in reversed(rows) if c[1] == "size"
+                 for letter in [_size_letter(c[2])] if letter), None)
+
+
+def _size_letter(decision: str) -> str | None:
+    text = decision.strip()
+    if not re.fullmatch(r"[SML](?:$|\W.*$)", text, re.I):
+        return None
+    return text[0].upper()
 
 
 def is_ruling(phase: str, decision: str) -> bool:
@@ -720,6 +743,25 @@ def inherited(d: Path, name: str) -> Path:
     return own
 
 
+def qa_file(d: Path) -> Path:
+    own = d / "qa" / "QA.md"
+    if own.exists() or not d.parent.is_dir():
+        return own
+    try:
+        candidates = sorted((folder for folder in d.parent.iterdir()
+                             if folder != d and folder.is_dir()
+                             and d.name.startswith(folder.name + "-")),
+                            key=lambda folder: len(folder.name), reverse=True)
+    except OSError:
+        return own
+    for folder in candidates:
+        if d in run_folders(folder):
+            candidate = folder / "qa" / "QA.md"
+            if candidate.exists():
+                return candidate
+    return own
+
+
 # A finding's last fields: <sep> P<0-3> <sep> <confidence from 0 to 1>, where the separator is an em or en
 # dash or one or two hyphens, with optional spaces (`— P1 — 0.8`, `- P2 - .6`).
 FINDING_TAIL = re.compile(r"\s*(?:—|–|--|-)\s*(P[0-3])\s*(?:—|–|--|-)\s*(1(?:\.0+)?|0?\.\d+|0)\s*$")
@@ -807,6 +849,7 @@ def cli_env(base: dict) -> dict:
     env["KUBECONFIG"] = "/dev/null"
     env["PATH"] = os.path.expanduser("~/.local/bin") + os.pathsep + base.get("PATH", "")
     env.update(NO_PUSH_ENV)
+    env.update(EXECUTOR_ENV)
     return env
 
 
@@ -944,6 +987,7 @@ def codex_env(base: dict, codex_home: str, key: str) -> dict:
     env["GH_TOKEN"] = "keryx-provider-round-has-no-github-access"
     env["CODEX_HOME"] = codex_home
     env[CODEX_KEY_ENV] = key
+    env.update(EXECUTOR_ENV)
     return env
 
 
@@ -3605,7 +3649,7 @@ def cmd_report(args) -> int:
         proof = "- Acceptance check:\n" + "".join(f"  {committed(line)}\n" if line else "\n" for line in check)
     else:
         proof = "- Acceptance check: <!-- the check, failing on the base and passing now -->\n"
-    qa = inherited(d, "qa") / "QA.md"
+    qa = qa_file(d)
     counts = review[1]["counts"] if review is not None else None
     second_finder = ""
     if review is not None:
@@ -3746,7 +3790,9 @@ def _finish_qa_only(d: Path, slug: str, final: str, rows: list[tuple[int, list[s
     if not finish_rows:
         problems.append(f"missing  a finish row: log one per PR or branch shipped with "
                         f"keryx.py log --slug {slug} finish WHAT WHY EVIDENCE RESULT")
-    qa = inherited(d, "qa") / "QA.md"
+    if any(mode != "QA" for mode in round_modes(d)):
+        problems.append("qa-only with an executor round that is not QA: re-size the run or finish it normally")
+    qa = qa_file(d)
     if not qa.exists() or not qa.read_text().strip():
         problems.append(f"missing  the QA file: {qa} — write what was opened and where its evidence lives")
     if problems:
@@ -3765,6 +3811,8 @@ def _finish_umbrella(d: Path, slug: str, final: str, rows: list[tuple[int, list[
     if not finish_rows:
         problems.append(f"missing  a finish row: log one per PR or branch shipped with "
                         f"keryx.py log --slug {slug} finish WHAT WHY EVIDENCE RESULT")
+    if rounds(d):
+        problems.append("umbrella with an executor round: finish its slices and let the umbrella coordinate")
     slices = run_folders(d)[1:]
     if not slices:
         problems.append(f"missing  the slices: {slug} has no slices (no slices)")
@@ -3834,7 +3882,7 @@ def cmd_finish(args) -> int:
                 if parsed_second is not None:
                     problems.append(f"bad      {path}: {'; '.join(parsed_second['problems'])}")
                 problems.append(f"missing  the second finder's findings: {path}")
-    qa = inherited(d, "qa") / "QA.md"
+    qa = qa_file(d)
     qa_waived = any(cells[2].startswith("Ruling: no QA file") for _, cells in rulings)
     if (size in {"M", "L"} and not args.findings_only and not qa_waived
             and (not qa.exists() or not qa.read_text().strip())):
@@ -3934,7 +3982,7 @@ def cmd_finish(args) -> int:
     for f in unnamed_later_runs(d):
         n, k = folder_rounds(f)
         print(f"unnamed   {f.name}: {n} executor rounds ({k} FIX), started after this run, which never names it")
-    qa = inherited(d, "qa") / "QA.md"
+    qa = qa_file(d)
     print(f"qa        {qa}" if qa.exists() else f"qa        none (no {qa})")
     finished = {"slug": args.slug, "finishedAt": now(), "head": final,
                 "reviews": reviews, "finishRows": len(finish_rows)}
@@ -4080,14 +4128,19 @@ def cmd_archive(args) -> int:
 
 
 def cmd_log(args) -> int:
-    phase = normalise_phase(args.phase)
+    decision = args.decision
+    if args.phase.strip().casefold() == "minor (deferred)":
+        phase = "note"
+        decision = f"minor (deferred): {args.decision}"
+    else:
+        phase = normalise_phase(args.phase)
     if not PHASE.fullmatch(phase) and not FINISH_PHASE.fullmatch(phase):
         corrected = "ruling" if args.phase.strip().lower().startswith("ruling") else "note"
         raise LoopError("phase must be one word ([a-z][a-z-]{1,19}); the decision is the next argument — "
                         f'write it as keryx.py log --slug {args.slug} {corrected} "{args.phase}" '
                         "WHY EVIDENCE RESULT")
-    if phase == "size" and args.decision not in {"S", "M", "L"}:
-        raise LoopError("a size row's decision must be S, M or L")
+    if phase == "size" and _size_letter(args.decision) is None:
+        raise LoopError("a size row's decision must start with S, M or L")
     if phase == "next" and args.result not in {"safe", "risk", "price"}:
         raise LoopError('a next row\'s result must be "safe", "risk" or "price"')
     d = slug_dir(args.slug, must_exist=False)
@@ -4095,17 +4148,17 @@ def cmd_log(args) -> int:
     if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
         ensure_ignored(runs.parent)
     rows = read_log_rows(d)
-    m = REPLACES_ROW.search(args.decision)
+    m = REPLACES_ROW.search(decision)
     if m:
         n = int(m.group(1))
         named = next((c for i, c in rows if i == n), None)
-        if not (is_ruling(args.phase, args.decision) and named is not None and is_ruling(named[1], named[2])):
+        if not (is_ruling(args.phase, decision) and named is not None and is_ruling(named[1], named[2])):
             raise LoopError(f'"replaces row {n}" needs row {n} to exist and be a ruling, and the new row to be one')
         for i, c in rows:  # a row already replaced once stays replaced: the new ruling takes the replacer's number
             r = REPLACES_ROW.search(c[2])
             if r and int(r.group(1)) == n:
                 raise LoopError(f"row {n} was already replaced by row {i}; replace row {i} instead")
-    append_log(d, phase, args.decision, args.why, args.evidence, args.result)
+    append_log(d, phase, decision, args.why, args.evidence, args.result)
     lines = (d / "decisions.tsv").read_text().splitlines()
     print(f"{d / 'decisions.tsv'}  row {len(lines) - 1}")  # the header is not a row
     if not standard_phase(phase):
@@ -4162,11 +4215,15 @@ def _repo_settings_lines(settings: dict) -> list[str]:
 
 
 def cmd_repo(args) -> int:
+    if args.ci is not None or args.report is not None:
+        _refuse_executor()
     settings = _read_repo_settings()
     if args.ci is not None or args.report is not None:
         if args.ci is not None:
             if not args.ci.strip():
                 raise LoopError("--ci needs a command")
+            if looks_secret(args.ci):
+                raise LoopError("that CI command looks like a credential; repository settings never store secrets")
             settings["ci"] = args.ci
         if args.report is not None:
             settings["report"] = args.report
@@ -4179,6 +4236,7 @@ def cmd_repo(args) -> int:
 
 
 def cmd_grant(args) -> int:
+    _refuse_executor()
     environ = dict(os.environ)
     _save_grant(environ, args.action, args.value, args.source, main_worktree().name, args.repo)
     return 0
@@ -4226,6 +4284,7 @@ def cmd_ask(args) -> int:
 
 
 def cmd_answer(args) -> int:
+    _refuse_executor()
     folder = slug_dir(args.slug, must_exist=False)
     rows = read_log_rows(folder)
     open_rows = {number for number, _ in _open_questions(rows)}
@@ -4342,13 +4401,17 @@ def cmd_progress(args) -> int:
     return 0
 
 
-def _cleanup_target(ref: str | None) -> str:
-    target = ref
-    if target is None:
-        target = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "main"
-    if not git("rev-parse", "--verify", "--quiet", f"{target}^{{commit}}", check=False):
-        raise LoopError(f"cannot resolve cleanup target {target!r}")
-    return target
+def _cleanup_targets(ref: str | None) -> list[str]:
+    if ref is not None:
+        targets = [ref]
+    else:
+        origin = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False)
+        targets = [origin, origin.removeprefix("origin/")] if origin else ["main"]
+    targets = [target for target in targets
+               if git("rev-parse", "--verify", "--quiet", f"{target}^{{commit}}", check=False)]
+    if not targets:
+        raise LoopError(f"cannot resolve cleanup target {ref or 'main'!r}")
+    return targets
 
 
 def _merged(target: str, branch: str) -> bool:
@@ -4370,8 +4433,23 @@ def _worktree_branches() -> dict[str, Path]:
         if line.startswith("worktree "):
             where = Path(line[len("worktree "):])
         elif where is not None and line.startswith("branch "):
-            branches[line[len("branch "):]] = where
+            branch = line[len("branch "):]
+            branches[branch.removeprefix("refs/heads/")] = where
     return branches
+
+
+def _inside_keryx_worktrees(path: Path, main: Path) -> bool:
+    resolved = path.resolve()
+    root = (main / ".worktrees").resolve()
+    return resolved == root or root in resolved.parents
+
+
+def _operation_in_progress(workspace: Path) -> bool:
+    git_dir = Path(git("rev-parse", "--git-dir", cwd=workspace))
+    if not git_dir.is_absolute():
+        git_dir = workspace / git_dir
+    return any((git_dir / marker).exists() for marker in
+               ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"))
 
 
 def _cleanup_records(d: Path) -> list[tuple[Path, dict]]:
@@ -4415,35 +4493,48 @@ def _round_in_flight(folder: Path) -> bool:
     return pid_alive(pid)
 
 
+def _refuse_executor() -> None:
+    if os.environ.get("KERYX_EXECUTOR") == "1":
+        raise LoopError("an executor may not change the owner's grants, answers, repository settings or cleanup")
+
+
 def cmd_cleanup(args) -> int:
+    _refuse_executor()
     d = slug_dir(args.slug, must_exist=False)
-    target = _cleanup_target(args.target)
+    targets = _cleanup_targets(args.target)
     repository = main_worktree().name
     grant = _grant_lookup(dict(os.environ), "branch-delete", repository)
     worktree_branches = _worktree_branches()
     main = main_worktree().resolve()
     refused = False
+    failed = False
     for folder, record in _cleanup_records(d):
         branch, workspace = record["branch"], record["workspace"]
         if _round_in_flight(folder):
             print(f"kept      {branch}: a round is still running")
             continue
-        if branch == target:
+        if branch in targets:
             print(f"kept      {branch}: the cleanup target is never deleted")
             continue
         if not git("rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}", check=False):
             print(f"gone      {branch}: already removed")
             continue
-        if not _merged(target, branch):
-            print(f"kept      {branch}: not merged into {target}")
+        if not any(_merged(target, branch) for target in targets):
+            print(f"kept      {branch}: not merged into {' or '.join(targets)}")
             continue
         checked_out = worktree_branches.get(branch)
+        if not _inside_keryx_worktrees(Path(workspace), main):
+            print(f"kept      {branch}: {workspace} is not one of keryx's worktrees")
+            continue
         if Path(workspace).is_dir():
+            if _operation_in_progress(Path(workspace)):
+                print(f"kept      {branch}: a rebase, merge or cherry-pick is in progress")
+                continue
             if git("status", "--porcelain", cwd=workspace):
                 print(f"kept      {branch}: uncommitted changes in {workspace}")
                 continue
-            if Path(workspace).resolve() == main:
-                print(f"kept      {branch}: {workspace} is the main checkout")
+            if not any(_merged(target, git("rev-parse", "HEAD", cwd=workspace)) for target in targets):
+                print(f"kept      {branch}: its checkout is at a commit that is not merged")
                 continue
         if checked_out is not None and checked_out.resolve() != Path(workspace).resolve():
             print(f"kept      {branch}: checked out in {checked_out}")
@@ -4455,21 +4546,33 @@ def cmd_cleanup(args) -> int:
         if args.dry_run:
             print(f"would remove  {branch} ({workspace})")
             continue
+        worktree_removed = False
+        branch_removed = False
         try:
             if Path(workspace).is_dir():
                 git("worktree", "remove", workspace)
             else:
                 git("worktree", "prune")
+            worktree_removed = True
             git("branch", "-D", branch)
+            branch_removed = True
             git("update-ref", "-d", f"refs/keryx/{record.get('slug') or folder.name}")
         except LoopError as exc:
+            if worktree_removed:
+                print(f"removed   {branch} worktree ({workspace})")
+            if branch_removed:
+                print(f"removed   {branch}")
             print(f"kept      {branch}: {str(exc).splitlines()[0]}")
+            failed = True
             continue
         print(f"removed   {branch} ({workspace})")
         append_log(folder, "cleanup", f"removed {branch}", "the branch was merged and its worktree clean",
                    workspace, "removed")
     if refused:
         print("branch-delete grant: ask — the owner has not allowed removing local branches")
+        return 1
+    if failed:
+        print("cleanup did not finish: git refused a removal")
         return 1
     return 0
 
