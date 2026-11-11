@@ -410,6 +410,32 @@ def read_log_rows(d: Path) -> list[tuple[int, list[str]]]:
             if len(c) >= 6]
 
 
+STANDARD_PHASES = {
+    "intake", "size", "ground-truth", "plan", "dispatch", "execute", "check", "qa", "probe", "review",
+    "ruling", "waiting", "answer", "next", "ci", "ship", "deploy", "release", "merge", "cleanup",
+    "followup", "finish", "done", "note", "repro",
+}
+PHASE = re.compile(r"[a-z][a-z-]{1,19}")
+FINISH_PHASE = re.compile(r"finish-[a-z][a-z0-9-]{1,19}")
+
+
+def normalise_phase(phase: str) -> str:
+    """The one spelling a program can read, before the shape is checked."""
+    phase = phase.strip().lower()
+    if phase in {"ground truth", "ground", "groundtruth"}:
+        return "ground-truth"
+    return phase
+
+
+def standard_phase(phase: str) -> bool:
+    return phase in STANDARD_PHASES or phase.startswith("finish-")
+
+
+def run_size(rows: list[tuple[int, list[str]]]) -> str | None:
+    """The latest size row's letter, or None when the run never logged one."""
+    return next((c[2] for _, c in reversed(rows) if c[1] == "size" and c[2] in {"S", "M", "L"}), None)
+
+
 def is_ruling(phase: str, decision: str) -> bool:
     """A ruling row: the phase says so, or the decision starts with "Ruling"."""
     return phase == "ruling" or decision.lower().startswith("ruling")
@@ -545,9 +571,15 @@ def current_round(d: Path) -> Path:
 
 
 def new_round(d: Path, prompt_file: str) -> Path:
+    try:
+        prompt = Path(prompt_file).read_text()
+    except OSError as exc:
+        raise LoopError(f"cannot read the brief {prompt_file}: {exc.strerror or exc}") from exc
+    if not prompt.strip():
+        raise LoopError(f"{prompt_file} is empty")
     r = d / "rounds" / f"{len(rounds(d)) + 1:02d}"
     r.mkdir(parents=True, exist_ok=False)
-    (r / "prompt.md").write_text(Path(prompt_file).read_text())
+    (r / "prompt.md").write_text(prompt)
     return r
 
 
@@ -660,7 +692,32 @@ def squash_ws(text: str) -> str:
 
 def locked_block_present(block: str, file_text: str) -> bool:
     """A locked test block counts as present when it appears with only whitespace changes."""
-    return squash_ws(block) in squash_ws(file_text)
+    body = squash_ws(file_text)
+    if squash_ws(block) in body:
+        return True
+    if block.rstrip().endswith(","):
+        return squash_ws(block.rstrip()[:-1]) in body
+    return False
+
+
+def inherited(d: Path, name: str) -> Path:
+    """A slice's own file, else the same file in the nearest run it belongs to, else its own path."""
+    own = d / name
+    if own.exists():
+        return own
+    if not d.parent.is_dir():
+        return own
+    try:
+        prefixes = sorted((p for p in d.parent.iterdir()
+                           if p != d and p.is_dir() and d.name.startswith(p.name + "-")),
+                          key=lambda p: len(p.name), reverse=True)
+    except OSError:
+        return own
+    for folder in prefixes:
+        candidate = folder / name
+        if candidate.exists():
+            return candidate
+    return own
 
 
 # A finding's last fields: <sep> P<0-3> <sep> <confidence from 0 to 1>, where the separator is an em or en
@@ -1190,7 +1247,8 @@ def _validated_providers(path: Path, providers: object) -> dict:
 
 
 def _config_view(path: Path, data: object) -> dict:
-    """executors, order, resets and providers. Unknown keys are ignored. Every refusal names `path` first.
+    """executors, order, resets, providers, caps and roots. Unknown keys are ignored. Every refusal names
+    `path` first.
 
     While the order is `ladder` a bad `resets` is read as none, so the dates can never break the saved order;
     in the `resets` order it is refused."""
@@ -1213,7 +1271,16 @@ def _config_view(path: Path, data: object) -> dict:
         if order == "resets":
             raise
         resets = {}
-    return {"executors": ladder, "order": order, "resets": resets, "providers": providers}
+    caps = data.get("maxParallel", {})
+    if not isinstance(caps, dict) or not all(isinstance(name, str) and name
+                                             and isinstance(value, int) and not isinstance(value, bool)
+                                             and value >= 1 for name, value in caps.items()):
+        raise LoopError(f'{path}: "maxParallel" must map each runner to a whole number of at least 1')
+    roots = data.get("roots", [])
+    if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
+        raise LoopError(f'{path}: "roots" must be a list of folders that hold repositories')
+    return {"executors": ladder, "order": order, "resets": resets, "providers": providers,
+            "maxParallel": caps, "roots": roots}
 
 
 def load_config(environ: dict) -> dict:
@@ -1224,7 +1291,8 @@ def load_config(environ: dict) -> dict:
     an empty mapping when none are declared."""
     path = config_path(environ)
     if not path.exists():
-        return {"executors": ["subagent"], "order": "ladder", "resets": {}, "providers": {}}
+        return {"executors": ["subagent"], "order": "ladder", "resets": {}, "providers": {},
+                "maxParallel": {}, "roots": []}
     try:
         data = json.loads(path.read_text())
     except ValueError as exc:
@@ -1408,6 +1476,265 @@ def _write_limits(path: Path, data: dict) -> None:
         raise
 
 
+def _write_json_atomic(path: Path, data: dict, prefix: str) -> None:
+    """Publish a JSON file by replacing it, so a reader never sees a torn write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+GRANT_ACTIONS = ("push", "pr", "merge", "deploy-staging", "deploy-production", "production-data",
+                 "branch-delete", "followups")
+
+
+def _grants_path(environ: dict) -> Path:
+    return config_path(environ).parent / "grants.json"
+
+
+def _empty_grants() -> dict:
+    return {"default": {}, "repos": {}, "sources": {"default": {}, "repos": {}}}
+
+
+def _read_grants(path: Path, *, strict: bool = True) -> dict:
+    if not path.exists():
+        return _empty_grants()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        if strict:
+            raise LoopError(f"{path} is not valid JSON: {exc}") from exc
+        return _empty_grants()
+    if not isinstance(data, dict):
+        if strict:
+            raise LoopError(f"{path} must hold a JSON object")
+        return _empty_grants()
+    grants = _empty_grants()
+    for scope in ("default", "repos"):
+        values = data.get(scope, {})
+        source_data = data.get("sources", {})
+        sources = source_data.get(scope, {}) if isinstance(source_data, dict) else {}
+        if not isinstance(values, dict) or not isinstance(sources, dict):
+            if strict:
+                raise LoopError(f'{path}: "{scope}" and "sources.{scope}" must both be objects')
+            continue
+        grants[scope] = values
+        grants["sources"][scope] = sources
+    return grants
+
+
+def _valid_grant(action: str, value: str) -> bool:
+    if action not in GRANT_ACTIONS:
+        return False
+    return value in ({"none", "safe", "all"} if action == "followups" else {"allow", "ask"})
+
+
+def _grant_value(data: dict, action: str, repository: str) -> tuple[str, str]:
+    default_value = "none" if action == "followups" else "ask"
+    repo_values = data.get("repos", {}).get(repository, {})
+    if isinstance(repo_values, dict) and action in repo_values:
+        value = str(repo_values[action])
+        if _valid_grant(action, value):
+            return value, "this repository"
+    default_values = data.get("default", {})
+    if isinstance(default_values, dict) and action in default_values:
+        value = str(default_values[action])
+        if _valid_grant(action, value):
+            return value, "default"
+    return default_value, "not granted"
+
+
+def _save_grant(environ: dict, action: str, value: str, source: str, repository: str, repo_scope: bool) -> None:
+    if not _valid_grant(action, value):
+        raise LoopError(f"unknown grant {action} {value!r}")
+    if looks_secret(source):
+        raise LoopError("the grant source looks like a credential; keryx never stores secrets")
+    path = _grants_path(environ)
+    data = _read_grants(path)
+    scope = "repos" if repo_scope else "default"
+    if repo_scope:
+        data["repos"].setdefault(repository, {})[action] = value
+        data["sources"]["repos"].setdefault(repository, {})[action] = source
+    else:
+        data["default"][action] = value
+        data["sources"]["default"][action] = source
+    _write_json_atomic(path, data, ".grants-")
+
+
+def _grant_lines(environ: dict, repository: str) -> list[str]:
+    data = _read_grants(_grants_path(environ))
+    lines = []
+    for action in GRANT_ACTIONS:
+        value, origin = _grant_value(data, action, repository)
+        lines.append(f"{action}  {value}  ({origin})")
+    return lines
+
+
+def _grant_lookup(environ: dict, action: str, repository: str) -> str:
+    if action not in GRANT_ACTIONS:
+        raise LoopError(f"unknown grant action {action!r}")
+    data = _read_grants(_grants_path(environ), strict=False)
+    return _grant_value(data, action, repository)[0]
+
+
+ANSWER_ROW = re.compile(r"^row (\d+):")
+
+
+def _answered_rows(rows: list[tuple[int, list[str]]]) -> set[int]:
+    answered = set()
+    for _, cells in rows:
+        if cells[1] == "answer":
+            match = ANSWER_ROW.match(cells[2])
+            if match:
+                answered.add(int(match.group(1)))
+    return answered
+
+
+def _open_questions(rows: list[tuple[int, list[str]]]) -> list[tuple[int, list[str]]]:
+    answered = _answered_rows(rows)
+    return [(number, cells) for number, cells in rows
+            if cells[1] == "waiting" and cells[5] == "open"
+            and cells[2].startswith("owner:") and number not in answered]
+
+
+def _open_followups(rows: list[tuple[int, list[str]]]) -> list[tuple[int, list[str]]]:
+    answered = _answered_rows(rows)
+    return [(number, cells) for number, cells in rows
+            if cells[1] == "next" and cells[5] in {"safe", "risk", "price"}
+            and number not in answered]
+
+
+def _short_age(timestamp: str) -> str:
+    try:
+        moment = dt.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    except ValueError:
+        return ""
+    seconds = max(0, int((dt.datetime.now(dt.timezone.utc) - moment).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _inbox_repositories(environ: dict, include_roots: bool) -> list[tuple[str, Path]]:
+    repositories = [(main_worktree().name, state_root())]
+    if not include_roots:
+        return repositories
+    config = load_config(environ)
+    roots = [Path(root) for root in config.get("roots", [])] or [main_worktree().parent]
+    seen = {state_root().resolve()}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            runs = child / ".keryx" / "runs"
+            resolved = runs.resolve()
+            if (child.is_dir() and runs.is_dir()
+                    and git("rev-parse", "--show-toplevel", cwd=child, check=False)
+                    and resolved not in seen):
+                seen.add(resolved)
+                repositories.append((child.name, runs))
+    return repositories
+
+
+def _print_inbox(environ: dict, include_roots: bool) -> None:
+    questions = []
+    followups = []
+    for repository, runs in _inbox_repositories(environ, include_roots):
+        if not runs.is_dir():
+            continue
+        try:
+            folders = list(runs.iterdir())
+        except OSError:
+            continue
+        for folder in folders:
+            if not folder.is_dir():
+                continue
+            try:
+                rows = read_log_rows(folder)
+            except (OSError, ValueError):
+                continue
+            questions.extend((repository, folder.name, number, cells)
+                             for number, cells in _open_questions(rows))
+            followups.extend((repository, folder.name, number, cells)
+                             for number, cells in _open_followups(rows))
+    for repository, slug, number, cells in questions:
+        print(f"{repository}/{slug} row {number}  {_short_age(cells[0])}  {cells[2][len('owner: '):]}")
+        if cells[4] != "-":
+            for option in cells[4].split(" | "):
+                print(f"    {option}")
+        if cells[3] != "-":
+            print(f"    blocks: {cells[3]}")
+    for repository, slug, number, cells in followups:
+        grant = _grant_lookup(environ, "followups", repository)
+        starts = ((grant == "safe" and cells[5] == "safe")
+                  or (grant == "all" and cells[5] in {"safe", "risk"}))
+        verdict = "start" if starts else "ask"
+        print(f"{verdict}  {repository}/{slug} row {number}  {cells[2]}")
+    if not questions and not followups:
+        print("inbox empty")
+
+
+def _markdown_cell(text: str) -> str:
+    return text.replace("\r", " ").replace("\n", " ").replace("|", "\\|")
+
+
+def _question_summary(cells: list[str]) -> str:
+    question = cells[2][len("owner: "):]
+    options = [] if cells[4] in {"-", "'-"} else cells[4].split(" | ")
+    rendered = []
+    for option in options:
+        if option.endswith(" (recommended)"):
+            option = option[:-len(" (recommended)")]
+            rendered.append(f"**{option}** (recommended)")
+        else:
+            rendered.append(option)
+    if cells[3] not in {"-", "'-"}:
+        question += f" (blocks: {cells[3]})"
+    return " · ".join([f"**{question}**", *rendered])
+
+
+def _repository_questions(environ: dict) -> list[tuple[int, list[str]]]:
+    runs = state_root()
+    if not runs.is_dir():
+        return []
+    try:
+        folders = list(runs.iterdir())
+    except OSError:
+        return []
+    questions = []
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        try:
+            rows = read_log_rows(folder)
+        except (OSError, ValueError):
+            continue
+        questions.extend(_open_questions(rows))
+    return questions
+
+
+def _waiting_line(environ: dict) -> str:
+    questions = _repository_questions(environ)
+    if not questions:
+        return "Nothing"
+    summaries = [_question_summary(cells) for _, cells in questions]
+    if len(summaries) == 1:
+        return summaries[0]
+    return f"{len(summaries)} decisions — " + " — ".join(
+        f"({number}) {summary}" for number, summary in enumerate(summaries, 1))
+
+
 def _saved_limits(path: Path) -> dict[str, dict]:
     current: dict[str, dict] = {}
     for name, entry in _read_limits(path).items():
@@ -1497,6 +1824,78 @@ def _executor_after(ladder: list[str], current: str, environ: dict, at: dt.datet
         if name not in limited:
             return name
     return "inline"
+
+
+def _refuse_limited_runner(config: dict, runner: str, environ: dict) -> None:
+    at = dt.datetime.now(dt.timezone.utc)
+    until = limited_runners(environ, at).get(runner)
+    if until is None:
+        return
+    next_rung = _executor_after(ordered_ladder(config, at), runner, environ, at)
+    raise LoopError(f"{runner} is at its usage limit until {until}; next rung: {next_rung}")
+
+
+def _running_round_count(config: dict, runner: str) -> int:
+    roots = [state_root()] if state_root().is_dir() else []
+    for root in config.get("roots", []):
+        folder = Path(root)
+        if not folder.is_dir():
+            continue
+        try:
+            children = list(folder.iterdir())
+        except OSError:
+            continue
+        roots.extend(child / ".keryx" / "runs" for child in children
+                     if (child / ".keryx" / "runs").is_dir())
+    counted = 0
+    seen = set()
+    for runs in roots:
+        resolved = runs.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            folders = list(runs.iterdir())
+        except OSError:
+            continue
+        for d in folders:
+            if not d.is_dir():
+                continue
+            try:
+                agent = json.loads((d / "agent.json").read_text())
+            except (OSError, ValueError):
+                agent = {}
+            for r in rounds(d):
+                try:
+                    run = json.loads((r / "run.json").read_text())
+                except (OSError, ValueError):
+                    continue
+                pid = run.get("pid")
+                round_runner = run.get("runner") or (agent.get("runner") if isinstance(agent, dict) else None)
+                if (run.get("status") == "RUNNING" and round_runner == runner
+                        and isinstance(pid, int) and pid_alive(pid)):
+                    counted += 1
+    return counted
+
+
+def _refuse_parallel_cap(config: dict, runner: str, environ: dict) -> None:
+    cap = config.get("maxParallel", {}).get(runner)
+    if cap is None:
+        return
+    count = _running_round_count(config, runner)
+    if count < cap:
+        return
+    at = dt.datetime.now(dt.timezone.utc)
+    next_rung = _executor_after(ordered_ladder(config, at), runner, environ, at)
+    plural = "s" if count != 1 else ""
+    raise LoopError(f"maxParallel: {runner} already has {count} round{plural} running; next rung: {next_rung}")
+
+
+def _refuse_busy_runner(config: dict, runner: str, environ: dict, ignore_limit: bool) -> None:
+    if ignore_limit:
+        return
+    _refuse_limited_runner(config, runner, environ)
+    _refuse_parallel_cap(config, runner, environ)
 
 
 def can_switch(status) -> bool:
@@ -1840,7 +2239,8 @@ def redact(text: str) -> str:
 
 def process_snapshot(pid: int) -> str:
     """What was running under a run when it was stopped, for the record; credentials masked."""
-    listing = subprocess.run(["ps", "-ww", "-eo", "pid=,ppid=,etime=,args="], capture_output=True, text=True).stdout
+    listing = subprocess.run(["ps", "-ww", "-eo", "pid=,ppid=,etime=,args="],
+                              capture_output=True).stdout.decode("utf-8", "replace")
     rows, children = {}, {}
     for line in listing.splitlines():
         parts = line.split(None, 3)
@@ -2457,7 +2857,10 @@ def agent_is_local(agent: dict) -> bool:
 
 
 def cmd_create(args) -> int:
-    runner, provider = _resolve_runner(args.runner, dict(os.environ))
+    environ = dict(os.environ)
+    runner, provider = _resolve_runner(args.runner, environ)
+    config = load_config(environ)
+    _refuse_busy_runner(config, runner, environ, getattr(args, "ignore_limit", False))
     d = slug_dir(args.slug, must_exist=False)
     switch = _switch_plan(d, args.slug, runner, args.escalate) if (d / "agent.json").exists() else None
     if switch:
@@ -2582,8 +2985,11 @@ def cmd_create(args) -> int:
 
 
 def cmd_followup(args) -> int:
+    environ = dict(os.environ)
+    config = load_config(environ)
     d = slug_dir(args.slug)
     agent = load_agent(d)
+    _refuse_busy_runner(config, str(agent.get("runner") or ""), environ, getattr(args, "ignore_limit", False))
     if agent.get("runner") == "subagent":
         # A subagent's fix round: the coordinator dispatches it; this script only opens the round.
         prev = current_round(d)
@@ -2739,8 +3145,6 @@ def _wait_cli(d: Path, args) -> int:
     append_log(d, "dispatch", f"run {r.name}: ended", why, f"exit {outcome['exit']}, {r / 'result.md'}",
                f"{outcome['status']} in {outcome['durationMs']} ms")
     print(f"run {r.name} {outcome['status']} (exit {outcome['exit']}); result saved to {r / 'result.md'}")
-    if limit:
-        report_usage_limit(d, r, limit)
     if is_stalled:
         print("the executor stopped talking without a final report; its commits are on the branch above: "
               "fetch and check them, and follow up for anything missing")
@@ -2748,12 +3152,42 @@ def _wait_cli(d: Path, args) -> int:
     return 0 if outcome["status"] == "FINISHED" else (3 if timed_out else 2)
 
 
+def _wait_local(d: Path, args) -> int:
+    retries = max(0, args.rate_retries)
+    while True:
+        initial_run = json.loads((current_round(d) / "run.json").read_text())
+        was_running = initial_run.get("status") == "RUNNING"
+        code = _wait_cli(d, args)
+        r = current_round(d)
+        run = json.loads((r / "run.json").read_text())
+        limit = run.get("usageLimit")
+        if not (was_running and isinstance(limit, dict) and limit.get("kind") == "rate" and retries > 0):
+            if isinstance(limit, dict):
+                report_usage_limit(d, r, limit)
+            return code
+        next_name = f"{len(rounds(d)) + 1:02d}"
+        wait = args.rate_wait * 2 ** (args.rate_retries - retries)
+        print(f"RATE_LIMIT  rate limit; retrying as run {next_name} in {wait}s")
+        append_log(d, "dispatch", f"run {r.name}: rate limit; retrying as run {next_name}",
+                   "a rate limit clears within minutes, so the same brief is tried again",
+                   f"{r / 'result.md'}", "retry")
+        retries -= 1
+        if wait:
+            time.sleep(wait)
+        prompt_path = r / "prompt.md"
+        prompt = prompt_path.read_text()
+        next_round = new_round(d, str(prompt_path))
+        cli_launch(d, next_round, load_agent(d), prompt, run.get("mode") or "agent")
+
+
 def cmd_wait(args) -> int:
+    if args.rate_wait < 0 or args.rate_retries < 0:
+        raise LoopError("--rate-wait and --rate-retries must be zero or more")
     d = slug_dir(args.slug)
     agent = load_agent(d)
     _refuse_subagent(agent)
     if agent_is_local(agent):
-        return _wait_cli(d, args)
+        return _wait_local(d, args)
     r = current_round(d)
     run = json.loads((r / "run.json").read_text())
     run_id, agent_id = run["id"], agent["agentId"]
@@ -2903,7 +3337,7 @@ def cmd_gates(args) -> int:
     base = load_agent(d)["baseSha"]
     head = resolve_head(d, args.ref)
     globs = list(DEFAULT_GATE_GLOBS)
-    extra = d / "gates.txt"
+    extra = inherited(d, "gates.txt")
     if extra.exists():
         globs += [ln.strip() for ln in extra.read_text().splitlines()
                   if ln.strip() and not ln.lstrip().startswith("#")]
@@ -2925,7 +3359,7 @@ def cmd_locked(args) -> int:
     """Check locked test blocks: <state>/locked/<n>.json = {"path": ..., "block": ...}."""
     d = slug_dir(args.slug)
     head = resolve_head(d, args.ref)
-    specs = sorted((d / "locked").glob("*.json"))
+    specs = sorted(inherited(d, "locked").glob("*.json"))
     if not specs:
         print("no locked test blocks registered (write <state>/locked/NN.json)")
         return 1
@@ -2969,6 +3403,15 @@ def cmd_review_brief(args) -> int:
         raise LoopError("--base is needed: this slug has no executor loop")
     head = resolve_head(d, args.head)
     name = f"{base[:12]}..{head[:12]}"
+    past = {path.name for path in (d / "review").glob("*.findings.md")
+            if ".security." not in path.name} if (d / "review").is_dir() else set()
+    past.discard(f"{name}.findings.md")
+    if len(past) >= 3 and not args.extra:
+        raise LoopError(f"three review rounds already done for {args.slug}; "
+                        "name why another is needed with --extra WHY")
+    if len(past) >= 3 and args.extra:
+        append_log(d, "ruling", f"Ruling: review round {len(past) + 1} — {args.extra}",
+                   "a fourth review round needs the owner's reason", f"{len(past)} earlier rounds", "standing")
     rv = d / "review"
     runs = state_root()
     if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
@@ -2979,7 +3422,8 @@ def cmd_review_brief(args) -> int:
                          f"{git('diff', '--stat', base, head)}\n\n"
                          f"{git('diff', base, head)}\n")
     toplevel = git("rev-parse", "--show-toplevel")
-    task = (f"{d / 'PLAN.md'} (it holds the acceptance check)" if (d / "PLAN.md").exists()
+    plan = inherited(d, "PLAN.md")
+    task = (f"{plan} (it holds the acceptance check)" if plan.exists()
             else f"no plan file: take the commit messages (git log {base[:12]}..{head[:12]}) "
                  f"and the PR description as the task")
     rules_paths = [str(Path(toplevel) / entry) for entry in RULE_FILES if (Path(toplevel) / entry).exists()]
@@ -3062,6 +3506,31 @@ def committed_report(final: str, slug: str) -> str | None:
     return max(listed) if listed else None
 
 
+def _report_checkout(head: str, into: str | None) -> Path:
+    """The checkout a report ships from: the named one, the one holding the shipped head, or this one."""
+    current = Path(git("rev-parse", "--show-toplevel")).resolve()
+    if into:
+        top = git("rev-parse", "--show-toplevel", cwd=into, check=False)
+        common = git("rev-parse", "--git-common-dir", cwd=into, check=False)
+        if not top or not common:
+            raise LoopError(f"{into} is not a checkout of this repository")
+        common_path = Path(common)
+        common_path = common_path.resolve() if common_path.is_absolute() else (Path(into) / common_path).resolve()
+        if common_path != common_dir():
+            raise LoopError(f"{into} is not a checkout of this repository")
+        return Path(top).resolve()
+    if head != git("rev-parse", "HEAD"):
+        where = None
+        for line in git("worktree", "list", "--porcelain").splitlines():
+            if line.startswith("worktree "):
+                where = Path(line[len("worktree "):]).resolve()
+            elif where is not None and line.startswith("HEAD ") and line[5:] == head:
+                if where != current:
+                    return where
+                where = None
+    return current
+
+
 def cmd_report(args) -> int:
     """Draft the run report docs/keryx/<date>-<slug>.md from the run's own record. The proof comes
     first and a Now block (live, waiting on the owner, next) closes it; what only the coordinator
@@ -3077,10 +3546,15 @@ def cmd_report(args) -> int:
             raise LoopError(f"cannot resolve {args.head!r}")
     else:
         final = git("rev-parse", "HEAD")  # the branch that ships, where the report gets committed
-    top = Path(git("rev-parse", "--show-toplevel"))
+    local_report = _read_repo_settings().get("report") == "local"
+    report_path = d / "REPORT.md" if local_report else None
+    top = _report_checkout(final, args.into)
     date = dt.date.today().isoformat()
     name = f"docs/keryx/{date}-{args.slug}.md"
-    if (top / name).exists():
+    if local_report:
+        if report_path.exists():
+            raise LoopError(f"{report_path} already exists; the coordinator's prose is never overwritten")
+    elif (top / name).exists():
         raise LoopError(f"{name} already exists; the coordinator's prose is never overwritten")
     def safe(c: list[str]) -> bool:
         return not any(looks_secret(c[i]) for i in (2, 3, 5))
@@ -3097,7 +3571,7 @@ def cmd_report(args) -> int:
     def committed(text: str) -> str:
         """The report is committed, often to a public repository: nothing it copies names a local path."""
         # this checkout first (a bare repository's worktree lies outside its main folder), then the main one
-        return strip_local_paths(text, list(dict.fromkeys((top.resolve(), main_worktree()))), Path.home())
+        return strip_local_paths(text, list(dict.fromkeys((top, main_worktree()))), Path.home())
 
     title = next((re.sub(r"^#{1,6}\s+", "", line).strip() for line in plan.splitlines() if line.strip()),
                  args.slug)
@@ -3130,7 +3604,7 @@ def cmd_report(args) -> int:
         proof = "- Acceptance check:\n" + "".join(f"  {committed(line)}\n" if line else "\n" for line in check)
     else:
         proof = "- Acceptance check: <!-- the check, failing on the base and passing now -->\n"
-    qa = d / "qa" / "QA.md"
+    qa = inherited(d, "qa") / "QA.md"
     counts = review[1]["counts"] if review is not None else None
     second_finder = ""
     if review is not None:
@@ -3202,9 +3676,108 @@ def cmd_report(args) -> int:
         "- Waiting on you: <!-- what needs the owner now, or \"nothing\" -->\n"
         "- Next: <!-- the next step, and who takes it -->\n"
     )
-    (top / name).parent.mkdir(parents=True, exist_ok=True)
-    (top / name).write_text(text)
-    print(name)
+    if local_report:
+        report_path.write_text(text)
+        print(report_path)
+    else:
+        (top / name).parent.mkdir(parents=True, exist_ok=True)
+        (top / name).write_text(text)
+        print(top / name)
+    return 0
+
+
+def _next_lines(rows: list[tuple[int, list[str]]]) -> list[str]:
+    environ = dict(os.environ)
+    repository = main_worktree().name
+    grant = _grant_lookup(environ, "followups", repository)
+    lines = []
+    for _, cells in _open_followups(rows):
+        starts = ((grant == "safe" and cells[5] == "safe")
+                  or (grant == "all" and cells[5] in {"safe", "risk"}))
+        lines.append(f"next      {'start' if starts else 'ask'}  {cells[2]}")
+    return lines
+
+
+def _finish_rows_output(d: Path, slug: str, final: str, rows: list[tuple[int, list[str]]],
+                         finish_rows: list[list[str]], extra: list[str]) -> None:
+    started = dt.datetime.strptime(rows[0][1][0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    wall = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
+    print(f"FINISHED  {slug}  head {final[:12]}")
+    print(f"wall      {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m since {rows[0][1][0]}")
+    for line in extra:
+        print(line)
+    for cells in finish_rows:
+        print(f"shipped   {cells[2]} — {cells[5]}")
+    for line in _next_lines(rows):
+        print(line)
+
+
+def _save_finished(d: Path, slug: str, final: str, finish_rows: list[list[str]], data: dict) -> None:
+    finished = {"slug": slug, "finishedAt": now(), "head": final,
+                "reviews": [], "finishRows": len(finish_rows)}
+    finished.update(data)
+    save_json(d / "finished.json", finished)
+    append_log(d, "done", "run finished", "the finish gate was met", f"head {final[:12]}",
+               f"{len(finish_rows)} finish rows")
+
+
+def _finish_size_s(d: Path, slug: str, final: str, rows: list[tuple[int, list[str]]],
+                   finish_rows: list[list[str]]) -> int:
+    problems = []
+    if not finish_rows:
+        problems.append(f"missing  a finish row: log one per PR or branch shipped with "
+                        f"keryx.py log --slug {slug} finish WHAT WHY EVIDENCE RESULT")
+    if rounds(d):
+        problems.append("size S with an executor round: re-size it (size M or L)")
+    if problems:
+        print(f"NOT FINISHED  {slug}")
+        for line in problems:
+            print(line)
+        return 1
+    _finish_rows_output(d, slug, final, rows, finish_rows, ["size S"])
+    _save_finished(d, slug, final, finish_rows, {"size": "S"})
+    return 0
+
+
+def _finish_qa_only(d: Path, slug: str, final: str, rows: list[tuple[int, list[str]]],
+                    finish_rows: list[list[str]]) -> int:
+    problems = []
+    if not finish_rows:
+        problems.append(f"missing  a finish row: log one per PR or branch shipped with "
+                        f"keryx.py log --slug {slug} finish WHAT WHY EVIDENCE RESULT")
+    qa = inherited(d, "qa") / "QA.md"
+    if not qa.exists() or not qa.read_text().strip():
+        problems.append(f"missing  the QA file: {qa} — write what was opened and where its evidence lives")
+    if problems:
+        print(f"NOT FINISHED  {slug}")
+        for line in problems:
+            print(line)
+        return 1
+    _finish_rows_output(d, slug, final, rows, finish_rows, [f"qa        {qa}"])
+    _save_finished(d, slug, final, finish_rows, {"kind": "qa-only"})
+    return 0
+
+
+def _finish_umbrella(d: Path, slug: str, final: str, rows: list[tuple[int, list[str]]],
+                     finish_rows: list[list[str]]) -> int:
+    problems = []
+    if not finish_rows:
+        problems.append(f"missing  a finish row: log one per PR or branch shipped with "
+                        f"keryx.py log --slug {slug} finish WHAT WHY EVIDENCE RESULT")
+    slices = run_folders(d)[1:]
+    if not slices:
+        problems.append(f"missing  the slices: {slug} has no slices (no slices)")
+    else:
+        problems.extend(f"missing  the slice {folder.name} has no finished.json: finish that slice first"
+                        for folder in slices if not (folder / "finished.json").exists())
+    if problems:
+        print(f"NOT FINISHED  {slug}")
+        for line in problems:
+            print(line)
+        return 1
+    names = [folder.name for folder in slices]
+    _finish_rows_output(d, slug, final, rows, finish_rows, [f"slices    {', '.join(names)}"])
+    _save_finished(d, slug, final, finish_rows, {"kind": "umbrella", "slices": names})
     return 0
 
 
@@ -3223,6 +3796,13 @@ def cmd_finish(args) -> int:
     deferred = deferred_rows(rows)
     followups = standing_followups(rows, rulings)
     hotfix = is_hotfix_run(rows)
+    size = run_size(rows)
+    if not hotfix and args.umbrella:
+        return _finish_umbrella(d, args.slug, final, rows, finish_rows)
+    if not hotfix and args.qa_only:
+        return _finish_qa_only(d, args.slug, final, rows, finish_rows)
+    if not hotfix and size == "S":
+        return _finish_size_s(d, args.slug, final, rows, finish_rows)
 
     def commits_behind(sha: str) -> int:
         return int(git("rev-list", "--count", f"{sha}..{final}"))
@@ -3253,16 +3833,31 @@ def cmd_finish(args) -> int:
                 if parsed_second is not None:
                     problems.append(f"bad      {path}: {'; '.join(parsed_second['problems'])}")
                 problems.append(f"missing  the second finder's findings: {path}")
+    qa = inherited(d, "qa") / "QA.md"
+    qa_waived = any(cells[2].startswith("Ruling: no QA file") for _, cells in rulings)
+    if (size in {"M", "L"} and not args.findings_only and not qa_waived
+            and (not qa.exists() or not qa.read_text().strip())):
+        problems.append(f"missing  the QA file: {qa} — write what was opened and where its evidence lives, "
+                        'or rule it out with "Ruling: no QA file — …"')
     report = None
     if not args.findings_only:  # a findings-only review changes nothing, so it ships no report
-        report = committed_report(final, args.slug)
-        if report is None:
-            problems.append(f"missing  the run report at head {final[:12]}: keryx.py report --slug {args.slug}, "
-                            "fill it in and commit it with the change (pass --head <the shipped commit> "
-                            "when it ships from another branch)")
-        elif "<!--" in git("show", f"{final}:{report}"):
-            problems.append(f"missing  the run report at head {final[:12]}: {report} still has <!-- --> "
-                            "placeholders (pass --head <the shipped commit> when it ships from another branch)")
+        if _read_repo_settings().get("report") == "local":
+            report = d / "REPORT.md"
+            if not report.exists():
+                problems.append(f"missing  the run report at head {final[:12]}: {report} — "
+                                f"keryx.py report --slug {args.slug} writes REPORT.md")
+            elif "<!--" in report.read_text():
+                problems.append(f"missing  the run report at head {final[:12]}: {report} still has "
+                                "<!-- --> placeholders")
+        else:
+            report = committed_report(final, args.slug)
+            if report is None:
+                problems.append(f"missing  the run report at head {final[:12]}: keryx.py report --slug {args.slug}, "
+                                "fill it in and commit it with the change (pass --head <the shipped commit> "
+                                "when it ships from another branch)")
+            elif "<!--" in git("show", f"{final}:{report}"):
+                problems.append(f"missing  the run report at head {final[:12]}: {report} still has <!-- --> "
+                                "placeholders (pass --head <the shipped commit> when it ships from another branch)")
     opened = []  # the follow-ups whose run was opened for this hotfix
     if hotfix and not followup_waived(rulings):  # the fast lane pays for itself: the lasting fix runs as its own
         unmet = []                               # keryx run, or a standing ruling says why not
@@ -3305,6 +3900,10 @@ def cmd_finish(args) -> int:
     wall = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
     print(f"FINISHED  {args.slug}  head {final[:12]}")
     print(f"wall      {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m since {rows[0][1][0]}")
+    if size is None:
+        print(f"size      not logged (log one with keryx.py log --slug {args.slug} size S|M|L WHY EVIDENCE RESULT)")
+    else:
+        print(f"size {size}")
     reviews = [str(review[0])]
     print(review_line(review[0], review[1]))
     if second is not None:
@@ -3320,6 +3919,8 @@ def cmd_finish(args) -> int:
         print(f"deferred  {c[2]}")
     for slug, what in opened:
         print(f"followup  {slug}: {what}")
+    for line in _next_lines(rows):
+        print(line)
     folders = run_folders(d)
     counted = [folder_rounds(f) for f in folders]
     total, fixes = sum(n for n, _ in counted), sum(k for _, k in counted)
@@ -3332,14 +3933,16 @@ def cmd_finish(args) -> int:
     for f in unnamed_later_runs(d):
         n, k = folder_rounds(f)
         print(f"unnamed   {f.name}: {n} executor rounds ({k} FIX), started after this run, which never names it")
-    qa = d / "qa" / "QA.md"
+    qa = inherited(d, "qa") / "QA.md"
     print(f"qa        {qa}" if qa.exists() else f"qa        none (no {qa})")
     finished = {"slug": args.slug, "finishedAt": now(), "head": final,
                 "reviews": reviews, "finishRows": len(finish_rows)}
+    if size is not None:
+        finished["size"] = size
     if hotfix:
         finished["followups"] = [slug for slug, _ in opened]
     if report is not None:
-        finished["report"] = report
+        finished["report"] = str(report)
     save_json(d / "finished.json", finished)
     append_log(d, "done", "run finished", "a finish row and a fresh review cover the shipped head",
                f"head {final[:12]}", f"{len(finish_rows)} finish rows")
@@ -3476,6 +4079,16 @@ def cmd_archive(args) -> int:
 
 
 def cmd_log(args) -> int:
+    phase = normalise_phase(args.phase)
+    if not PHASE.fullmatch(phase) and not FINISH_PHASE.fullmatch(phase):
+        corrected = "ruling" if args.phase.strip().lower().startswith("ruling") else "note"
+        raise LoopError("phase must be one word ([a-z][a-z-]{1,19}); the decision is the next argument — "
+                        f'write it as keryx.py log --slug {args.slug} {corrected} "{args.phase}" '
+                        "WHY EVIDENCE RESULT")
+    if phase == "size" and args.decision not in {"S", "M", "L"}:
+        raise LoopError("a size row's decision must be S, M or L")
+    if phase == "next" and args.result not in {"safe", "risk", "price"}:
+        raise LoopError('a next row\'s result must be "safe", "risk" or "price"')
     d = slug_dir(args.slug, must_exist=False)
     runs = state_root()
     if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
@@ -3491,9 +4104,11 @@ def cmd_log(args) -> int:
             r = REPLACES_ROW.search(c[2])
             if r and int(r.group(1)) == n:
                 raise LoopError(f"row {n} was already replaced by row {i}; replace row {i} instead")
-    append_log(d, args.phase, args.decision, args.why, args.evidence, args.result)
+    append_log(d, phase, args.decision, args.why, args.evidence, args.result)
     lines = (d / "decisions.tsv").read_text().splitlines()
     print(f"{d / 'decisions.tsv'}  row {len(lines) - 1}")  # the header is not a row
+    if not standard_phase(phase):
+        print(f"{phase} is not a standard phase", file=sys.stderr)
     return 0
 
 
@@ -3518,8 +4133,324 @@ def cmd_remember(args) -> int:
     return 0
 
 
+def _repo_settings_path() -> Path:
+    return main_worktree() / ".keryx" / "config.json"
+
+
+def _read_repo_settings() -> dict:
+    path = _repo_settings_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except ValueError as exc:
+        raise LoopError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise LoopError(f"{path} must hold a JSON object")
+    if "ci" in data and not isinstance(data["ci"], str):
+        raise LoopError(f'{path}: "ci" must be a command string')
+    if "report" in data and data["report"] not in {"committed", "local"}:
+        raise LoopError(f'{path}: "report" must be committed or local')
+    return data
+
+
+def _repo_settings_lines(settings: dict) -> list[str]:
+    ci = settings.get("ci") or "not set"
+    report = settings.get("report") or "committed"
+    return [f"ci      {ci}", f"report  {report}"]
+
+
+def cmd_repo(args) -> int:
+    settings = _read_repo_settings()
+    if args.ci is not None or args.report is not None:
+        if args.ci is not None:
+            if not args.ci.strip():
+                raise LoopError("--ci needs a command")
+            settings["ci"] = args.ci
+        if args.report is not None:
+            settings["report"] = args.report
+        path = _repo_settings_path()
+        ensure_ignored(path.parent)
+        _write_json_atomic(path, settings, ".repo-config-")
+        return 0
+    print("\n".join(_repo_settings_lines(settings)))
+    return 0
+
+
+def cmd_grant(args) -> int:
+    environ = dict(os.environ)
+    _save_grant(environ, args.action, args.value, args.source, main_worktree().name, args.repo)
+    return 0
+
+
+def cmd_grants(args) -> int:
+    environ = dict(os.environ)
+    if args.action is not None:
+        if args.action not in GRANT_ACTIONS:
+            raise LoopError(f"unknown grant action {args.action!r}")
+        data = _read_grants(_grants_path(environ))
+        print(_grant_value(data, args.action, main_worktree().name)[0])
+        return 0
+    print("\n".join(_grant_lines(environ, main_worktree().name)))
+    return 0
+
+
+def _append_owner_row(slug: str, phase: str, decision: str, why: str, evidence: str, result: str) -> tuple[Path, int]:
+    folder = slug_dir(slug, must_exist=False)
+    runs = state_root()
+    if folder.parent == runs:
+        ensure_ignored(runs.parent)
+    append_log(folder, phase, decision, why, evidence, result)
+    lines = (folder / "decisions.tsv").read_text().splitlines()
+    return folder, len(lines) - 1
+
+
+def cmd_ask(args) -> int:
+    options = list(args.option)
+    if args.recommend is not None:
+        match = next((option for option in options
+                      if option == args.recommend or option.partition(":")[0].strip() == args.recommend), None)
+        if match is None:
+            raise LoopError("--recommend must name one of the options")
+        options.remove(match)
+        options.insert(0, f"{match} (recommended)")
+    evidence = " | ".join(options) if options else "-"
+    folder, number = _append_owner_row(args.slug, "waiting", f"owner: {args.question}",
+                                       args.blocks or "-", evidence, "open")
+    print(f"{folder / 'decisions.tsv'}  row {number}")
+    return 0
+
+
+def cmd_answer(args) -> int:
+    folder = slug_dir(args.slug, must_exist=False)
+    rows = read_log_rows(folder)
+    open_rows = {number for number, _ in _open_questions(rows)}
+    open_rows.update(number for number, _ in _open_followups(rows))
+    if args.row not in open_rows:
+        raise LoopError(f"row {args.row} is not an open question or follow-up")
+    _, number = _append_owner_row(args.slug, "answer", f"row {args.row}: {args.text}", "-", "-", "closed")
+    print(f"{folder / 'decisions.tsv'}  row {number}")
+    return 0
+
+
+def cmd_inbox(args) -> int:
+    _print_inbox(dict(os.environ), args.all)
+    return 0
+
+
+def _steps_path(slug: str) -> Path:
+    return slug_dir(slug, must_exist=False) / "steps.json"
+
+
+def _read_steps(slug: str) -> list[dict]:
+    path = _steps_path(slug)
+    if not path.exists():
+        raise LoopError(f"no steps declared for {slug!r} (run keryx.py steps --slug {slug} NAME NAME…)")
+    try:
+        data = json.loads(path.read_text())
+    except ValueError as exc:
+        raise LoopError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("steps"), list):
+        raise LoopError(f"{path} must hold a steps object")
+    steps = data["steps"]
+    if not steps or not all(isinstance(step, dict) and isinstance(step.get("name"), str)
+                            and step.get("status") in {"done", "running", "todo", "failed"}
+                            for step in steps):
+        raise LoopError(f"{path} holds an invalid step")
+    return steps
+
+
+def cmd_steps(args) -> int:
+    names = args.names
+    if len(names) < 2:
+        raise LoopError("steps needs two or more names")
+    if len(names) != len(set(names)):
+        raise LoopError("steps need different names")
+    path = _steps_path(args.slug)
+    old = {step["name"]: step for step in _read_steps(args.slug)} if path.exists() else {}
+    steps = []
+    for name in names:
+        step = old.get(name, {"name": name, "status": "todo", "note": ""})
+        steps.append(step)
+    save_json(path, {"steps": steps})
+    print(path)
+    return 0
+
+
+def cmd_step(args) -> int:
+    steps = _read_steps(args.slug)
+    wanted = args.which.strip().casefold()
+    matches = [(number, step) for number, step in enumerate(steps, 1)
+               if (wanted == str(number)
+                   or wanted == step["name"].casefold()
+                   or wanted == step["name"].partition(":")[0].strip().casefold())]
+    if not matches:
+        raise LoopError(f"no step {args.which!r}")
+    _, step = matches[0]
+    step["status"] = args.status
+    if args.note is not None:
+        step["note"] = args.note
+    save_json(_steps_path(args.slug), {"steps": steps})
+    return 0
+
+
+def cmd_progress(args) -> int:
+    steps = _read_steps(args.slug)
+    if args.full:
+        print("| # | Step | Status | Note |")
+        print("|---|---|---|---|")
+        for number, step in enumerate(steps, 1):
+            status = step["status"]
+            shown_status = "to do" if status == "todo" else status
+            active = status in {"running", "failed"}
+            name = f"**{step['name']}**" if active else step["name"]
+            shown_status = f"**{shown_status}**" if active else shown_status
+            note = step.get("note") or ""
+            print(f"| {number} | {_markdown_cell(name)} | {_markdown_cell(shown_status)} | "
+                  f"{_markdown_cell(note)} |")
+        return 0
+    if args.live is None or args.next is None:
+        raise LoopError("progress needs --live TEXT and --next TEXT (or --full)")
+    current = next((number for number, step in enumerate(steps, 1)
+                    if step["status"] in {"running", "failed"}), None)
+    if current is None:
+        current = next((number for number, step in enumerate(steps, 1) if step["status"] == "todo"), None)
+    total = len(steps)
+    if current is None:
+        heading = f"{total} of {total} done"
+    else:
+        heading = f"Step {current} of {total}"
+    symbols = {"done": "■", "running": "▶", "failed": "x", "todo": "·"}
+    width = 2 if total > 10 else 4
+    bar = " ".join(symbols[step["status"]] * width for step in steps)
+    names = [step["name"].partition(":")[0] for step in steps]
+    if current is None:
+        plan = " → ".join(names)
+    else:
+        plan = " → ".join(f"**[ {name} ]**" if number == current else name
+                          for number, name in enumerate(names, 1))
+    print(f"| {heading} | `{bar}` |")
+    print("|---|---|")
+    print(f"| **Plan** | {_markdown_cell(plan)} |")
+    print(f"| **Live** | {_markdown_cell(args.live)} |")
+    print(f"| **Waiting on you** | {_markdown_cell(_waiting_line(dict(os.environ)))} |")
+    print(f"| **Next** | {_markdown_cell(args.next)} |")
+    return 0
+
+
+def _cleanup_target(ref: str | None) -> str:
+    target = ref
+    if target is None:
+        target = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "main"
+    if not git("rev-parse", "--verify", "--quiet", f"{target}^{{commit}}", check=False):
+        raise LoopError(f"cannot resolve cleanup target {target!r}")
+    return target
+
+
+def _merged(target: str, branch: str) -> bool:
+    if not git("rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}", check=False):
+        return False
+    if subprocess.run(["git", "merge-base", "--is-ancestor", branch, target]).returncode == 0:
+        return True
+    merged = subprocess.run(["git", "merge-tree", "--write-tree", target, branch],
+                             capture_output=True, text=True)
+    if merged.returncode != 0 or not merged.stdout.splitlines():
+        return False
+    return merged.stdout.splitlines()[0] == git("rev-parse", f"{target}^{{tree}}")
+
+
+def _worktree_branches() -> dict[str, Path]:
+    branches = {}
+    where = None
+    for line in git("worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            where = Path(line[len("worktree "):])
+        elif where is not None and line.startswith("branch "):
+            branches[line[len("branch "):]] = where
+    return branches
+
+
+def _cleanup_records(d: Path) -> list[tuple[Path, dict]]:
+    records = []
+    seen = set()
+    for folder in run_folders(d):
+        paths = [folder / "agent.json"] + sorted(folder.glob("agent.*.json"))
+        for path in paths:
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            branch = record.get("branch")
+            workspace = record.get("workspace")
+            if not isinstance(branch, str) or not isinstance(workspace, str):
+                continue
+            key = (branch, workspace)
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append((folder, record))
+    return records
+
+
+def cmd_cleanup(args) -> int:
+    d = slug_dir(args.slug, must_exist=False)
+    target = _cleanup_target(args.target)
+    repository = main_worktree().name
+    grant = _grant_lookup(dict(os.environ), "branch-delete", repository)
+    worktree_branches = _worktree_branches()
+    main = main_worktree().resolve()
+    refused = False
+    for folder, record in _cleanup_records(d):
+        branch, workspace = record["branch"], record["workspace"]
+        if branch == target:
+            print(f"kept      {branch}: the cleanup target is never deleted")
+            continue
+        if not _merged(target, branch):
+            print(f"kept      {branch}: not merged into {target}")
+            continue
+        checked_out = worktree_branches.get(branch)
+        if Path(workspace).is_dir():
+            if git("status", "--porcelain", cwd=workspace):
+                print(f"kept      {branch}: uncommitted changes in {workspace}")
+                continue
+            if Path(workspace).resolve() == main:
+                print(f"kept      {branch}: {workspace} is the main checkout")
+                continue
+        if checked_out is not None and checked_out.resolve() != Path(workspace).resolve():
+            print(f"kept      {branch}: checked out in {checked_out}")
+            continue
+        if grant != "allow":
+            print(f"would remove  {branch} ({workspace})")
+            refused = True
+            continue
+        if args.dry_run:
+            print(f"would remove  {branch} ({workspace})")
+            continue
+        try:
+            if Path(workspace).is_dir():
+                git("worktree", "remove", workspace)
+            else:
+                git("worktree", "prune")
+            git("branch", "-D", branch)
+            git("update-ref", "-d", f"refs/keryx/{record.get('slug') or folder.name}")
+        except LoopError as exc:
+            print(f"kept      {branch}: {str(exc).splitlines()[0]}")
+            continue
+        print(f"removed   {branch} ({workspace})")
+        append_log(folder, "cleanup", f"removed {branch}", "the branch was merged and its worktree clean",
+                   workspace, "removed")
+    if refused:
+        print("branch-delete grant: ask — the owner has not allowed removing local branches")
+        return 1
+    return 0
+
+
 def cmd_recall(args) -> int:
     env = dict(os.environ)
+    try:
+        repository = main_worktree().name
+    except LoopError:
+        repository = None
     for scope, title in (("user", "user"), ("repo", "this repository")):
         path = memory_file(scope, env)
         if scope == "repo" and path is not None and not path.exists():
@@ -3530,6 +4461,13 @@ def cmd_recall(args) -> int:
             continue
         print(f"# keryx memory ({title})")
         print(path.read_text().rstrip("\n"))
+    settings_path = _repo_settings_path() if repository is not None else None
+    if settings_path is not None and settings_path.exists():
+        print("# keryx repository settings")
+        print("\n".join(_repo_settings_lines(_read_repo_settings())))
+    grants_title = repository or "default"
+    print(f"# keryx grants ({grants_title})")
+    print("\n".join(_grant_lines(env, grants_title)))
     return 0
 
 
@@ -3556,6 +4494,41 @@ def main(argv=None) -> int:
     sub.add_parser("recall")
     mo = sub.add_parser("models")
     mo.add_argument("--runner", choices=["cli", "cloud", "glm"], default="cli")
+    grant = sub.add_parser("grant")
+    grant.add_argument("action")
+    grant.add_argument("value")
+    grant.add_argument("--repo", action="store_true", help="save this grant for this repository only")
+    grant.add_argument("--source", required=True, help="the owner's words and date")
+    grants = sub.add_parser("grants")
+    grants.add_argument("--action")
+    ask = sub.add_parser("ask")
+    ask.add_argument("--slug", default="owner-inbox")
+    ask.add_argument("question")
+    ask.add_argument("--option", action="append", default=[])
+    ask.add_argument("--recommend")
+    ask.add_argument("--blocks")
+    answer = sub.add_parser("answer")
+    answer.add_argument("--slug", required=True)
+    answer.add_argument("row", type=int)
+    answer.add_argument("text")
+    inbox = sub.add_parser("inbox")
+    inbox.add_argument("--all", action="store_true", help="read every repository under the configured roots")
+    steps = sub.add_parser("steps")
+    steps.add_argument("--slug", required=True)
+    steps.add_argument("names", nargs="+", metavar="NAME")
+    step = sub.add_parser("step")
+    step.add_argument("--slug", required=True)
+    step.add_argument("which", metavar="WHICH")
+    step.add_argument("status", choices=["done", "running", "todo", "failed"])
+    step.add_argument("--note")
+    progress = sub.add_parser("progress")
+    progress.add_argument("--slug", required=True)
+    progress.add_argument("--live")
+    progress.add_argument("--next")
+    progress.add_argument("--full", action="store_true")
+    repo = sub.add_parser("repo")
+    repo.add_argument("--ci", help="the command this repository uses for CI")
+    repo.add_argument("--report", choices=["committed", "local"], help="where this repository keeps run reports")
     c = sub.add_parser("create")
     c.add_argument("--slug", required=True)
     c.add_argument("--prompt-file", required=True)
@@ -3570,10 +4543,14 @@ def main(argv=None) -> int:
     c.add_argument("--image", action="append", default=[], help="cloud: image for the prompt")
     c.add_argument("--env", action="append", default=[], help="cli/glm: extra environment NAME=value for every run, e.g. CARGO_BUILD_JOBS=6")
     c.add_argument("--dry-run", action="store_true")
+    c.add_argument("--ignore-limit", action="store_true",
+                   help="skip the usage-limit and parallel-cap checks (a limit that lifted early)")
     f = sub.add_parser("followup")
     f.add_argument("--slug", required=True)
     f.add_argument("--prompt-file", required=True)
     f.add_argument("--mode", choices=["agent", "plan"], default="agent")
+    f.add_argument("--ignore-limit", action="store_true",
+                   help="skip the usage-limit and parallel-cap checks (a limit that lifted early)")
     w = sub.add_parser("wait")
     w.add_argument("--slug", required=True)
     w.add_argument("--timeout", type=int, default=3 * 3600)
@@ -3583,6 +4560,10 @@ def main(argv=None) -> int:
                    help="cli: stop a run when one tool call runs this many seconds")
     w.add_argument("--result-grace", type=int, default=RESULT_GRACE_S,
                    help="cli: seconds a run may stay alive after reporting its result")
+    w.add_argument("--rate-wait", type=int, default=120,
+                   help="cli: seconds to wait before retrying a provider rate limit")
+    w.add_argument("--rate-retries", type=int, default=2,
+                   help="cli: how many times to retry a provider rate limit")
     for name in ("status", "fetch", "usage", "cancel", "archive", "scrub"):
         sub.add_parser(name).add_argument("--slug", required=True)
     gt = sub.add_parser("gates")
@@ -3606,14 +4587,24 @@ def main(argv=None) -> int:
                     help="auth, money, privacy or outside calls: dispatch a second finder with a security pass")
     rb.add_argument("--hotfix", action="store_true",
                     help="a hotfix: the diff only, P0 and P1 only, on the strongest model")
+    rb.add_argument("--extra", help="why another review round is needed after three")
     rep = sub.add_parser("report")
     rep.add_argument("--slug", required=True)
     rep.add_argument("--head", help="the shipped commit (default: HEAD of this checkout, the branch that ships)")
+    rep.add_argument("--into", help="write the report into this checkout of the repository")
     fn = sub.add_parser("finish")
     fn.add_argument("--slug", required=True)
     fn.add_argument("--head", help="the shipped commit (default: the head `fetch` recorded)")
     fn.add_argument("--findings-only", action="store_true",
                     help="a findings-only review changes nothing, so no run report is needed")
+    fn.add_argument("--qa-only", action="store_true",
+                    help="a QA-only run needs its finish row and QA file, not a review or report")
+    fn.add_argument("--umbrella", action="store_true",
+                    help="finish when every slice has finished; the umbrella itself has no review or report")
+    cleanup = sub.add_parser("cleanup")
+    cleanup.add_argument("--slug", required=True)
+    cleanup.add_argument("--target", help="the branch or commit the executor branches merged into (default: main)")
+    cleanup.add_argument("--dry-run", action="store_true", help="print what would be removed; change nothing")
     a = sub.add_parser("artifacts")
     a.add_argument("--slug", required=True)
     a.add_argument("--download", action="store_true")
