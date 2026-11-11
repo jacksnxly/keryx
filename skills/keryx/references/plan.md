@@ -35,6 +35,8 @@ Save it as `<state>/PLAN.md` (`.keryx/runs/<slug>/PLAN.md`, never committed). Th
 
 ## Before dispatch
 
+- **Declare the steps.** `keryx.py steps --slug <slug> …`: the run's steps as the owner would name them (intake, plan, each part or slice, QA, review, merge, each production step), so every closing block shows the plan and the place in it; then print the full plan once (`keryx.py progress --slug <slug> --full`). *(owner: "i never know what is planned and where we exactly are")*
+
 - **Lock the tests.** For each locked block write `<state>/locked/NN.json` = `{"path": "<repo-relative file>", "block": "<exact code>"}`; `keryx.py locked` later proves each block is still there verbatim. *(evidence)*
 - **Preflight.** Run every done-command once on the base. A command that is already broken, or stricter than the repository's own gate, is fixed now, not discovered by an executor. *(evidence: two loops lost a round to a done-command that could never pass)*
 - **Take the done-commands from CI.** Read the repository's CI workflows and copy, for the jobs the change touches, the same commands, flags and environment (including jobs that run a subset of tests without the shared setup, and lists of known failures that turn an unexpected pass into a failure). Name the jobs you could not run here. *(evidence: one PR went through four CI rounds on tests and jobs its done-commands never ran)*
