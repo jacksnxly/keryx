@@ -1,5 +1,5 @@
-"""A run in flight keeps its worktree: of 71 executor branches in the field, one counted as merged only because
-its executor had not committed yet."""
+"""A run in flight keeps its worktree: a branch with no commit of its own is an ancestor of its target, so a round
+that has not committed yet would count as merged."""
 
 import json
 import os
