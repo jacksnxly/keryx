@@ -2,19 +2,20 @@
 
 ## Read first, then ask
 
-Start with `keryx.py recall`: the owner's standing choices and this repository's known traps. What it answers you do not ask again; a remembered fact the repository has since changed is checked, not trusted. *(owner: "keryx gets its own memory … it remembers the user's decisions and adapts over time")*
+Start with `keryx.py recall`: the owner's standing choices, this repository's known traps and settings, and what the owner granted here. What it answers you do not ask again; a remembered fact the repository has since changed is checked, not trusted. *(owner: "keryx gets its own memory … it remembers the user's decisions and adapts over time")*
 
 Read the code, docs, data, issue and history you can reach. Ask only what changes what gets built and you cannot find out yourself. *(owner)*
 
 - One question per message, multiple choice where possible, your recommendation first. *(owner)*
 - A guess the owner can correct beats an open question. *(borrowed)*
 - When the request is already complete ("fix this failing test"), skip straight to the acceptance check.
+- A question that has to wait for an answer is logged with `keryx.py ask` (the question, its options, your recommendation, what it blocks), so it shows in the owner's inbox; `keryx.py answer` closes it. *(owner; evidence: "what is waiting on me? i dont understand")*
 
 ## Autonomy — ask once
 
 Ask once, at the start, how far you may go without asking: commit only · push your branch · open a draft PR · merge to main · deploy. When the request or a standing rule already says it ("commit locally, do not push"), that is the answer: do not ask. Log the answer; it is the authority for the whole run. Inside it, do not ask again. *(owner)*
 
-On top of it always: the repository's own rules (`CLAUDE.md`, `AGENTS.md`, contributing docs) and, before any merge, deploy, release or production data change on the owner's systems, the standing grants file. Anything neither covers needs the owner's explicit words. *(owner)*
+On top of it always: the repository's own rules (`CLAUDE.md`, `AGENTS.md`, contributing docs) and, before any push, merge, deploy, release or production data change on the owner's systems, the owner's standing grants: `keryx.py grants` (the file is `~/.config/keryx/grants.json`). `allow` answers the autonomy question for that action: do it once keryx's gates pass, and tell the owner afterwards. `ask`, or an action the file does not list, needs the owner's explicit words. *(owner; evidence: the skill named a grants file that did not exist, and sessions guessed differently)*
 
 ## The acceptance check
 
@@ -45,4 +46,4 @@ What the owner accepted is the task. When the work turns out to need something e
 
 ## Size
 
-Pick S, M or L from the skill's table now, and log it with one line of why.
+Pick S, M or L from the skill's table now, and log it as its own row with one line of why: `keryx.py log --slug <slug> size M "<why>" - -`.

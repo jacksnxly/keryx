@@ -21,7 +21,7 @@ A finding is a hypothesis. For each: *(owner; evidence: a reviewer's raw finding
 
 Confirmed P0 and P1 findings go back through the loop as one FIX round with a failing test per finding; P2 goes in too unless you rule it deferred, with what that costs; P3 goes to the log and the report. *(evidence)*
 
-After the fixes: re-run the mechanical check, the gates and each fixed finding's test. A second fresh review only when the fixes touched the risk list or grew past the original diff. *(evidence: re-reviews of clean fixes found nothing new; chained reviews cost ~$25 per case)*
+After the fixes: re-run the mechanical check, the gates and each fixed finding's test. A second fresh review only when the fixes touched the risk list or grew past the original diff; a third only when the second confirmed a P0 or P1. Then stop: P2 and P3 from the last round are fixed and checked mechanically, or deferred, with no further review. `review-brief` refuses a fourth round; `--extra "<why>"` logs the reason as a ruling and writes the brief. *(evidence: re-reviews of clean fixes found nothing new; chained reviews cost ~$25 per case; across 79 reviewed runs round 1 found 58 P0/P1, round 2 found 11, round 3 one, and rounds 4 to 9 none in 13 rounds)*
 
 ## Review mode: "review and fix this PR / branch"
 
