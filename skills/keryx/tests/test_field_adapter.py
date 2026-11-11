@@ -95,7 +95,7 @@ class SlicesReadTheirRun(unittest.TestCase):
             self.assertEqual(keryx.inherited(runs / "big-api-v2", "PLAN.md"), runs / "big" / "PLAN.md")
             (runs / "big-api" / "PLAN.md").write_text("own")
             self.assertEqual(keryx.inherited(runs / "big-api", "PLAN.md"), runs / "big-api" / "PLAN.md")
-            self.assertEqual(keryx.inherited(runs / "big-api-v2", "PLAN.md"), runs / "big" / "PLAN.md")
+            self.assertEqual(keryx.inherited(runs / "big-api-v2", "PLAN.md"), runs / "big-api" / "PLAN.md")
             self.assertEqual(keryx.inherited(runs / "big", "gates.txt"), runs / "big" / "gates.txt")
 
     def test_locked_on_a_slice_checks_the_runs_blocks(self):
