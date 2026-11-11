@@ -94,7 +94,7 @@ Each `--reset` is a plan's next reset in UTC and how often it repeats (`month`, 
 5. **Execute.** Tests first, shown to fail for the stated reason, then the code.
 6. **Check.** Mechanical first (locked tests intact, diff inside its bounds, architecture gates untouched, no assistant attribution), then QA on the real surface and mutation probes that break the change on purpose.
 7. **One fresh review** of the whole branch from a brief that ships with keryx, each finding checked before it is acted on.
-8. **Finish** within the autonomy, with a short report committed next to the change (`docs/keryx/<date>-<slug>.md`): the proof first, then what changed, what is open, every ruling made on your behalf, and what is live, waiting on you and next. `keryx.py finish` refuses until the run log has a finish row, the review covers the shipped commit and the report is there.
+8. **Finish** within the autonomy, with a short report committed next to the change (`docs/keryx/<date>-<slug>.md`): the proof first, then what changed, what is open, every ruling made on your behalf, and what is live, waiting on you and next. `keryx.py finish` refuses until the run log has a finish row, the review covers the shipped commit and the report is there. Then `keryx.py cleanup` removes the merged executor branches, and the follow-ups the run recommended start on their own or go to the owner's inbox (`keryx.py inbox --all`), as the owner's standing grants say (`keryx.py grants`).
 
 Every decision is logged as it is made (`.keryx/runs/<slug>/decisions.tsv`), so a run can be picked up after a context reset.
 

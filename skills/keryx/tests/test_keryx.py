@@ -7,6 +7,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import keryx as cloud  # noqa: E402
+import os  # noqa: E402
+import tempfile  # noqa: E402
+
+# The suite never reads this machine's keryx config, limits or grants.
+os.environ["KERYX_CONFIG"] = str(Path(tempfile.mkdtemp(prefix="keryx-tests-")) / "config.json")
 
 
 class ParseSse(unittest.TestCase):

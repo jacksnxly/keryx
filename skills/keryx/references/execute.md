@@ -13,7 +13,7 @@ keryx works with Claude Code alone. Which executors a person has, and in which o
 | Cursor Cloud Agent | `cloud` | `keryx.py create --runner cloud`: on Cursor's machines; the repository must be on GitHub. |
 | You, inline | `inline` | S work, M work that is mostly judgement, and the rung after the last executor. |
 
-The executor never dispatches its own subagents, never reviews itself in your place, never pushes. *(evidence; owner)*
+The executor never dispatches its own subagents, never reviews itself in your place, never pushes. The owner's commands (`grant`, `repo --ci`, `repo --report`, `ask`, `answer`, `cleanup`, and `log` rows of the phases `answer` and `next`) refuse to run inside an executor round: the environment of a Cursor, GLM or provider round carries `KERYX_EXECUTOR=1`. A Claude subagent runs with your session's environment and a cloud agent on another machine, so neither carries it. Like the other guards, this stops mistakes, not a determined executor. *(evidence; owner; borrowed: found by the security pass of this change's own review)*
 
 ### First use: setup
 
@@ -31,7 +31,11 @@ A provider (a model behind an https API that Codex can drive) is declared by the
 
 A round stopped by a usage limit ends ERROR, and `wait` prints `USAGE_LIMIT` with the reset: a time in UTC for GLM (which prints UTC+8), a span such as "4 days" for Cursor. If the reset is within about 45 minutes, wait for it and `followup` on the same slug: the round resumes its session and its uncommitted work; when `followup` finds no session (the run died before it started one), `create` on the same slug and runner again. Otherwise take the next rung (`executors --after`; `inline` means you). *(evidence: runs that resumed after a GLM reset lost ~25 minutes; GLM prints its reset time in UTC+8)*
 
-`wait` and `status` record the limit for every session on the machine (`limits.json` beside the config): `keryx.py executors` leaves that runner out, says until when, and lists it again once the reset has passed. Take every new round and slice from `keryx.py executors`, never from the runner the last round used. A limit that lifts early (the owner upgraded the plan) stays until its recorded time: delete that runner's entry from `limits.json`. *(evidence: the owner had to say "glm is free again" or "glm is back" 8 times in a week)*
+`wait` and `status` record the limit for every session on the machine (`limits.json` beside the config): `keryx.py executors` leaves that runner out, says until when, and lists it again once the reset has passed. Take every new round and slice from `keryx.py executors`, never from the runner the last round used. `create` and `followup` refuse a runner at its limit and name the next rung, before a worktree or a round folder exists. A limit that lifts early (the owner upgraded the plan) stays until its recorded time: pass `--ignore-limit`, or delete that runner's entry from `limits.json`. *(evidence: the owner had to say "glm is free again" or "glm is back" 8 times in a week; 8 GLM rounds started into a limit another round had already hit)*
+
+A provider's 429 is a rate limit, not a spent quota: `wait` retries the round itself with the same brief, after two minutes and then after four (`--rate-wait`, `--rate-retries`), and only then ends ERROR and records the limit, so the next rung takes over. *(evidence: 9 of 10 provider errors were a 429; after 4 of them the provider answered again within 11 minutes, and two longer episodes lasted past 14 and 19 minutes)*
+
+For a provider that limits how many rounds run at once, the owner sets a cap in `config.json`, `"maxParallel": {"<runner>": 2}`: `create` and `followup` refuse a round past it, counted over every repository under the config's `roots`, and name the next rung. No cap is set by default. *(owner; evidence: 5 of the 9 rate limits hit while no other keryx round ran on that provider, so a cap is not what stops them)*
 
 ### The plan that resets first
 
@@ -69,23 +73,29 @@ For Cursor, pick the cheapest model preflight lists that has done this kind of w
 
 A worker cannot ask you anything mid-run, so a brief with a missing field is not sent. *(evidence)*
 
+Write the brief with the file tool, never through the shell: an unquoted heredoc runs every backtick span in the brief as a command. *(evidence: a brief that said never to run `git stash` and `git add -A` ran both in the main checkout)*
+
 ```markdown
-Mode: TESTS-ONLY | IMPLEMENT | FIX
+Mode: TESTS-ONLY | IMPLEMENT | FIX | QA
 Goal: <one sentence>
 The plan: <PLAN.md pasted in full>
 Rules: work only in this worktree; do not push; do not edit the locked tests or any architecture gate (guard tests, import contracts, dependency rules, lint and CI config) unless the plan says so; use the plan's terms for new
 names and keep domain code free of framework, database and provider imports; no co-author or
 "generated with" trailers; do not start subagents; run the commands below and paste their real output;
 start no long-lived process (dev server, watcher): a check that needs a server runs through a test runner that
-starts and stops it, and anything you did start is stopped before your final report.
+starts and stops it, and anything you did start is stopped before your final report; commit before the final
+report: uncommitted work does not count.
 TESTS-ONLY: add the locked tests exactly as written, run them, commit as `test: …`; write no fix.
 IMPLEMENT: make the locked tests and the done-when commands pass; commit as `fix: …` / `feat: …`.
 FIX: the findings below, verbatim; every rule above still holds.
+QA: change no product code. Work through the case list below on the surface named, one case at a time; for each,
+save what you sent and what came back under the evidence folder named, and report `as expected` or `DIFFERENT`
+with the file. Never print a credential; create only test data, and delete it before your final report.
 Report (your last message): first line `Status: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED`,
 then the commands you ran with their output, then the files you changed.
 ```
 
-Exact values (numbers, strings, signatures) appear once, in the plan. A follow-up repeats every rule still in force: follow-ups silently drop the ones they leave out. *(evidence)*
+Exact values (numbers, strings, signatures) appear once, in the plan. A follow-up repeats every rule still in force: follow-ups silently drop the ones they leave out. *(evidence: a FIX round without the commit line finished DONE with everything uncommitted)*
 
 ## Order
 
