@@ -4396,6 +4396,25 @@ def _cleanup_records(d: Path) -> list[tuple[Path, dict]]:
     return records
 
 
+def _round_in_flight(folder: Path) -> bool:
+    round_paths = rounds(folder)
+    if not round_paths:
+        return False
+    try:
+        run = json.loads((round_paths[-1] / "run.json").read_text())
+    except (OSError, ValueError):
+        return False
+    if run.get("status") == "DISPATCHED":
+        return True
+    if run.get("status") != "RUNNING":
+        return False
+    try:
+        pid = int(run.get("pid"))
+    except (TypeError, ValueError):
+        return False
+    return pid_alive(pid)
+
+
 def cmd_cleanup(args) -> int:
     d = slug_dir(args.slug, must_exist=False)
     target = _cleanup_target(args.target)
@@ -4406,6 +4425,9 @@ def cmd_cleanup(args) -> int:
     refused = False
     for folder, record in _cleanup_records(d):
         branch, workspace = record["branch"], record["workspace"]
+        if _round_in_flight(folder):
+            print(f"kept      {branch}: a round is still running")
+            continue
         if branch == target:
             print(f"kept      {branch}: the cleanup target is never deleted")
             continue
