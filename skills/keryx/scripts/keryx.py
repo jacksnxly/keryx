@@ -1670,10 +1670,10 @@ def _print_inbox(environ: dict, include_roots: bool) -> None:
                              for number, cells in _open_followups(rows))
     for repository, slug, number, cells in questions:
         print(f"{repository}/{slug} row {number}  {_short_age(cells[0])}  {cells[2][len('owner: '):]}")
-        if cells[4] != "-":
+        if cells[4] not in {"", "-", "'-"}:
             for option in cells[4].split(" | "):
                 print(f"    {option}")
-        if cells[3] != "-":
+        if cells[3] not in {"", "-", "'-"}:
             print(f"    blocks: {cells[3]}")
     for repository, slug, number, cells in followups:
         grant = _grant_lookup(environ, "followups", repository)
@@ -1691,7 +1691,7 @@ def _markdown_cell(text: str) -> str:
 
 def _question_summary(cells: list[str]) -> str:
     question = cells[2][len("owner: "):]
-    options = [] if cells[4] in {"-", "'-"} else cells[4].split(" | ")
+    options = [] if cells[4] in {"", "-", "'-"} else cells[4].split(" | ")
     rendered = []
     for option in options:
         if option.endswith(" (recommended)"):
@@ -1699,9 +1699,10 @@ def _question_summary(cells: list[str]) -> str:
             rendered.append(f"**{option}** (recommended)")
         else:
             rendered.append(option)
-    if cells[3] not in {"-", "'-"}:
-        question += f" (blocks: {cells[3]})"
-    return " · ".join([f"**{question}**", *rendered])
+    summary = f"**{question}**"
+    if cells[3] not in {"", "-", "'-"}:
+        summary += f" (blocks: {cells[3]})"
+    return " · ".join([summary, *rendered])
 
 
 def _repository_questions(environ: dict) -> list[tuple[int, list[str]]]:
@@ -4206,6 +4207,8 @@ def _append_owner_row(slug: str, phase: str, decision: str, why: str, evidence: 
 
 
 def cmd_ask(args) -> int:
+    if not args.question.strip():
+        raise LoopError("the question needs text")
     options = list(args.option)
     if args.recommend is not None:
         match = next((option for option in options
@@ -4214,6 +4217,7 @@ def cmd_ask(args) -> int:
             raise LoopError("--recommend must name one of the options")
         options.remove(match)
         options.insert(0, f"{match} (recommended)")
+    options = [option.replace("|", "/") for option in options]
     evidence = " | ".join(options) if options else "-"
     folder, number = _append_owner_row(args.slug, "waiting", f"owner: {args.question}",
                                        args.blocks or "-", evidence, "open")
@@ -4392,6 +4396,25 @@ def _cleanup_records(d: Path) -> list[tuple[Path, dict]]:
     return records
 
 
+def _round_in_flight(folder: Path) -> bool:
+    round_paths = rounds(folder)
+    if not round_paths:
+        return False
+    try:
+        run = json.loads((round_paths[-1] / "run.json").read_text())
+    except (OSError, ValueError):
+        return False
+    if run.get("status") == "DISPATCHED":
+        return True
+    if run.get("status") != "RUNNING":
+        return False
+    try:
+        pid = int(run.get("pid"))
+    except (TypeError, ValueError):
+        return False
+    return pid_alive(pid)
+
+
 def cmd_cleanup(args) -> int:
     d = slug_dir(args.slug, must_exist=False)
     target = _cleanup_target(args.target)
@@ -4402,8 +4425,14 @@ def cmd_cleanup(args) -> int:
     refused = False
     for folder, record in _cleanup_records(d):
         branch, workspace = record["branch"], record["workspace"]
+        if _round_in_flight(folder):
+            print(f"kept      {branch}: a round is still running")
+            continue
         if branch == target:
             print(f"kept      {branch}: the cleanup target is never deleted")
+            continue
+        if not git("rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}", check=False):
+            print(f"gone      {branch}: already removed")
             continue
         if not _merged(target, branch):
             print(f"kept      {branch}: not merged into {target}")
