@@ -2891,13 +2891,14 @@ def _wait_local(d: Path, args) -> int:
                 report_usage_limit(d, r, limit)
             return code
         next_name = f"{len(rounds(d)) + 1:02d}"
-        print(f"RATE_LIMIT  rate limit; retrying as run {next_name} in {args.rate_wait}s")
+        wait = args.rate_wait * 2 ** (args.rate_retries - retries)
+        print(f"RATE_LIMIT  rate limit; retrying as run {next_name} in {wait}s")
         append_log(d, "dispatch", f"run {r.name}: rate limit; retrying as run {next_name}",
                    "a rate limit clears within minutes, so the same brief is tried again",
                    f"{r / 'result.md'}", "retry")
         retries -= 1
-        if args.rate_wait:
-            time.sleep(args.rate_wait)
+        if wait:
+            time.sleep(wait)
         prompt_path = r / "prompt.md"
         prompt = prompt_path.read_text()
         next_round = new_round(d, str(prompt_path))
@@ -3778,7 +3779,7 @@ def main(argv=None) -> int:
                    help="cli: stop a run when one tool call runs this many seconds")
     w.add_argument("--result-grace", type=int, default=RESULT_GRACE_S,
                    help="cli: seconds a run may stay alive after reporting its result")
-    w.add_argument("--rate-wait", type=int, default=600,
+    w.add_argument("--rate-wait", type=int, default=120,
                    help="cli: seconds to wait before retrying a provider rate limit")
     w.add_argument("--rate-retries", type=int, default=2,
                    help="cli: how many times to retry a provider rate limit")
