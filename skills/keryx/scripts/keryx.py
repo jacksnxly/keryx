@@ -2166,7 +2166,8 @@ def redact(text: str) -> str:
 
 def process_snapshot(pid: int) -> str:
     """What was running under a run when it was stopped, for the record; credentials masked."""
-    listing = subprocess.run(["ps", "-ww", "-eo", "pid=,ppid=,etime=,args="], capture_output=True, text=True).stdout
+    listing = subprocess.run(["ps", "-ww", "-eo", "pid=,ppid=,etime=,args="],
+                              capture_output=True).stdout.decode("utf-8", "replace")
     rows, children = {}, {}
     for line in listing.splitlines():
         parts = line.split(None, 3)
@@ -2786,7 +2787,7 @@ def cmd_create(args) -> int:
     environ = dict(os.environ)
     runner, provider = _resolve_runner(args.runner, environ)
     config = load_config(environ)
-    _refuse_busy_runner(config, runner, environ, args.ignore_limit)
+    _refuse_busy_runner(config, runner, environ, getattr(args, "ignore_limit", True))
     d = slug_dir(args.slug, must_exist=False)
     switch = _switch_plan(d, args.slug, runner, args.escalate) if (d / "agent.json").exists() else None
     if switch:
@@ -2915,7 +2916,7 @@ def cmd_followup(args) -> int:
     config = load_config(environ)
     d = slug_dir(args.slug)
     agent = load_agent(d)
-    _refuse_busy_runner(config, str(agent.get("runner") or ""), environ, args.ignore_limit)
+    _refuse_busy_runner(config, str(agent.get("runner") or ""), environ, getattr(args, "ignore_limit", True))
     if agent.get("runner") == "subagent":
         # A subagent's fix round: the coordinator dispatches it; this script only opens the round.
         prev = current_round(d)
@@ -3327,6 +3328,15 @@ def cmd_review_brief(args) -> int:
         raise LoopError("--base is needed: this slug has no executor loop")
     head = resolve_head(d, args.head)
     name = f"{base[:12]}..{head[:12]}"
+    past = {path.name for path in (d / "review").glob("*.findings.md")
+            if ".security." not in path.name} if (d / "review").is_dir() else set()
+    past.discard(f"{name}.findings.md")
+    if len(past) >= 3 and not args.extra:
+        raise LoopError(f"three review rounds already done for {args.slug}; "
+                        "name why another is needed with --extra WHY")
+    if args.extra:
+        append_log(d, "ruling", f"Ruling: review round {len(past) + 1} — {args.extra}",
+                   "a fourth review round needs the owner's reason", f"{len(past)} earlier rounds", "standing")
     rv = d / "review"
     runs = state_root()
     if d.parent == runs:  # a run under .keryx/, whose folder ignores itself; a legacy run keeps its own
@@ -3461,10 +3471,15 @@ def cmd_report(args) -> int:
             raise LoopError(f"cannot resolve {args.head!r}")
     else:
         final = git("rev-parse", "HEAD")  # the branch that ships, where the report gets committed
+    local_report = _read_repo_settings().get("report") == "local"
+    report_path = d / "REPORT.md" if local_report else None
     top = _report_checkout(final, args.into)
     date = dt.date.today().isoformat()
     name = f"docs/keryx/{date}-{args.slug}.md"
-    if (top / name).exists():
+    if local_report:
+        if report_path.exists():
+            raise LoopError(f"{report_path} already exists; the coordinator's prose is never overwritten")
+    elif (top / name).exists():
         raise LoopError(f"{name} already exists; the coordinator's prose is never overwritten")
     def safe(c: list[str]) -> bool:
         return not any(looks_secret(c[i]) for i in (2, 3, 5))
@@ -3514,7 +3529,7 @@ def cmd_report(args) -> int:
         proof = "- Acceptance check:\n" + "".join(f"  {committed(line)}\n" if line else "\n" for line in check)
     else:
         proof = "- Acceptance check: <!-- the check, failing on the base and passing now -->\n"
-    qa = d / "qa" / "QA.md"
+    qa = inherited(d, "qa") / "QA.md"
     counts = review[1]["counts"] if review is not None else None
     second_finder = ""
     if review is not None:
@@ -3586,9 +3601,108 @@ def cmd_report(args) -> int:
         "- Waiting on you: <!-- what needs the owner now, or \"nothing\" -->\n"
         "- Next: <!-- the next step, and who takes it -->\n"
     )
-    (top / name).parent.mkdir(parents=True, exist_ok=True)
-    (top / name).write_text(text)
-    print(top / name)
+    if local_report:
+        report_path.write_text(text)
+        print(report_path)
+    else:
+        (top / name).parent.mkdir(parents=True, exist_ok=True)
+        (top / name).write_text(text)
+        print(top / name)
+    return 0
+
+
+def _next_lines(rows: list[tuple[int, list[str]]]) -> list[str]:
+    environ = dict(os.environ)
+    repository = main_worktree().name
+    grant = _grant_lookup(environ, "followups", repository)
+    lines = []
+    for _, cells in _open_followups(rows):
+        starts = ((grant == "safe" and cells[5] == "safe")
+                  or (grant == "all" and cells[5] in {"safe", "risk"}))
+        lines.append(f"next      {'start' if starts else 'ask'}  {cells[2]}")
+    return lines
+
+
+def _finish_rows_output(d: Path, slug: str, final: str, rows: list[tuple[int, list[str]]],
+                         finish_rows: list[list[str]], extra: list[str]) -> None:
+    started = dt.datetime.strptime(rows[0][1][0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    wall = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
+    print(f"FINISHED  {slug}  head {final[:12]}")
+    print(f"wall      {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m since {rows[0][1][0]}")
+    for line in extra:
+        print(line)
+    for cells in finish_rows:
+        print(f"shipped   {cells[2]} — {cells[5]}")
+    for line in _next_lines(rows):
+        print(line)
+
+
+def _save_finished(d: Path, slug: str, final: str, finish_rows: list[list[str]], data: dict) -> None:
+    finished = {"slug": slug, "finishedAt": now(), "head": final,
+                "reviews": [], "finishRows": len(finish_rows)}
+    finished.update(data)
+    save_json(d / "finished.json", finished)
+    append_log(d, "done", "run finished", "the finish gate was met", f"head {final[:12]}",
+               f"{len(finish_rows)} finish rows")
+
+
+def _finish_size_s(d: Path, slug: str, final: str, rows: list[tuple[int, list[str]]],
+                   finish_rows: list[list[str]]) -> int:
+    problems = []
+    if not finish_rows:
+        problems.append(f"missing  a finish row: log one per PR or branch shipped with "
+                        f"keryx.py log --slug {slug} finish WHAT WHY EVIDENCE RESULT")
+    if rounds(d):
+        problems.append("size S with an executor round: re-size it (size M or L)")
+    if problems:
+        print(f"NOT FINISHED  {slug}")
+        for line in problems:
+            print(line)
+        return 1
+    _finish_rows_output(d, slug, final, rows, finish_rows, ["size S"])
+    _save_finished(d, slug, final, finish_rows, {"size": "S"})
+    return 0
+
+
+def _finish_qa_only(d: Path, slug: str, final: str, rows: list[tuple[int, list[str]]],
+                    finish_rows: list[list[str]]) -> int:
+    problems = []
+    if not finish_rows:
+        problems.append(f"missing  a finish row: log one per PR or branch shipped with "
+                        f"keryx.py log --slug {slug} finish WHAT WHY EVIDENCE RESULT")
+    qa = inherited(d, "qa") / "QA.md"
+    if not qa.exists() or not qa.read_text().strip():
+        problems.append(f"missing  the QA file: {qa} — write what was opened and where its evidence lives")
+    if problems:
+        print(f"NOT FINISHED  {slug}")
+        for line in problems:
+            print(line)
+        return 1
+    _finish_rows_output(d, slug, final, rows, finish_rows, [f"qa        {qa}"])
+    _save_finished(d, slug, final, finish_rows, {"kind": "qa-only"})
+    return 0
+
+
+def _finish_umbrella(d: Path, slug: str, final: str, rows: list[tuple[int, list[str]]],
+                     finish_rows: list[list[str]]) -> int:
+    problems = []
+    if not finish_rows:
+        problems.append(f"missing  a finish row: log one per PR or branch shipped with "
+                        f"keryx.py log --slug {slug} finish WHAT WHY EVIDENCE RESULT")
+    slices = run_folders(d)[1:]
+    if not slices:
+        problems.append(f"missing  the slices: {slug} has no slices (no slices)")
+    else:
+        problems.extend(f"missing  the slice {folder.name} has no finished.json: finish that slice first"
+                        for folder in slices if not (folder / "finished.json").exists())
+    if problems:
+        print(f"NOT FINISHED  {slug}")
+        for line in problems:
+            print(line)
+        return 1
+    names = [folder.name for folder in slices]
+    _finish_rows_output(d, slug, final, rows, finish_rows, [f"slices    {', '.join(names)}"])
+    _save_finished(d, slug, final, finish_rows, {"kind": "umbrella", "slices": names})
     return 0
 
 
@@ -3607,6 +3721,13 @@ def cmd_finish(args) -> int:
     deferred = deferred_rows(rows)
     followups = standing_followups(rows, rulings)
     hotfix = is_hotfix_run(rows)
+    size = run_size(rows)
+    if args.umbrella:
+        return _finish_umbrella(d, args.slug, final, rows, finish_rows)
+    if args.qa_only:
+        return _finish_qa_only(d, args.slug, final, rows, finish_rows)
+    if size == "S":
+        return _finish_size_s(d, args.slug, final, rows, finish_rows)
 
     def commits_behind(sha: str) -> int:
         return int(git("rev-list", "--count", f"{sha}..{final}"))
@@ -3637,16 +3758,30 @@ def cmd_finish(args) -> int:
                 if parsed_second is not None:
                     problems.append(f"bad      {path}: {'; '.join(parsed_second['problems'])}")
                 problems.append(f"missing  the second finder's findings: {path}")
+    qa = inherited(d, "qa") / "QA.md"
+    qa_waived = any(cells[2].startswith("Ruling: no QA file") for _, cells in rulings)
+    if size in {"M", "L"} and not qa_waived and (not qa.exists() or not qa.read_text().strip()):
+        problems.append(f"missing  the QA file: {qa} — write what was opened and where its evidence lives, "
+                        'or rule it out with "Ruling: no QA file — …"')
     report = None
     if not args.findings_only:  # a findings-only review changes nothing, so it ships no report
-        report = committed_report(final, args.slug)
-        if report is None:
-            problems.append(f"missing  the run report at head {final[:12]}: keryx.py report --slug {args.slug}, "
-                            "fill it in and commit it with the change (pass --head <the shipped commit> "
-                            "when it ships from another branch)")
-        elif "<!--" in git("show", f"{final}:{report}"):
-            problems.append(f"missing  the run report at head {final[:12]}: {report} still has <!-- --> "
-                            "placeholders (pass --head <the shipped commit> when it ships from another branch)")
+        if _read_repo_settings().get("report") == "local":
+            report = d / "REPORT.md"
+            if not report.exists():
+                problems.append(f"missing  the run report at head {final[:12]}: {report} — "
+                                f"keryx.py report --slug {args.slug} writes REPORT.md")
+            elif "<!--" in report.read_text():
+                problems.append(f"missing  the run report at head {final[:12]}: {report} still has "
+                                "<!-- --> placeholders")
+        else:
+            report = committed_report(final, args.slug)
+            if report is None:
+                problems.append(f"missing  the run report at head {final[:12]}: keryx.py report --slug {args.slug}, "
+                                "fill it in and commit it with the change (pass --head <the shipped commit> "
+                                "when it ships from another branch)")
+            elif "<!--" in git("show", f"{final}:{report}"):
+                problems.append(f"missing  the run report at head {final[:12]}: {report} still has <!-- --> "
+                                "placeholders (pass --head <the shipped commit> when it ships from another branch)")
     opened = []  # the follow-ups whose run was opened for this hotfix
     if hotfix and not followup_waived(rulings):  # the fast lane pays for itself: the lasting fix runs as its own
         unmet = []                               # keryx run, or a standing ruling says why not
@@ -3689,6 +3824,10 @@ def cmd_finish(args) -> int:
     wall = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
     print(f"FINISHED  {args.slug}  head {final[:12]}")
     print(f"wall      {int(wall) // 3600}h {int(wall) % 3600 // 60:02d}m since {rows[0][1][0]}")
+    if size is None:
+        print(f"size      not logged (log one with keryx.py log --slug {args.slug} size S|M|L WHY EVIDENCE RESULT)")
+    else:
+        print(f"size {size}")
     reviews = [str(review[0])]
     print(review_line(review[0], review[1]))
     if second is not None:
@@ -3704,6 +3843,8 @@ def cmd_finish(args) -> int:
         print(f"deferred  {c[2]}")
     for slug, what in opened:
         print(f"followup  {slug}: {what}")
+    for line in _next_lines(rows):
+        print(line)
     folders = run_folders(d)
     counted = [folder_rounds(f) for f in folders]
     total, fixes = sum(n for n, _ in counted), sum(k for _, k in counted)
@@ -3716,14 +3857,16 @@ def cmd_finish(args) -> int:
     for f in unnamed_later_runs(d):
         n, k = folder_rounds(f)
         print(f"unnamed   {f.name}: {n} executor rounds ({k} FIX), started after this run, which never names it")
-    qa = d / "qa" / "QA.md"
+    qa = inherited(d, "qa") / "QA.md"
     print(f"qa        {qa}" if qa.exists() else f"qa        none (no {qa})")
     finished = {"slug": args.slug, "finishedAt": now(), "head": final,
                 "reviews": reviews, "finishRows": len(finish_rows)}
+    if size is not None:
+        finished["size"] = size
     if hotfix:
         finished["followups"] = [slug for slug, _ in opened]
     if report is not None:
-        finished["report"] = report
+        finished["report"] = str(report)
     save_json(d / "finished.json", finished)
     append_log(d, "done", "run finished", "a finish row and a fresh review cover the shipped head",
                f"head {final[:12]}", f"{len(finish_rows)} finish rows")
@@ -4016,6 +4159,104 @@ def cmd_inbox(args) -> int:
     return 0
 
 
+def _cleanup_target(ref: str | None) -> str:
+    target = ref
+    if target is None:
+        target = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "main"
+    if not git("rev-parse", "--verify", "--quiet", f"{target}^{{commit}}", check=False):
+        raise LoopError(f"cannot resolve cleanup target {target!r}")
+    return target
+
+
+def _merged(target: str, branch: str) -> bool:
+    if not git("rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}", check=False):
+        return False
+    if subprocess.run(["git", "merge-base", "--is-ancestor", branch, target]).returncode == 0:
+        return True
+    merged = subprocess.run(["git", "merge-tree", "--write-tree", target, branch],
+                             capture_output=True, text=True)
+    if merged.returncode != 0 or not merged.stdout.splitlines():
+        return False
+    return merged.stdout.splitlines()[0] == git("rev-parse", f"{target}^{{tree}}")
+
+
+def _worktree_branches() -> dict[str, Path]:
+    branches = {}
+    where = None
+    for line in git("worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            where = Path(line[len("worktree "):])
+        elif where is not None and line.startswith("branch "):
+            branches[line[len("branch "):]] = where
+    return branches
+
+
+def _cleanup_records(d: Path) -> list[tuple[Path, dict]]:
+    records = []
+    seen = set()
+    for folder in run_folders(d):
+        paths = [folder / "agent.json"] + sorted(folder.glob("agent.*.json"))
+        for path in paths:
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            branch = record.get("branch")
+            workspace = record.get("workspace")
+            if not isinstance(branch, str) or not isinstance(workspace, str):
+                continue
+            key = (branch, workspace)
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append((folder, record))
+    return records
+
+
+def cmd_cleanup(args) -> int:
+    d = slug_dir(args.slug)
+    target = _cleanup_target(args.target)
+    grant = _grant_lookup(dict(os.environ), "branch-delete", main_worktree().name)
+    worktree_branches = _worktree_branches()
+    main = main_worktree().resolve()
+    refused = False
+    for folder, record in _cleanup_records(d):
+        branch, workspace = record["branch"], record["workspace"]
+        if not _merged(target, branch):
+            print(f"kept      {branch}: not merged into {target}")
+            continue
+        if not Path(workspace).is_dir():
+            print(f"kept      {branch}: worktree not found at {workspace}")
+            continue
+        if git("status", "--porcelain", cwd=workspace):
+            print(f"kept      {branch}: uncommitted changes in {workspace}")
+            continue
+        if Path(workspace).resolve() == main:
+            print(f"kept      {branch}: {workspace} is the main checkout")
+            continue
+        checked_out = worktree_branches.get(branch)
+        if checked_out is not None and checked_out.resolve() != Path(workspace).resolve():
+            print(f"kept      {branch}: checked out in {checked_out}")
+            continue
+        if grant != "allow":
+            print(f"would remove  {branch} ({workspace})")
+            refused = True
+            continue
+        if args.dry_run:
+            print(f"would remove  {branch} ({workspace})")
+            continue
+        git("worktree", "remove", workspace)
+        git("branch", "-D", branch)
+        git("update-ref", "-d", f"refs/keryx/{record.get('slug') or folder.name}")
+        print(f"removed   {branch} ({workspace})")
+        append_log(folder, "cleanup", f"removed {branch}", "the branch was merged and its worktree clean",
+                   workspace, "removed")
+    if refused:
+        print("branch-delete grant: ask — the owner has not allowed removing local branches")
+        return 1
+    return 0
+
+
 def cmd_recall(args) -> int:
     env = dict(os.environ)
     for scope, title in (("user", "user"), ("repo", "this repository")):
@@ -4140,6 +4381,7 @@ def main(argv=None) -> int:
                     help="auth, money, privacy or outside calls: dispatch a second finder with a security pass")
     rb.add_argument("--hotfix", action="store_true",
                     help="a hotfix: the diff only, P0 and P1 only, on the strongest model")
+    rb.add_argument("--extra", help="why another review round is needed after three")
     rep = sub.add_parser("report")
     rep.add_argument("--slug", required=True)
     rep.add_argument("--head", help="the shipped commit (default: HEAD of this checkout, the branch that ships)")
@@ -4149,6 +4391,14 @@ def main(argv=None) -> int:
     fn.add_argument("--head", help="the shipped commit (default: the head `fetch` recorded)")
     fn.add_argument("--findings-only", action="store_true",
                     help="a findings-only review changes nothing, so no run report is needed")
+    fn.add_argument("--qa-only", action="store_true",
+                    help="a QA-only run needs its finish row and QA file, not a review or report")
+    fn.add_argument("--umbrella", action="store_true",
+                    help="finish when every slice has finished; the umbrella itself has no review or report")
+    cleanup = sub.add_parser("cleanup")
+    cleanup.add_argument("--slug", required=True)
+    cleanup.add_argument("--target", help="the branch or commit the executor branches merged into (default: main)")
+    cleanup.add_argument("--dry-run", action="store_true", help="print what would be removed; change nothing")
     a = sub.add_parser("artifacts")
     a.add_argument("--slug", required=True)
     a.add_argument("--download", action="store_true")
