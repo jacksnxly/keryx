@@ -55,7 +55,26 @@ Stop and ask only for: an irreversible or destructive step; a security-sensitive
 - Subagents only as the executor, for the fresh review and for parallel slices; never a reviewer per task. Never chain review skills into each other. *(evidence: chained review skills cost ~$25 per review case in the benchmark)*
 - Read what you need, not whole trees; send long command output to a file and read its tail. *(evidence)*
 - Start slow things (builds, installs, executor runs) in the background and keep working. *(fact)*
-- Every message that ends your turn opens with what proves it — the check's result, the QA file and its screenshots, as paths — and closes with three lines: **Live** (what runs or is in use now), **Waiting on you** (or "nothing"), **Next**. **Waiting on you** is what `keryx.py inbox` lists for this repository: each open question in full, with its options, the recommended one first, and what it blocks — never a pointer to an earlier message. The run report ends the same way. A few lines, not a log. *(owner; evidence: "where are we / what's next?" was the owner's most common check-in, a median 4.8 h after their previous prompt)*
+- Every message that ends your turn opens with what proves it — the check's result, the QA file and its screenshots, as paths — and closes with the status block: a blank line, a rule, then three list items in this order and nothing after them. The run report ends with the same three. A few lines, not a log. *(owner; evidence: "where are we / what's next?" was the owner's most common check-in, a median 4.8 h after their previous prompt)*
+
+  ```markdown
+  ---
+  - **Live** — <what runs or is in use now, and where>
+  - **Waiting on you** — nothing
+  - **Next** — <the next step> → <the one after>
+  ```
+
+  **Waiting on you** is what `keryx.py inbox` lists for this repository, never a pointer to an earlier message. With open questions it carries their count, and each question is written out in full with what it blocks and its options, the recommended one first and in bold:
+
+  ```markdown
+  - **Waiting on you** — 2 decisions
+    1. **<the question>** (blocks <what waits on it>)
+       - **A — <option>** (recommended)
+       - B — <option>
+    2. **<the question>** …
+  ```
+
+  One line per item, plain words, bold only on the three labels, the questions and the recommended option. No table, heading, emoji or code block around it: a list reads the same in a terminal and in the Claude apps, a table breaks on a long line in a narrow terminal, and the blank line keeps the rule from turning the sentence above it into a heading. *(owner: "style it [so it] looks good in the terminal and also for users of the claude app or claude web")*
 - Never end a turn idle while work is in flight. Start a watch in the background that wakes you when it ends — `keryx.py wait` for an executor, `gh run watch <id>` or `gh pr checks <pr> --watch` for CI, a small polling script for a verdict or a usage-limit reset — and log what you wait on: `keryx.py log --slug <slug> waiting "<who>: <what>" <why> <evidence> "<expected by>"` (`owner: …` when it is the owner). Under the autonomy you were given, a report is not a stopping point: stop only for §3's list. *(owner; evidence: 13 nudges in one week — "and?", "are we done?", "so we sit and wait?", "why did you stop in first place?")*
 
 ## 5. Run log

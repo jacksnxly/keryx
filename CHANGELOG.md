@@ -16,6 +16,7 @@ From five days of field data after 1.6.0 (162 run folders in 11 repositories, 32
 - **The CI-parity command** per repository (`keryx.py repo --ci "<command>"`, printed by `recall`): a done-when command of every plan, run on the final head before the first push.
 - **Run-log rows a program can read**: the phase is one word (a sentence in its place is refused; `ground truth` and `ground` become `ground-truth`; an unknown word is kept with a note), and a `size` row takes `S`, `M` or `L`.
 - Fixes: a `followup` whose brief file is missing no longer leaves an empty round folder that breaks every later command; a locked block that ends in a comma is found; `locked`, `gates`, `review-brief` and `finish` on a slice read the run's locks, gate list, plan and QA file; `report` writes into the checkout that holds the shipped head (`--into <path>` names one).
+- The status block that closes a message has one shape: a rule, then **Live**, **Waiting on you** and **Next** as three list items, with open questions written out under **Waiting on you** (their options, the recommended one first). A list reads the same in a terminal and in the Claude apps.
 - Briefs are written with the file tool, never through a shell heredoc: an unquoted one ran the commands a brief quoted.
 
 ## 1.6.0 — 2026-11-07

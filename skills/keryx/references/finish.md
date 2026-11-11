@@ -27,6 +27,6 @@ A few lines, in the owner's words, not the process's, taken from what `keryx.py 
 3. **Open**: what was not verified and why; deferred minors.
 4. **Rulings I made** you may want to change, each with what it costs if wrong.
 5. Time and tokens: wall clock, executor runs, fix rounds.
-6. **Now**, the last three lines: **Live** (what runs or is in use now, and where), **Waiting on you** (or "nothing"), **Next** (the next step and who takes it). The drafted report ends with the same block, and `finish` waits for it to be filled in.
+6. **Now**, the status block that closes every message (the skill's §4): a rule, then **Live** (what runs or is in use now, and where), **Waiting on you** ("nothing", or each open question in full with its options) and **Next** (the next step and who takes it), as three list items. The drafted report ends with the same three items, and `finish` waits for them to be filled in.
 
 Evidence lives in files; the report links them. *(owner)*
