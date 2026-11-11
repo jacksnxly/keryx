@@ -3561,7 +3561,13 @@ def committed_report(final: str, slug: str) -> str | None:
 
 
 def _report_checkout(head: str, into: str | None) -> Path:
-    """The checkout a report ships from: the named one, the one holding the shipped head, or this one."""
+    """The checkout a report ships from: the named one, the one holding the shipped head, or this one.
+
+    This checkout wins when its own HEAD is the head. Otherwise a single other worktree on a branch
+    at that commit is the place: a detached scratch copy is discarded and would take the report with
+    it. With no branch, one detached worktree is the place. Two or more branch checkouts, or several
+    detached ones and no branch, need --into; nothing is written.
+    """
     current = Path(git("rev-parse", "--show-toplevel")).resolve()
     if into:
         if not Path(into).is_dir():
@@ -3575,16 +3581,39 @@ def _report_checkout(head: str, into: str | None) -> Path:
         if common_path != common_dir():
             raise LoopError(f"{into} is not a checkout of this repository")
         return Path(top).resolve()
-    if head != git("rev-parse", "HEAD"):
-        where = None
-        for line in git("worktree", "list", "--porcelain").splitlines():
-            if line.startswith("worktree "):
-                where = Path(line[len("worktree "):]).resolve()
-            elif where is not None and line.startswith("HEAD ") and line[5:] == head:
-                if where != current:
-                    return where
-                where = None
-    return current
+    if head == git("rev-parse", "HEAD"):
+        return current
+    # `branch` is printed after HEAD, so a record is only complete at the next worktree line.
+    branches: list[Path] = []
+    detached: list[Path] = []
+    where: Path | None = None
+    sha = ""
+    on_branch = False
+
+    def keep() -> None:
+        if where is not None and sha == head and where != current:
+            (branches if on_branch else detached).append(where)
+
+    for line in git("worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            keep()
+            where = Path(line[len("worktree "):]).resolve()
+            sha = ""
+            on_branch = False
+        elif line.startswith("HEAD "):
+            sha = line[5:]
+        elif line.startswith("branch "):
+            on_branch = True
+    keep()
+    if len(branches) == 1:
+        return branches[0]
+    if not branches and len(detached) == 1:
+        return detached[0]
+    if not branches and not detached:
+        return current
+    found = branches + detached
+    listed = ", ".join(str(path) for path in found)
+    raise LoopError(f"{len(found)} checkouts hold {head[:12]}: {listed}; pass --into <path>")
 
 
 def cmd_report(args) -> int:
