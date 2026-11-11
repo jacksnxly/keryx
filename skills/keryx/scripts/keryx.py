@@ -447,16 +447,17 @@ def standard_phase(phase: str) -> bool:
 
 
 def run_size(rows: list[tuple[int, list[str]]]) -> str | None:
-    """The latest size row's letter, or None when the run never logged one."""
-    return next((letter for _, c in reversed(rows) if c[1] == "size"
-                 for letter in [_size_letter(c[2])] if letter), None)
+    """The latest size row's letter, or None when that row does not parse."""
+    row = next((cells for _, cells in reversed(rows) if cells[1] == "size"), None)
+    return _size_letter(row[2]) if row is not None else None
 
 
 def _size_letter(decision: str) -> str | None:
     text = decision.strip()
-    if not re.fullmatch(r"[SML](?:$|\W.*$)", text, re.I):
+    match = re.fullmatch(r"(?i)(?:size\s+)?([SML])(?:$|(?:\s*[,:]\s*|\s+[—–-]\s+|\s+\().*)", text)
+    if not match:
         return None
-    return text[0].upper()
+    return match.group(1).upper()
 
 
 def is_ruling(phase: str, decision: str) -> bool:
@@ -737,6 +738,14 @@ def inherited(d: Path, name: str) -> Path:
     except OSError:
         return own
     for folder in prefixes:
+        try:
+            plan = (folder / "PLAN.md").read_text() if (folder / "PLAN.md").exists() else ""
+            rows = read_log_rows(folder)
+        except OSError:
+            continue
+        named = plan + "\n" + "\n".join("\t".join(cells) for _, cells in rows)
+        if not re.search(rf"(?<![\w-]){re.escape(d.name)}(?![\w-])", named):
+            continue
         candidate = folder / name
         if candidate.exists():
             return candidate
@@ -3555,6 +3564,8 @@ def _report_checkout(head: str, into: str | None) -> Path:
     """The checkout a report ships from: the named one, the one holding the shipped head, or this one."""
     current = Path(git("rev-parse", "--show-toplevel")).resolve()
     if into:
+        if not Path(into).is_dir():
+            raise LoopError(f"{into} does not exist")
         top = git("rev-parse", "--show-toplevel", cwd=into, check=False)
         common = git("rev-parse", "--git-common-dir", cwd=into, check=False)
         if not top or not common:
@@ -3772,7 +3783,7 @@ def _finish_size_s(d: Path, slug: str, final: str, rows: list[tuple[int, list[st
     if not finish_rows:
         problems.append(f"missing  a finish row: log one per PR or branch shipped with "
                         f"keryx.py log --slug {slug} finish WHAT WHY EVIDENCE RESULT")
-    if rounds(d):
+    if any(rounds(folder) for folder in run_folders(d)):
         problems.append("size S with an executor round: re-size it (size M or L)")
     if problems:
         print(f"NOT FINISHED  {slug}")
@@ -3790,7 +3801,7 @@ def _finish_qa_only(d: Path, slug: str, final: str, rows: list[tuple[int, list[s
     if not finish_rows:
         problems.append(f"missing  a finish row: log one per PR or branch shipped with "
                         f"keryx.py log --slug {slug} finish WHAT WHY EVIDENCE RESULT")
-    if any(mode != "QA" for mode in round_modes(d)):
+    if any(mode != "QA" for folder in run_folders(d) for mode in round_modes(folder)):
         problems.append("qa-only with an executor round that is not QA: re-size the run or finish it normally")
     qa = qa_file(d)
     if not qa.exists() or not qa.read_text().strip():
@@ -4140,7 +4151,9 @@ def cmd_log(args) -> int:
                         f'write it as keryx.py log --slug {args.slug} {corrected} "{args.phase}" '
                         "WHY EVIDENCE RESULT")
     if phase == "size" and _size_letter(args.decision) is None:
-        raise LoopError("a size row's decision must start with S, M or L")
+        raise LoopError('a size row\'s decision must be the size the run has now, as one letter: S, M or L')
+    if phase in {"answer", "next"}:
+        _refuse_executor()
     if phase == "next" and args.result not in {"safe", "risk", "price"}:
         raise LoopError('a next row\'s result must be "safe", "risk" or "price"')
     d = slug_dir(args.slug, must_exist=False)
@@ -4265,6 +4278,7 @@ def _append_owner_row(slug: str, phase: str, decision: str, why: str, evidence: 
 
 
 def cmd_ask(args) -> int:
+    _refuse_executor()
     if not args.question.strip():
         raise LoopError("the question needs text")
     options = list(args.option)
