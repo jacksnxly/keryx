@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **An optional research agent.** `keryx.py setup --research codex` saves `"research": {"agent": "codex"}` in `config.json` (`--research none` removes it; `"model"` and `"effort"` are optional). Ground truth then hands outside research — official docs, versions, how a library or API behaves — to `keryx.py research --slug <slug> "<question>"`, which runs `codex exec` with the owner's own Codex login, read-only, with live web search, and without the owner's Codex config, plugins, apps and memories (in a probe, the owner's config loaded a production connector). The answer is printed with its sources, saved as `<state>/research/NN.md` and logged as a `ground-truth` row. Nothing is set by default: the command then exits 3 and the session researches as before; a failed run exits 1 and says so.
+
 ## 1.7.3 — 2026-11-12
 
 - **One status block for a session that drives several runs.** `keryx.py progress --slug <run> --slug <other run> …` prints one row with a bar per run (`| **smart-search** | 2 of 6 · ▶▶▶▶ … · Part 1 |`) above Live, Waiting and Next, and lists the open questions of those runs under it, each with its run's name. Without `--slug` it prints the three rows for a session with no run (`--waiting` says what waits). Seen in the field: a session with two runs ran `progress` for each and then typed a three-row table by hand, 14 times, so its block had no bar. The command also reminds on stderr to paste the block as printed.

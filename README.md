@@ -71,6 +71,14 @@ keryx.py setup --order resets --reset cli=2026-11-06/month --reset glm=2026-11-1
 
 Each `--reset` is a plan's next reset in UTC and how often it repeats (`month`, `week`, or nothing for once); keryx rolls it forward on its own. `--order ladder` turns it off and keeps the dates. keryx never asks a provider for your usage: the dates are the ones you give it, and an executor that hits its limit is still skipped until its limit lifts.
 
+By default the session does its own research. With a [Codex](https://learn.chatgpt.com/docs/non-interactive-mode) account, keryx can hand research — official docs, versions, how a library or API behaves — to it instead, so those questions run on your Codex plan:
+
+```bash
+keryx.py setup --research codex     # --research none turns it off
+```
+
+Each question then runs as `keryx.py research --slug <run> "<question>"`: `codex exec` with your own Codex login, read-only, with live web search and without your Codex config, plugins, apps or memories. The answer comes back with its sources and is saved under the run (`.keryx/runs/<run>/research/`). `"model"` and `"effort"` in the config's `"research"` entry choose the model. When the run fails, the session researches the question itself.
+
 ## FAQ
 
 **How do I make Claude Code write tests first?** Install keryx and ask for the change with `/keryx:keryx`. Every M or L task starts with a check that fails on the current code, then locked tests the executor must make pass without editing them.
