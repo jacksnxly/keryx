@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 — 2026-11-12
 
 - **An optional research agent.** `keryx.py setup --research codex` saves `"research": {"agent": "codex"}` in `config.json` (`--research none` removes it; `"model"` and `"effort"` are optional). Ground truth then hands outside research — official docs, versions, how a library or API behaves — to `keryx.py research --slug <slug> "<question>"`, which runs `codex exec` with the owner's own Codex login, read-only, with live web search, and without the owner's Codex config, execpolicy rules, plugins, apps and memories (in a probe, the owner's config loaded a production connector). The answer is printed with its sources, credentials masked, saved as `<state>/research/NN.md` (each call claims its number before the agent runs, so parallel sessions never share one) and logged as a `ground-truth` row. Nothing is set by default: the command then exits 3 and the session researches as before; a failed run exits 1 and says so.
 
