@@ -1721,6 +1721,8 @@ def _print_inbox(environ: dict, include_roots: bool) -> None:
                              for number, cells in _open_questions(rows))
             followups.extend((repository, folder.name, number, cells)
                              for number, cells in _open_followups(rows))
+    questions.sort(key=lambda item: (item[3][0], item[0], item[1], item[2]))  # oldest first, whatever the listing's order
+    followups.sort(key=lambda item: (item[3][0], item[0], item[1], item[2]))
     for repository, slug, number, cells in questions:
         print(f"{repository}/{slug} row {number}  {_short_age(cells[0])}  {cells[2][len('owner: '):]}")
         if cells[4] not in {"", "-", "'-"}:
@@ -1746,7 +1748,7 @@ def _repository_questions(environ: dict) -> list[tuple[int, list[str]]]:
         folders = list(runs.iterdir())
     except OSError:
         return []
-    questions = []
+    found = []
     for folder in folders:
         if not folder.is_dir():
             continue
@@ -1754,8 +1756,10 @@ def _repository_questions(environ: dict) -> list[tuple[int, list[str]]]:
             rows = read_log_rows(folder)
         except (OSError, ValueError):
             continue
-        questions.extend(_open_questions(rows))
-    return questions
+        found.extend((cells[0], folder.name, number, cells) for number, cells in _open_questions(rows))
+    # Oldest first, then by run and row: a folder listing's order differs between file systems, and a
+    # question must keep its number from one message to the next.
+    return [(number, cells) for _, _, number, cells in sorted(found, key=lambda item: item[:3])]
 
 
 def _one_line(text: str) -> str:
