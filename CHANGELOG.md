@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **One status block for a session that drives several runs.** `keryx.py progress --slug <run> --slug <other run> …` prints one row with a bar per run (`| **smart-search** | 2 of 6 · ▶▶▶▶ … · Part 1 |`) above Live, Waiting and Next, and lists the open questions of those runs under it, each with its run's name. Without `--slug` it prints the three rows for a session with no run (`--waiting` says what waits). Seen in the field: a session with two runs ran `progress` for each and then typed a three-row table by hand, 14 times, so its block had no bar. The command also reminds on stderr to paste the block as printed.
+- `progress` says on stderr when a run's log went on (five rows or more) while its steps were never ticked, since the bar shows only what was ticked: a field run declared ten steps and stayed at "1 of 10".
 
 ## 1.7.2 — 2026-11-12
 

@@ -4455,6 +4455,27 @@ def _step_place(steps: list[dict]) -> tuple[int | None, str, str]:
     return current, place, " ".join(symbols[step["status"]] * width for step in steps)
 
 
+STALE_STEP_ROWS = 5  # log rows written since the steps last changed, from which progress says so
+
+
+def _stale_steps_note(slug: str) -> str | None:
+    """A line for stderr when the run's log went on while its steps did not: the bar shows what was ticked,
+    so steps nobody ticks leave it standing still."""
+    path = _steps_path(slug)
+    try:
+        changed = dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        steps = _read_steps(slug)
+    except (OSError, LoopError):
+        return None
+    if all(step["status"] == "done" for step in steps):
+        return None
+    since = sum(1 for _, cells in read_log_rows(slug_dir(slug, must_exist=False)) if cells[0] > changed)
+    if since < STALE_STEP_ROWS:
+        return None
+    return (f"keryx: {slug}: {since} log rows since its steps last changed: tick what started and what ended "
+            f"(keryx.py step --slug {slug} <step> running|done), or the bar stands still")
+
+
 def cmd_progress(args) -> int:
     """The status block that closes a message, or the whole plan (--full), from the runs' declared steps.
     The block is a two-column table whose cells stay short enough for a terminal to keep drawing it as a table
@@ -4525,6 +4546,10 @@ def cmd_progress(args) -> int:
     if decisions:
         print()
         print("\n".join(decisions))
+    for slug in slugs:
+        note = _stale_steps_note(slug)
+        if note:
+            print(note, file=sys.stderr)
     print("keryx: paste the block as printed, after a blank line, as the last thing in the message; never retype it",
           file=sys.stderr)
     return 0

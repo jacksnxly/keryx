@@ -344,6 +344,32 @@ class NoRun(unittest.TestCase):
             self.assertEqual(cli(repo, ["progress", "--full"], env)[0], 1)
 
 
+class StaleSteps(unittest.TestCase):
+    """Seen 2026-11-12: a run declared ten steps and never ticked one while its log went on, so its bar stayed
+    empty at "1 of 10"."""
+
+    def test_progress_says_when_the_log_went_on_and_the_steps_did_not(self):
+        import os
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = started(tmp)
+            steps_file = repo / ".keryx" / "runs" / "pg" / "steps.json"
+            code, out, err = cli(repo, ["progress", "--slug", "pg", "--live", "x", "--next", "y"], env)
+            self.assertNotIn("steps last changed", err)
+            an_hour_ago = time.time() - 3600
+            os.utime(steps_file, (an_hour_ago, an_hour_ago))
+            for n in range(5):
+                self.assertEqual(cli(repo, ["log", "--slug", "pg", "check", f"round {n}", "why", "ev", "ok"], env)[0], 0)
+            code, out, err = cli(repo, ["progress", "--slug", "pg", "--live", "x", "--next", "y"], env)
+            self.assertEqual(code, 0, out + err)
+            self.assertIn("pg: 6 log rows since its steps last changed", err)  # the intake row and these five
+            self.assertIn("keryx.py step --slug pg", err)
+            self.assertNotIn("steps last changed", out)
+            self.assertEqual(cli(repo, ["step", "--slug", "pg", "3", "done"], env)[0], 0)
+            code, out, err = cli(repo, ["progress", "--slug", "pg", "--live", "x", "--next", "y"], env)
+            self.assertNotIn("steps last changed", err)
+
+
 class NeverRetyped(unittest.TestCase):
     def test_the_command_says_to_paste_the_block_as_printed(self):
         with tempfile.TemporaryDirectory() as tmp:
