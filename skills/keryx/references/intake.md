@@ -40,6 +40,8 @@ Before planning, a short list:
 
 For anything outside the repository (a library, an API, a CLI flag), read the current official docs for the installed version before relying on it. *(owner)*
 
+**A research agent.** When the owner set one (`config.json` `"research": {"agent": "codex"}`, saved with `keryx.py setup --research codex`), hand that research to it: `keryx.py research --slug <slug> "<question>"`, one question per call. It runs Codex with the owner's own Codex login, read-only, with live web search and without the owner's Codex config, plugins, apps and memories; it prints the answer with its sources, saves it as `<state>/research/NN.md` and logs a `ground-truth` row. Exit 3 means no research agent is set (the default) and exit 1 that the run failed: research it yourself then. The answer is a claim: open the source of anything a decision rests on before you rely on it. *(owner)*
+
 ## Scope
 
 What the owner accepted is the task. When the work turns out to need something else (a refactor, a schema change, a second feature), log it, finish the task, and propose the rest as a new task with its own intake. *(evidence)*
