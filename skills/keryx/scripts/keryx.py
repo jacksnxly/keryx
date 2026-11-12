@@ -1777,18 +1777,24 @@ def _cell(text: str) -> str:
     return _one_line(text).replace("|", "\\|")
 
 
-def _waiting(d: Path) -> tuple[str, list[str]]:
-    """The Waiting cell, and the run's own open questions as a numbered list for under the table: each with
-    what it blocks and its options, the recommended one in bold. Long text belongs under the table, not in it."""
-    questions = _run_questions(d)
-    if not questions:
+def _waiting(folders: list[Path]) -> tuple[str, list[str]]:
+    """The Waiting cell, and the open questions of the runs named (each with its slices) as a numbered list for
+    under the table: each with what it blocks and its options, the recommended one in bold, and with its run's
+    name when the block covers several runs. Long text belongs under the table, not in it."""
+    found = []
+    for d in folders:
+        found.extend((cells[0], d.name, number, cells) for number, cells in _run_questions(d))
+    found.sort(key=lambda item: item[:3])
+    if not found:
         return "Nothing", []
-    count = len(questions)
+    count = len(found)
     lines = []
-    for number, (_, cells) in enumerate(questions, 1):
+    for number, (_, run, _, cells) in enumerate(found, 1):
         question = _one_line(cells[2][len("owner:"):])
-        blocks = "" if cells[3] in {"", "-", "'-"} else f" (blocks: {_one_line(cells[3])})"
-        lines.append(f"{number}. **{question}**{blocks}")
+        notes = [run] if len(folders) > 1 else []
+        if cells[3] not in {"", "-", "'-"}:
+            notes.append(f"blocks: {_one_line(cells[3])}")
+        lines.append(f"{number}. **{question}**" + (f" ({'; '.join(notes)})" if notes else ""))
         options = [] if cells[4] in {"", "-", "'-"} else cells[4].split(" | ")
         for option in options:
             option = _one_line(option)
@@ -4433,20 +4439,36 @@ def cmd_step(args) -> int:
     return 0
 
 
-def cmd_progress(args) -> int:
-    """The status block that closes a message, or the whole plan (--full), from the run's declared steps.
-    The block is a two-column table whose cells stay short enough for a terminal to keep drawing it as a table
-    (ROW_WIDTH), with single-word labels that cannot wrap and the open decisions as a list under it. The whole
-    plan is a numbered list: four columns of free text are what a narrow terminal stacks."""
-    steps = _read_steps(args.slug)
+def _step_place(steps: list[dict]) -> tuple[int | None, str, str]:
+    """(the current step's number or None when all are done, "3 of 7[, failed]" or "7 of 7 done", the bar)."""
     total = len(steps)
     current = next((number for number, step in enumerate(steps, 1)
                     if step["status"] in {"running", "failed"}), None)
     if current is None:
         current = next((number for number, step in enumerate(steps, 1) if step["status"] == "todo"), None)
+    if current is None:
+        place = f"{total} of {total} done"
+    else:
+        place = f"{current} of {total}" + (", failed" if steps[current - 1]["status"] == "failed" else "")
+    symbols = {"done": "■", "running": "▶", "failed": "x", "todo": "·"}
+    width = 2 if total > 10 else 4
+    return current, place, " ".join(symbols[step["status"]] * width for step in steps)
+
+
+def cmd_progress(args) -> int:
+    """The status block that closes a message, or the whole plan (--full), from the runs' declared steps.
+    The block is a two-column table whose cells stay short enough for a terminal to keep drawing it as a table
+    (ROW_WIDTH), with single-word labels that cannot wrap and the open decisions as a list under it. A session
+    that drives several runs names them all and gets one row with a bar per run; a session without a run gets
+    the last three rows. The whole plan is a numbered list: four columns of free text are what a narrow
+    terminal stacks."""
+    slugs = list(dict.fromkeys(args.slug))
     if args.full:
-        place = f"{total} of {total} done" if current is None else f"step {current} of {total}"
-        print(f"**The plan** · {place}")
+        if len(slugs) != 1:
+            raise LoopError("--full prints the plan of one run: give exactly one --slug")
+        steps = _read_steps(slugs[0])
+        current, place, _ = _step_place(steps)
+        print(f"**The plan** · {place if current is None else 'step ' + place.partition(',')[0]}")
         print()
         for number, step in enumerate(steps, 1):
             status = step["status"]
@@ -4460,29 +4482,51 @@ def cmd_progress(args) -> int:
     if args.live is None or args.next is None:
         raise LoopError("progress needs --live TEXT and --next TEXT (or --full)")
     live, upcoming = _cell(args.live), _cell(args.next)
-    for flag, text in (("--live", live), ("--next", upcoming)):
+    texts = [("--live", live), ("--next", upcoming)]
+    if args.waiting is not None:
+        if slugs:
+            raise LoopError("--waiting is for a session without a run: with --slug the Waiting row is the run's "
+                            "own open questions (keryx.py ask)")
+        texts.append(("--waiting", _cell(args.waiting)))
+    for flag, text in texts:
         if _shown_width(text) > ROW_WIDTH:
             raise LoopError(f"{flag} shows {_shown_width(text)} characters; a row of the status block holds "
                             f"{ROW_WIDTH}, or the terminal stops drawing the table: say it shorter and put the "
                             "detail in the message above the block")
-    names = [_cell(step["name"].partition(":")[0]) for step in steps]
-    if current is None:
-        place = f"{total} of {total} done"
+    rows = []
+    if not slugs:
+        rows.append("| Step | no run |")
+        waiting, decisions = (_cell(args.waiting) if args.waiting is not None else "Nothing"), []
     else:
-        place = f"{current} of {total}" + (", failed" if steps[current - 1]["status"] == "failed" else "")
-    symbols = {"done": "■", "running": "▶", "failed": "x", "todo": "·"}
-    width = 2 if total > 10 else 4
-    bar = " ".join(symbols[step["status"]] * width for step in steps)
-    waiting, decisions = _waiting(slug_dir(args.slug, must_exist=False))
-    print(f"| Step | {place} · `{bar}` |")
-    print("|---|---|")
-    print(f"| **Plan** | {_plan_cell(names, current)} |")
-    print(f"| **Live** | {live} |")
-    print(f"| **Waiting** | {waiting} |")
-    print(f"| **Next** | {upcoming} |")
+        runs = [(slug, _read_steps(slug)) for slug in slugs]
+        waiting, decisions = _waiting([slug_dir(slug, must_exist=False) for slug in slugs])
+    if len(slugs) == 1:
+        steps = runs[0][1]
+        current, place, bar = _step_place(steps)
+        names = [_cell(step["name"].partition(":")[0]) for step in steps]
+        rows.append(f"| Step | {place} · `{bar}` |")
+        rows.append("|---|---|")
+        rows.append(f"| **Plan** | {_plan_cell(names, current)} |")
+    else:
+        if slugs:
+            rows.append(f"| Step | {len(slugs)} runs |")
+        rows.append("|---|---|")
+        for slug, steps in (runs if slugs else []):
+            current, place, bar = _step_place(steps)
+            cell = f"{place} · `{bar}`"
+            if current is not None:
+                named = f"{cell} · {_cell(steps[current - 1]['name'].partition(':')[0])}"
+                cell = named if _shown_width(named) <= ROW_WIDTH else cell
+            rows.append(f"| **{slug}** | {cell} |")
+    rows.append(f"| **Live** | {live} |")
+    rows.append(f"| **Waiting** | {waiting} |")
+    rows.append(f"| **Next** | {upcoming} |")
+    print("\n".join(rows))
     if decisions:
         print()
         print("\n".join(decisions))
+    print("keryx: paste the block as printed, after a blank line, as the last thing in the message; never retype it",
+          file=sys.stderr)
     return 0
 
 
@@ -4739,9 +4783,11 @@ def main(argv=None) -> int:
     step.add_argument("status", choices=["done", "running", "todo", "failed"])
     step.add_argument("--note")
     progress = sub.add_parser("progress")
-    progress.add_argument("--slug", required=True)
+    progress.add_argument("--slug", action="append", default=[],
+                          help="the run; give it once per run when the session drives several")
     progress.add_argument("--live")
     progress.add_argument("--next")
+    progress.add_argument("--waiting", help="without a run: what waits on the owner (default: Nothing)")
     progress.add_argument("--full", action="store_true")
     repo = sub.add_parser("repo")
     repo.add_argument("--ci", help="the command this repository uses for CI")
