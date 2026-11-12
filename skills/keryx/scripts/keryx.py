@@ -2854,9 +2854,9 @@ def cmd_setup(args) -> int:
 
 
 def research_command(out: str, prompt: str, model: str | None, effort: str | None) -> list[str]:
-    """The read-only `codex exec` for one research question. The owner's config, plugins, apps and memories
-    stay out, and the prompt is a single argument after `--` so a question may start with `-`."""
-    cmd = ["codex", "exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
+    """The read-only `codex exec` for one research question. The owner's config, execpolicy rules, plugins,
+    apps and memories stay out, and the prompt is a single argument after `--` so a question may start with `-`."""
+    cmd = ["codex", "exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
            "--disable", "plugins", "--disable", "remote_plugin", "--disable", "apps", "--disable", "memories",
            "-s", "read-only", "-c", 'approval_policy="never"', "-c", 'web_search="live"']
     if model:
