@@ -80,8 +80,25 @@ class ClosingBlock(unittest.TestCase):
             self.assertEqual(cli(repo, ["ask", "Rotate the secret?"], env)[0], 0)
             lines = block(repo, env)
             self.assertEqual(lines[6], "- **Waiting on you:** 2 decisions")
-            self.assertIn("  2. **Rotate the secret?**", lines)
+            numbered = sorted(line[:5] for line in lines if line.endswith("**Rotate the secret?**")
+                              or "**Which bar?**" in line)
+            self.assertEqual(numbered, ["  1. ", "  2. "])
             self.assertEqual(lines[-1], "- **Next:** check it")
+
+    def test_questions_keep_their_order_oldest_first_whatever_the_folders_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = started(tmp)
+            head = "ts\tphase\tdecision\twhy\tevidence\tresult\n"
+            for slug, stamp, question in (("aa", "2026-02-01T00:00:00Z", "Newer?"), ("zz", "2026-01-01T00:00:00Z", "Older?"),
+                                          ("mm", "2026-01-15T00:00:00Z", "Middle?")):
+                folder = repo / ".keryx" / "runs" / slug
+                folder.mkdir(parents=True)
+                (folder / "decisions.tsv").write_text(f"{head}{stamp}\twaiting\towner: {question}\t-\t-\topen\n")
+            lines = block(repo, env)
+            self.assertEqual([line for line in lines if line.startswith("  ")],
+                             ["  1. **Older?**", "  2. **Middle?**", "  3. **Newer?**"])
+            inbox = cli(repo, ["inbox"], env)[1].splitlines()
+            self.assertEqual([line.rsplit("  ", 1)[-1] for line in inbox], ["Older?", "Middle?", "Newer?"])
 
     def test_a_pipe_or_a_line_break_in_the_text_stays_one_plain_line(self):
         with tempfile.TemporaryDirectory() as tmp:
