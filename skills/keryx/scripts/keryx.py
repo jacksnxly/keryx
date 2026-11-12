@@ -2893,6 +2893,20 @@ def _research_number(folder: Path) -> str:
     return f"{highest + 1:02d}"
 
 
+def _reserve_research(folder: Path, question: str) -> str:
+    """Claim the next NN by creating NN.md exclusively, before the agent runs, so two research calls that
+    overlap in one folder (parallel sessions share `.keryx/research/`) never take the same number."""
+    folder.mkdir(parents=True, exist_ok=True)
+    while True:
+        number = _research_number(folder)
+        try:
+            with (folder / f"{number}.md").open("x") as fh:
+                fh.write(f"# Research {number}\n\nQuestion: {question}\n\nRunning.\n")
+            return number
+        except FileExistsError:
+            continue
+
+
 def _research_prompt(question: str) -> str:
     """The research prompt with this question and the working directory filled in.
 
@@ -2954,8 +2968,7 @@ def cmd_research(args) -> int:
         return 3
     question = args.question
     folder, d = _research_folder(args.slug)
-    folder.mkdir(parents=True, exist_ok=True)
-    number = _research_number(folder)
+    number = _reserve_research(folder, question)
     saved = folder / f"{number}.md"
     answer_path = folder / f"{number}.answer.md"
     events_path = folder / f"{number}.jsonl"
@@ -2970,15 +2983,16 @@ def cmd_research(args) -> int:
     except FileNotFoundError:
         return _fail_research(d, saved, agent, question, "codex not on PATH")
     except subprocess.TimeoutExpired as exc:
-        events_path.write_text(_captured(exc.stdout))
+        events_path.write_text(redact(_captured(exc.stdout)))
         detail = _captured(exc.stderr).strip()
         timed = f"timed out after {args.timeout}s"
         return _fail_research(d, saved, agent, question, f"{timed}: {detail}" if detail else timed)
     except OSError as exc:
         return _fail_research(d, saved, agent, question, str(exc))
-    events_path.write_text(res.stdout or "")
+    events_path.write_text(redact(res.stdout or ""))
     outcome = codex_outcome(_research_events(res.stdout or ""), res.returncode)
-    answer = _answer_file(answer_path) or (outcome.get("result") or "").strip()
+    answer = redact(_answer_file(answer_path) or (outcome.get("result") or "").strip())
+    answer_path.unlink(missing_ok=True)  # NN.md keeps the masked answer; the raw copy is not kept
     if outcome.get("status") == "FINISHED" and answer:
         shown = f"{agent} {model}" if model else agent
         saved.write_text(f"# Research {number}\n\nQuestion: {question}\n\nAgent: {shown}\n\n{answer}\n")
@@ -4957,6 +4971,17 @@ def cmd_recall(args) -> int:
     return 0
 
 
+def _positive_seconds(text: str) -> int:
+    """A whole number of seconds, at least 1."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number of seconds") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1 second")
+    return value
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="keryx.py", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -4976,7 +5001,7 @@ def main(argv=None) -> int:
     rs = sub.add_parser("research",
                         help="ask the research agent; with none set, the session researches the question itself")
     rs.add_argument("--slug", help="save the answer in this run and log a ground-truth row")
-    rs.add_argument("--timeout", type=int, default=900, metavar="SECONDS",
+    rs.add_argument("--timeout", type=_positive_seconds, default=900, metavar="SECONDS",
                     help="seconds to wait for the agent (default 900)")
     rs.add_argument("question", metavar="QUESTION")
     ex = sub.add_parser("executors")
