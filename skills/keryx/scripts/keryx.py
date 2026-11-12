@@ -2935,9 +2935,13 @@ def _log_research(d: Path | None, agent: str, question: str, evidence: str, resu
     append_log(d, "ground-truth", f"research ({agent}): {question}", "research agent", evidence, result)
 
 
-def _fail_research(d: Path | None, agent: str, question: str, evidence: str, detail: str) -> int:
-    print(f"research failed: {redact(detail)[-300:]}; research it yourself")
-    _log_research(d, agent, question, evidence, "failed")
+def _fail_research(d: Path | None, saved: Path, agent: str, question: str, detail: str) -> int:
+    """Say the run failed and that the session researches the question itself. NN.md keeps the question and
+    the failure, so the log row's evidence exists and the next question takes the next number."""
+    shown = redact(detail)[-300:]
+    saved.write_text(f"# Research {saved.stem}\n\nQuestion: {question}\n\nAgent: {agent}\n\nFailed: {shown}\n")
+    print(f"research failed: {shown}; research it yourself")
+    _log_research(d, agent, question, repo_relative(saved), "failed")
     return 1
 
 
@@ -2964,14 +2968,14 @@ def cmd_research(args) -> int:
             cwd=os.getcwd(), stdin=subprocess.DEVNULL, capture_output=True, text=True,
             env=dict(os.environ), timeout=args.timeout)
     except FileNotFoundError:
-        return _fail_research(d, agent, question, evidence, "codex not on PATH")
+        return _fail_research(d, saved, agent, question, "codex not on PATH")
     except subprocess.TimeoutExpired as exc:
         events_path.write_text(_captured(exc.stdout))
         detail = _captured(exc.stderr).strip()
         timed = f"timed out after {args.timeout}s"
-        return _fail_research(d, agent, question, evidence, f"{timed}: {detail}" if detail else timed)
+        return _fail_research(d, saved, agent, question, f"{timed}: {detail}" if detail else timed)
     except OSError as exc:
-        return _fail_research(d, agent, question, evidence, str(exc))
+        return _fail_research(d, saved, agent, question, str(exc))
     events_path.write_text(res.stdout or "")
     outcome = codex_outcome(_research_events(res.stdout or ""), res.returncode)
     answer = _answer_file(answer_path) or (outcome.get("result") or "").strip()
@@ -2987,7 +2991,7 @@ def cmd_research(args) -> int:
     else:
         detail = ((outcome.get("result") or "").strip() or (res.stderr or "").strip()
                   or f"exit {res.returncode}")
-    return _fail_research(d, agent, question, evidence, detail)
+    return _fail_research(d, saved, agent, question, detail)
 
 
 def _resets_line(config: dict, ladder: list[str], at: dt.datetime) -> str:
@@ -4953,29 +4957,6 @@ def cmd_recall(args) -> int:
     return 0
 
 
-def _shield_research_question(argv: list[str]) -> list[str]:
-    """Let a research question start with `-`. Known options stay options; the question follows `--`."""
-    if not argv or argv[0] != "research":
-        return argv
-    opts = {"--slug", "--timeout"}
-    i = 1
-    while i < len(argv):
-        arg = argv[i]
-        if arg in ("-h", "--help", "--"):
-            return argv
-        name, eq, _value = arg.partition("=")
-        if name in opts and eq:
-            i += 1
-            continue
-        if arg in opts:
-            if i + 1 >= len(argv):
-                return argv
-            i += 2
-            continue
-        return [*argv[:i], "--", *argv[i:]]
-    return argv
-
-
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="keryx.py", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -5123,9 +5104,7 @@ def main(argv=None) -> int:
     a = sub.add_parser("artifacts")
     a.add_argument("--slug", required=True)
     a.add_argument("--download", action="store_true")
-    if argv is None:
-        argv = sys.argv[1:]
-    args = p.parse_args(_shield_research_question(list(argv)))
+    args = p.parse_args(argv)
     handler = globals()[f"cmd_{args.cmd.replace('-', '_')}"]
     try:
         return handler(args)
