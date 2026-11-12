@@ -1740,18 +1740,12 @@ def _print_inbox(environ: dict, include_roots: bool) -> None:
         print("inbox empty")
 
 
-def _repository_questions(environ: dict) -> list[tuple[int, list[str]]]:
-    runs = state_root()
-    if not runs.is_dir():
-        return []
-    try:
-        folders = list(runs.iterdir())
-    except OSError:
-        return []
+def _run_questions(d: Path) -> list[tuple[int, list[str]]]:
+    """The open questions of one run and of the slices it names — never another run's: a session shows what it
+    asked, and `inbox` is the one list across runs (seen 2026-11-12: four parallel sessions each showed one run's
+    ten questions, and the owner answered once and then told three more sessions "already answered")."""
     found = []
-    for folder in folders:
-        if not folder.is_dir():
-            continue
+    for folder in run_folders(d):
         try:
             rows = read_log_rows(folder)
         except (OSError, ValueError):
@@ -1767,10 +1761,10 @@ def _one_line(text: str) -> str:
     return " ".join(str(text).split())
 
 
-def _waiting_lines(environ: dict) -> list[str]:
-    """The Waiting-on-you item of the status block: this repository's open inbox questions as a nested list,
+def _waiting_lines(d: Path) -> list[str]:
+    """The Waiting-on-you item of the status block: this run's own open questions as a nested list,
     the recommended option in bold. A list, never a table: a table's layout depends on the terminal's width."""
-    questions = _repository_questions(environ)
+    questions = _run_questions(d)
     if not questions:
         return ["- **Waiting on you:** Nothing"]
     count = len(questions)
@@ -4442,7 +4436,7 @@ def cmd_progress(args) -> int:
     print()
     print(f"- **Plan:** {plan}")
     print(f"- **Live:** {_one_line(args.live)}")
-    print("\n".join(_waiting_lines(dict(os.environ))))
+    print("\n".join(_waiting_lines(slug_dir(args.slug, must_exist=False))))
     print(f"- **Next:** {_one_line(args.next)}")
     return 0
 
