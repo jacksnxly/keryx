@@ -35,8 +35,11 @@ writes prompt or are denied. Runs started before 1.2 keep <git-common-dir>/curso
 
 Usage (run from inside the target repository):
   keryx.py preflight [--runner cli|cloud|glm|subagent|<provider>]
-  keryx.py setup     [--executors LIST] [--order ladder|resets] [--reset RUNNER=WHEN[/EVERY]] [--detect]
-                     (save this machine's ladder; probe what works here)
+  keryx.py setup     [--executors LIST] [--order ladder|resets] [--reset RUNNER=WHEN[/EVERY]]
+                     [--research AGENT|none] [--detect]
+                     (save this machine's ladder and its research agent; probe what works here)
+  keryx.py research  [--slug SLUG] [--timeout SECONDS] QUESTION
+                     (ask the research agent; with none set, the session researches the question itself)
   keryx.py executors [--after RUNNER]                (the ladder still available; the next executor after a runner)
   keryx.py remember [--repo] NOTE                   (keep a choice or trap for later runs; never a secret)
   keryx.py recall                                   (print the user's and this repository's keryx memory)
@@ -1044,6 +1047,8 @@ def write_codex_home(d: Path, provider: dict) -> Path:
 # The executors a person may have, in the order to try them: cli = Cursor CLI, glm = GLM Coding Plan,
 # cloud = Cursor Cloud Agent, subagent = a Claude subagent the coordinator dispatches itself.
 EXECUTORS = ("cli", "glm", "cloud", "subagent")
+# Optional, and off until the owner sets one. Absent research leaves every session as it was.
+RESEARCH_AGENTS = ("codex",)
 
 # Files whose changes are architecture or release gates: the coordinator reviews those itself instead
 # of trusting an executor with them. A repository's own guard or boundary tests belong in
@@ -1299,9 +1304,43 @@ def _validated_providers(path: Path, providers: object) -> dict:
     return out
 
 
+def _validated_research(path: Path, value: object) -> dict | None:
+    """The research agent, or None when it is absent or null. Every refusal names `path` and `research`."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise LoopError(f'{path}: "research" must be an object')
+    unknown = sorted(set(value) - {"agent", "model", "effort"})
+    if unknown:
+        raise LoopError(f'{path}: "research" has unknown {", ".join(unknown)}')
+    agent = value.get("agent")
+    if agent not in RESEARCH_AGENTS:
+        raise LoopError(f"{path}: unknown research agent {agent!r}; "
+                        f"choose from {', '.join(RESEARCH_AGENTS)}")
+    out = {"agent": agent}
+    for key in ("model", "effort"):
+        if key not in value:
+            continue
+        item = value[key]
+        if not isinstance(item, str) or not item.strip():
+            raise LoopError(f'{path}: "research" {key} must be a non-empty string')
+        out[key] = item.strip()
+    return out
+
+
+def _kept_research(current: object, agent: str) -> dict:
+    """What `setup --research` saves: the agent, plus model and effort when that agent is already the one set."""
+    research: dict = {"agent": agent}
+    if isinstance(current, dict) and current.get("agent") == agent:
+        for key in ("model", "effort"):
+            if key in current:
+                research[key] = current[key]
+    return research
+
+
 def _config_view(path: Path, data: object) -> dict:
-    """executors, order, resets, providers, caps and roots. Unknown keys are ignored. Every refusal names
-    `path` first.
+    """executors, order, resets, providers, caps, roots and research. Unknown keys are ignored. Every refusal
+    names `path` first.
 
     While the order is `ladder` a bad `resets` is read as none, so the dates can never break the saved order;
     in the `resets` order it is refused."""
@@ -1333,7 +1372,7 @@ def _config_view(path: Path, data: object) -> dict:
     if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
         raise LoopError(f'{path}: "roots" must be a list of folders that hold repositories')
     return {"executors": ladder, "order": order, "resets": resets, "providers": providers,
-            "maxParallel": caps, "roots": roots}
+            "maxParallel": caps, "roots": roots, "research": _validated_research(path, data.get("research"))}
 
 
 def load_config(environ: dict) -> dict:
@@ -1341,11 +1380,12 @@ def load_config(environ: dict) -> dict:
 
     `order` is `ladder` (the saved order) unless the file says `resets`. `resets` is read either way
     and changes the order only when `order` is `resets`. `providers` is the declared provider runners,
-    an empty mapping when none are declared."""
+    an empty mapping when none are declared. `research` is the optional research agent, or None when
+    none is set, a missing file included."""
     path = config_path(environ)
     if not path.exists():
         return {"executors": ["subagent"], "order": "ladder", "resets": {}, "providers": {},
-                "maxParallel": {}, "roots": []}
+                "maxParallel": {}, "roots": [], "research": None}
     try:
         data = json.loads(path.read_text())
     except ValueError as exc:
@@ -2750,19 +2790,30 @@ def _print_setup(environ: dict) -> None:
         every = spec.get("every") if isinstance(spec, dict) else None
         nxt = spec.get("next") if isinstance(spec, dict) else ""
         print(f"{name} {nxt}" + (f" {every}" if every else ""))
+    research = cfg.get("research")
+    if research:
+        line = f"research: {research['agent']}"
+        if research.get("model"):
+            line += f" model {research['model']}"
+        if research.get("effort"):
+            line += f" effort {research['effort']}"
+        print(line)
+    else:
+        print("research: none (the session researches itself)")
     print(config_path(environ))
 
 
 def cmd_setup(args) -> int:
-    """Save the ladder, the order and when each plan resets, or print what is saved.
+    """Save the ladder, the order, when each plan resets and the research agent, or print what is saved.
 
     Starts from the whole saved file, so a key keryx does not know stays. The file is written only
     after `load_config` would read the result: setup never saves a file keryx then refuses, and the off
-    switch, `--order ladder`, works even while a bad date stops the reset order."""
+    switch, `--order ladder`, works even while a bad date stops the reset order. `--research` needs a
+    saved ladder, as `--order` does."""
     environ = dict(os.environ)
     path = config_path(environ)
     reset_args = list(args.reset or [])
-    writing = bool(args.executors or args.order or reset_args)
+    writing = bool(args.executors or args.order or reset_args or args.research is not None)
     if writing:
         data, broken = _setup_base(path, bool(args.executors))
         providers = data.get("providers")
@@ -2779,6 +2830,11 @@ def cmd_setup(args) -> int:
             for text in reset_args:
                 _apply_reset(path, resets, text, providers)
             data["resets"] = resets
+        if args.research is not None:
+            if args.research == "none":
+                data.pop("research", None)
+            else:
+                data["research"] = _kept_research(data.get("research"), args.research)
         data["updatedAt"] = now()
         _config_view(path, data)
         if broken:
@@ -2792,6 +2848,146 @@ def cmd_setup(args) -> int:
     if not writing and not args.detect:
         _print_setup(environ)
     return 0
+
+
+# ---------------------------------------------------------------- research agent
+
+
+def research_command(out: str, prompt: str, model: str | None, effort: str | None) -> list[str]:
+    """The read-only `codex exec` for one research question. The owner's config, plugins, apps and memories
+    stay out, and the prompt is a single argument after `--` so a question may start with `-`."""
+    cmd = ["codex", "exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
+           "--disable", "plugins", "--disable", "remote_plugin", "--disable", "apps", "--disable", "memories",
+           "-s", "read-only", "-c", 'approval_policy="never"', "-c", 'web_search="live"']
+    if model:
+        cmd += ["-m", model]
+    if effort:
+        cmd += ["-c", f'model_reasoning_effort="{effort}"']
+    return cmd + ["-o", out, "--", prompt]
+
+
+def _research_folder(slug: str | None) -> tuple[Path, Path | None]:
+    """The folder that holds NN.md, and the run directory to log into when `--slug` was given.
+
+    A slug saves under that run (and `.keryx` ignores itself, as `log` does). No slug saves beside the
+    runs, in the main checkout's `.keryx/research`."""
+    if slug:
+        d = slug_dir(slug, must_exist=False)
+        runs = state_root()
+        if d.parent == runs:
+            ensure_ignored(runs.parent)
+        return d / "research", d
+    root = main_worktree() / ".keryx"
+    ensure_ignored(root)
+    return root / "research", None
+
+
+def _research_number(folder: Path) -> str:
+    """The next two-digit NN, one past the highest NN.md already in the folder."""
+    highest = 0
+    if folder.is_dir():
+        for path in folder.iterdir():
+            match = re.fullmatch(r"(\d{2})\.md", path.name)
+            if match and path.is_file():
+                highest = max(highest, int(match.group(1)))
+    return f"{highest + 1:02d}"
+
+
+def _research_prompt(question: str) -> str:
+    """The research prompt with this question and the working directory filled in.
+
+    `{cwd}` is replaced first, so braces in the question stay literal. `str.replace`, never `str.format`."""
+    text = (PROMPTS / "research.md").read_text()
+    return text.replace("{cwd}", os.getcwd()).replace("{question}", question)
+
+
+def _research_events(text: str) -> list[dict]:
+    events = []
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _captured(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
+def _answer_file(path: Path) -> str:
+    try:
+        text = path.read_text()
+    except OSError:
+        return ""
+    return text.strip()
+
+
+def _log_research(d: Path | None, agent: str, question: str, evidence: str, result: str) -> None:
+    if d is None:
+        return
+    append_log(d, "ground-truth", f"research ({agent}): {question}", "research agent", evidence, result)
+
+
+def _fail_research(d: Path | None, agent: str, question: str, evidence: str, detail: str) -> int:
+    print(f"research failed: {redact(detail)[-300:]}; research it yourself")
+    _log_research(d, agent, question, evidence, "failed")
+    return 1
+
+
+def cmd_research(args) -> int:
+    """Hand the question to the research agent. With none set, say so and return 3, before any git call."""
+    spec = load_config(os.environ)["research"]
+    if spec is None:
+        print("no research agent set: research this yourself "
+              "(keryx.py setup --research codex hands research to Codex)")
+        return 3
+    question = args.question
+    folder, d = _research_folder(args.slug)
+    folder.mkdir(parents=True, exist_ok=True)
+    number = _research_number(folder)
+    saved = folder / f"{number}.md"
+    answer_path = folder / f"{number}.answer.md"
+    events_path = folder / f"{number}.jsonl"
+    evidence = repo_relative(saved)
+    agent = spec["agent"]
+    model = spec.get("model")
+    try:
+        res = subprocess.run(
+            research_command(str(answer_path), _research_prompt(question), model, spec.get("effort")),
+            cwd=os.getcwd(), stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            env=dict(os.environ), timeout=args.timeout)
+    except FileNotFoundError:
+        return _fail_research(d, agent, question, evidence, "codex not on PATH")
+    except subprocess.TimeoutExpired as exc:
+        events_path.write_text(_captured(exc.stdout))
+        detail = _captured(exc.stderr).strip()
+        timed = f"timed out after {args.timeout}s"
+        return _fail_research(d, agent, question, evidence, f"{timed}: {detail}" if detail else timed)
+    except OSError as exc:
+        return _fail_research(d, agent, question, evidence, str(exc))
+    events_path.write_text(res.stdout or "")
+    outcome = codex_outcome(_research_events(res.stdout or ""), res.returncode)
+    answer = _answer_file(answer_path) or (outcome.get("result") or "").strip()
+    if outcome.get("status") == "FINISHED" and answer:
+        shown = f"{agent} {model}" if model else agent
+        saved.write_text(f"# Research {number}\n\nQuestion: {question}\n\nAgent: {shown}\n\n{answer}\n")
+        print(answer)
+        print(f"research: {evidence}")
+        _log_research(d, agent, question, evidence, "answered")
+        return 0
+    if outcome.get("status") == "FINISHED":
+        detail = "empty answer"
+    else:
+        detail = ((outcome.get("result") or "").strip() or (res.stderr or "").strip()
+                  or f"exit {res.returncode}")
+    return _fail_research(d, agent, question, evidence, detail)
 
 
 def _resets_line(config: dict, ladder: list[str], at: dt.datetime) -> str:
@@ -4757,6 +4953,29 @@ def cmd_recall(args) -> int:
     return 0
 
 
+def _shield_research_question(argv: list[str]) -> list[str]:
+    """Let a research question start with `-`. Known options stay options; the question follows `--`."""
+    if not argv or argv[0] != "research":
+        return argv
+    opts = {"--slug", "--timeout"}
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-h", "--help", "--"):
+            return argv
+        name, eq, _value = arg.partition("=")
+        if name in opts and eq:
+            i += 1
+            continue
+        if arg in opts:
+            if i + 1 >= len(argv):
+                return argv
+            i += 2
+            continue
+        return [*argv[:i], "--", *argv[i:]]
+    return argv
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="keryx.py", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -4771,6 +4990,14 @@ def main(argv=None) -> int:
                     help="when RUNNER's plan resets (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ, "
                          "optionally /month or /week); RUNNER=none clears it")
     su.add_argument("--detect", action="store_true", help="print one line per executor: can this machine run it?")
+    su.add_argument("--research", metavar="AGENT|none",
+                    help="save a research agent (codex), or none so the session researches itself")
+    rs = sub.add_parser("research",
+                        help="ask the research agent; with none set, the session researches the question itself")
+    rs.add_argument("--slug", help="save the answer in this run and log a ground-truth row")
+    rs.add_argument("--timeout", type=int, default=900, metavar="SECONDS",
+                    help="seconds to wait for the agent (default 900)")
+    rs.add_argument("question", metavar="QUESTION")
     ex = sub.add_parser("executors")
     ex.add_argument("--after", metavar="RUNNER",
                     help="print the next executor after this one that is not at a usage limit (inline = the coordinator)")
@@ -4896,7 +5123,9 @@ def main(argv=None) -> int:
     a = sub.add_parser("artifacts")
     a.add_argument("--slug", required=True)
     a.add_argument("--download", action="store_true")
-    args = p.parse_args(argv)
+    if argv is None:
+        argv = sys.argv[1:]
+    args = p.parse_args(_shield_research_question(list(argv)))
     handler = globals()[f"cmd_{args.cmd.replace('-', '_')}"]
     try:
         return handler(args)
