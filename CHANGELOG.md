@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.1 — 2026-11-12
+
+- **The status block is a list, not a table.** In a terminal, a Markdown table is drawn as a grid, as stacked "Header: value" records or as raw pipes, by the terminal's width: at 60 columns the block of 1.7.0 repeated its step and bar as field names on every row, and at 80 and 120 columns its labels were squeezed and wrapped. `keryx.py progress` now prints a bold line with the step, the bar as a code span, and **Plan**, **Live**, **Waiting on you** and **Next** as list items, with each open question and its options as a nested list; `--full` prints the plan as a numbered list. Checked in the terminal at 50, 60, 80 and 120 columns.
+- Open questions are listed oldest first, in the status block and in `inbox`, so a question keeps its number from one message to the next: the order used to follow the file system's folder listing, which differs between macOS and Linux.
+
 ## 1.7.0 — 2026-11-12
 
 From five days of field data after 1.6.0 (162 run folders in 11 repositories, 329 executor rounds, 273 owner prompts): inside a run keryx rarely stalled, but the owner was still the scheduler between runs — about 50 prompts were a "go", 15 a "what's next?", 14 a "post merge cleanup" — and limits, review loops and a `finish` with one shape cost rounds.

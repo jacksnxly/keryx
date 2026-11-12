@@ -1721,6 +1721,8 @@ def _print_inbox(environ: dict, include_roots: bool) -> None:
                              for number, cells in _open_questions(rows))
             followups.extend((repository, folder.name, number, cells)
                              for number, cells in _open_followups(rows))
+    questions.sort(key=lambda item: (item[3][0], item[0], item[1], item[2]))  # oldest first, whatever the listing's order
+    followups.sort(key=lambda item: (item[3][0], item[0], item[1], item[2]))
     for repository, slug, number, cells in questions:
         print(f"{repository}/{slug} row {number}  {_short_age(cells[0])}  {cells[2][len('owner: '):]}")
         if cells[4] not in {"", "-", "'-"}:
@@ -1738,26 +1740,6 @@ def _print_inbox(environ: dict, include_roots: bool) -> None:
         print("inbox empty")
 
 
-def _markdown_cell(text: str) -> str:
-    return text.replace("\r", " ").replace("\n", " ").replace("|", "\\|")
-
-
-def _question_summary(cells: list[str]) -> str:
-    question = cells[2][len("owner: "):]
-    options = [] if cells[4] in {"", "-", "'-"} else cells[4].split(" | ")
-    rendered = []
-    for option in options:
-        if option.endswith(" (recommended)"):
-            option = option[:-len(" (recommended)")]
-            rendered.append(f"**{option}** (recommended)")
-        else:
-            rendered.append(option)
-    summary = f"**{question}**"
-    if cells[3] not in {"", "-", "'-"}:
-        summary += f" (blocks: {cells[3]})"
-    return " · ".join([summary, *rendered])
-
-
 def _repository_questions(environ: dict) -> list[tuple[int, list[str]]]:
     runs = state_root()
     if not runs.is_dir():
@@ -1766,7 +1748,7 @@ def _repository_questions(environ: dict) -> list[tuple[int, list[str]]]:
         folders = list(runs.iterdir())
     except OSError:
         return []
-    questions = []
+    found = []
     for folder in folders:
         if not folder.is_dir():
             continue
@@ -1774,19 +1756,36 @@ def _repository_questions(environ: dict) -> list[tuple[int, list[str]]]:
             rows = read_log_rows(folder)
         except (OSError, ValueError):
             continue
-        questions.extend(_open_questions(rows))
-    return questions
+        found.extend((cells[0], folder.name, number, cells) for number, cells in _open_questions(rows))
+    # Oldest first, then by run and row: a folder listing's order differs between file systems, and a
+    # question must keep its number from one message to the next.
+    return [(number, cells) for _, _, number, cells in sorted(found, key=lambda item: item[:3])]
 
 
-def _waiting_line(environ: dict) -> str:
+def _one_line(text: str) -> str:
+    """Text as one line of a list item: line breaks and runs of blanks become one blank."""
+    return " ".join(str(text).split())
+
+
+def _waiting_lines(environ: dict) -> list[str]:
+    """The Waiting-on-you item of the status block: this repository's open inbox questions as a nested list,
+    the recommended option in bold. A list, never a table: a table's layout depends on the terminal's width."""
     questions = _repository_questions(environ)
     if not questions:
-        return "Nothing"
-    summaries = [_question_summary(cells) for _, cells in questions]
-    if len(summaries) == 1:
-        return summaries[0]
-    return f"{len(summaries)} decisions — " + " — ".join(
-        f"({number}) {summary}" for number, summary in enumerate(summaries, 1))
+        return ["- **Waiting on you:** Nothing"]
+    count = len(questions)
+    lines = [f"- **Waiting on you:** {count} decision{'s' if count != 1 else ''}"]
+    for number, (_, cells) in enumerate(questions, 1):
+        question = _one_line(cells[2][len("owner:"):])
+        blocks = "" if cells[3] in {"", "-", "'-"} else f" (blocks: {_one_line(cells[3])})"
+        lines.append(f"  {number}. **{question}**{blocks}")
+        options = [] if cells[4] in {"", "-", "'-"} else cells[4].split(" | ")
+        for option in options:
+            option = _one_line(option)
+            if option.endswith(" (recommended)"):
+                option = f"**{option[:-len(' (recommended)')]}** (recommended)"
+            lines.append(f"     - {option}")
+    return lines
 
 
 def _saved_limits(path: Path) -> dict[str, dict]:
@@ -4401,46 +4400,50 @@ def cmd_step(args) -> int:
 
 
 def cmd_progress(args) -> int:
+    """The status block that closes a message, or the whole plan (--full), from the run's declared steps.
+    Plain Markdown that wraps the same at any width: a bold line, a code span, list items — never a table,
+    which Claude Code draws as a grid, as stacked "Header: value" records or as raw pipes by the terminal's width."""
     steps = _read_steps(args.slug)
-    if args.full:
-        print("| # | Step | Status | Note |")
-        print("|---|---|---|---|")
-        for number, step in enumerate(steps, 1):
-            status = step["status"]
-            shown_status = "to do" if status == "todo" else status
-            active = status in {"running", "failed"}
-            name = f"**{step['name']}**" if active else step["name"]
-            shown_status = f"**{shown_status}**" if active else shown_status
-            note = step.get("note") or ""
-            print(f"| {number} | {_markdown_cell(name)} | {_markdown_cell(shown_status)} | "
-                  f"{_markdown_cell(note)} |")
-        return 0
-    if args.live is None or args.next is None:
-        raise LoopError("progress needs --live TEXT and --next TEXT (or --full)")
+    total = len(steps)
     current = next((number for number, step in enumerate(steps, 1)
                     if step["status"] in {"running", "failed"}), None)
     if current is None:
         current = next((number for number, step in enumerate(steps, 1) if step["status"] == "todo"), None)
-    total = len(steps)
+    if args.full:
+        place = f"{total} of {total} done" if current is None else f"step {current} of {total}"
+        print(f"**The plan** · {place}")
+        print()
+        for number, step in enumerate(steps, 1):
+            status = step["status"]
+            shown = "to do" if status == "todo" else status
+            line = f"{_one_line(step['name'])} — {shown}"
+            if status in {"running", "failed"}:
+                line = f"**{line}**"
+            note = _one_line(step.get("note") or "")
+            print(f"{number}. {line}" + (f" · {note}" if note else ""))
+        return 0
+    if args.live is None or args.next is None:
+        raise LoopError("progress needs --live TEXT and --next TEXT (or --full)")
+    names = [_one_line(step["name"].partition(":")[0]) for step in steps]
     if current is None:
-        heading = f"{total} of {total} done"
+        heading = f"**{total} of {total} done**"
+        plan = " → ".join(names)
     else:
-        heading = f"Step {current} of {total}"
+        failed = " — failed" if steps[current - 1]["status"] == "failed" else ""
+        heading = f"**Step {current} of {total}** · {names[current - 1]}{failed}"
+        plan = " → ".join(f"**[ {name} ]**" if number == current else name
+                          for number, name in enumerate(names, 1))
     symbols = {"done": "■", "running": "▶", "failed": "x", "todo": "·"}
     width = 2 if total > 10 else 4
     bar = " ".join(symbols[step["status"]] * width for step in steps)
-    names = [step["name"].partition(":")[0] for step in steps]
-    if current is None:
-        plan = " → ".join(names)
-    else:
-        plan = " → ".join(f"**[ {name} ]**" if number == current else name
-                          for number, name in enumerate(names, 1))
-    print(f"| {heading} | `{bar}` |")
-    print("|---|---|")
-    print(f"| **Plan** | {_markdown_cell(plan)} |")
-    print(f"| **Live** | {_markdown_cell(args.live)} |")
-    print(f"| **Waiting on you** | {_markdown_cell(_waiting_line(dict(os.environ)))} |")
-    print(f"| **Next** | {_markdown_cell(args.next)} |")
+    print(heading)
+    print()
+    print(f"`{bar}`")
+    print()
+    print(f"- **Plan:** {plan}")
+    print(f"- **Live:** {_one_line(args.live)}")
+    print("\n".join(_waiting_lines(dict(os.environ))))
+    print(f"- **Next:** {_one_line(args.next)}")
     return 0
 
 

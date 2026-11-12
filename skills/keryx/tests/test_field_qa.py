@@ -64,7 +64,7 @@ class QuestionsWithOddText(unittest.TestCase):
             repo, env = started(tmp)
             self.assertEqual(cli(repo, ["ask", "--slug", "pg", "Which bar?", "--blocks", "the merge"], env)[0], 0)
             code, out, err = cli(repo, ["progress", "--slug", "pg", "--live", "x", "--next", "y"], env)
-            self.assertEqual(out.splitlines()[4], "| **Waiting on you** | **Which bar?** (blocks: the merge) |")
+            self.assertIn("  1. **Which bar?** (blocks: the merge)", out.splitlines())
 
 
 if __name__ == "__main__":
