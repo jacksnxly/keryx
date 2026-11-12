@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.0 — 2026-11-12
 
 From five days of field data after 1.6.0 (162 run folders in 11 repositories, 329 executor rounds, 273 owner prompts): inside a run keryx rarely stalled, but the owner was still the scheduler between runs — about 50 prompts were a "go", 15 a "what's next?", 14 a "post merge cleanup" — and limits, review loops and a `finish` with one shape cost rounds.
 
