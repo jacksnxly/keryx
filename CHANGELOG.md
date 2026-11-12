@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.7.2 — 2026-11-12
 
-- **A session's status block shows only its own run's questions.** Since 1.7.0 it showed every open question of the repository, so each parallel session repeated one run's questions: in the field one run asked ten, four sessions showed them, and the owner answered once and then told three more sessions "already answered". **Waiting on you** is now the questions of the run named by `--slug` and of the slices it names; `keryx.py inbox` and `inbox --all` remain the one list across runs.
+- **The status block is a table again, built to stay one.** A terminal draws a Markdown table as a grid only while no cell needs more than about four lines: a 97-character cell held at 50 columns, a 164-character one came out as stacked "Header: value" records at 60. So every cell of the block stays within 96 shown characters: `keryx.py progress` refuses a `--live` or `--next` text longer than that, a long plan folds its finished steps into a count (`8 done → **[Part I]** → Part J → 2 more`), and the open decisions are listed under the table, never inside it. The labels are single words (`Step`, `Plan`, `Live`, `Waiting`, `Next`), which cannot wrap when the table is squeezed. Checked in the terminal at 50, 60, 80, 100 and 120 columns. `--full` stays a numbered list.
+- **A session's status block shows only its own run's questions.** Since 1.7.0 it showed every open question of the repository, so each parallel session repeated one run's questions: in the field one run asked ten, four sessions showed them, and the owner answered once and then told three more sessions "already answered". **Waiting** is now the questions of the run named by `--slug` and of the slices it names; `keryx.py inbox` and `inbox --all` remain the one list across runs.
 
 ## 1.7.1 — 2026-11-12
 

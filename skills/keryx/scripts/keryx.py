@@ -1761,25 +1761,65 @@ def _one_line(text: str) -> str:
     return " ".join(str(text).split())
 
 
-def _waiting_lines(d: Path) -> list[str]:
-    """The Waiting-on-you item of the status block: this run's own open questions as a nested list,
-    the recommended option in bold. A list, never a table: a table's layout depends on the terminal's width."""
+# The terminal draws the status block as a table while no cell needs more than about four lines; one longer cell
+# turns every row into stacked "Header: value" records (seen 2026-11-12: a 97-character cell is a grid at 50
+# columns, a 164-character one is stacked at 60). So a cell shows at most this many characters.
+ROW_WIDTH = 96
+
+
+def _shown_width(text: str) -> int:
+    """How many characters a terminal shows of a cell: without the bold and code markers and the pipe escapes."""
+    return len(text.replace("**", "").replace("`", "").replace("\\|", "|"))
+
+
+def _cell(text: str) -> str:
+    """Text as one table cell: one line, and no pipe that would end the cell."""
+    return _one_line(text).replace("|", "\\|")
+
+
+def _waiting(d: Path) -> tuple[str, list[str]]:
+    """The Waiting cell, and the run's own open questions as a numbered list for under the table: each with
+    what it blocks and its options, the recommended one in bold. Long text belongs under the table, not in it."""
     questions = _run_questions(d)
     if not questions:
-        return ["- **Waiting on you:** Nothing"]
+        return "Nothing", []
     count = len(questions)
-    lines = [f"- **Waiting on you:** {count} decision{'s' if count != 1 else ''}"]
+    lines = []
     for number, (_, cells) in enumerate(questions, 1):
         question = _one_line(cells[2][len("owner:"):])
         blocks = "" if cells[3] in {"", "-", "'-"} else f" (blocks: {_one_line(cells[3])})"
-        lines.append(f"  {number}. **{question}**{blocks}")
+        lines.append(f"{number}. **{question}**{blocks}")
         options = [] if cells[4] in {"", "-", "'-"} else cells[4].split(" | ")
         for option in options:
             option = _one_line(option)
             if option.endswith(" (recommended)"):
                 option = f"**{option[:-len(' (recommended)')]}** (recommended)"
-            lines.append(f"     - {option}")
-    return lines
+            lines.append(f"   - {option}")
+    return f"{count} decision{'s' if count != 1 else ''}, listed below", lines
+
+
+def _plan_cell(names: list[str], current: int | None) -> str:
+    """The plan with the current step in bold brackets. Too long for a row, it folds what is done into a count,
+    and if that is still too long it keeps the steps next to the current one."""
+    def joined(parts: list[tuple[int | None, str]]) -> str:
+        return " → ".join(f"**[{name}]**" if number == current and current is not None else name
+                          for number, name in parts)
+
+    numbered = list(enumerate(names, 1))
+    plan = joined(numbered)
+    if _shown_width(plan) <= ROW_WIDTH:
+        return plan
+    if current is None:
+        return f"all {len(names)} done"
+    if current > 2:
+        plan = joined([(None, f"{current - 1} done")] + numbered[current - 1:])
+        if _shown_width(plan) <= ROW_WIDTH:
+            return plan
+    last = min(current + 1, len(names))
+    window = joined(numbered[current - 1:last])
+    before = f"{current - 1} done → " if current > 1 else ""
+    after = f" → {len(names) - last} more" if last < len(names) else ""
+    return before + window + after
 
 
 def _saved_limits(path: Path) -> dict[str, dict]:
@@ -4395,8 +4435,9 @@ def cmd_step(args) -> int:
 
 def cmd_progress(args) -> int:
     """The status block that closes a message, or the whole plan (--full), from the run's declared steps.
-    Plain Markdown that wraps the same at any width: a bold line, a code span, list items — never a table,
-    which Claude Code draws as a grid, as stacked "Header: value" records or as raw pipes by the terminal's width."""
+    The block is a two-column table whose cells stay short enough for a terminal to keep drawing it as a table
+    (ROW_WIDTH), with single-word labels that cannot wrap and the open decisions as a list under it. The whole
+    plan is a numbered list: four columns of free text are what a narrow terminal stacks."""
     steps = _read_steps(args.slug)
     total = len(steps)
     current = next((number for number, step in enumerate(steps, 1)
@@ -4418,26 +4459,30 @@ def cmd_progress(args) -> int:
         return 0
     if args.live is None or args.next is None:
         raise LoopError("progress needs --live TEXT and --next TEXT (or --full)")
-    names = [_one_line(step["name"].partition(":")[0]) for step in steps]
+    live, upcoming = _cell(args.live), _cell(args.next)
+    for flag, text in (("--live", live), ("--next", upcoming)):
+        if _shown_width(text) > ROW_WIDTH:
+            raise LoopError(f"{flag} shows {_shown_width(text)} characters; a row of the status block holds "
+                            f"{ROW_WIDTH}, or the terminal stops drawing the table: say it shorter and put the "
+                            "detail in the message above the block")
+    names = [_cell(step["name"].partition(":")[0]) for step in steps]
     if current is None:
-        heading = f"**{total} of {total} done**"
-        plan = " → ".join(names)
+        place = f"{total} of {total} done"
     else:
-        failed = " — failed" if steps[current - 1]["status"] == "failed" else ""
-        heading = f"**Step {current} of {total}** · {names[current - 1]}{failed}"
-        plan = " → ".join(f"**[ {name} ]**" if number == current else name
-                          for number, name in enumerate(names, 1))
+        place = f"{current} of {total}" + (", failed" if steps[current - 1]["status"] == "failed" else "")
     symbols = {"done": "■", "running": "▶", "failed": "x", "todo": "·"}
     width = 2 if total > 10 else 4
     bar = " ".join(symbols[step["status"]] * width for step in steps)
-    print(heading)
-    print()
-    print(f"`{bar}`")
-    print()
-    print(f"- **Plan:** {plan}")
-    print(f"- **Live:** {_one_line(args.live)}")
-    print("\n".join(_waiting_lines(slug_dir(args.slug, must_exist=False))))
-    print(f"- **Next:** {_one_line(args.next)}")
+    waiting, decisions = _waiting(slug_dir(args.slug, must_exist=False))
+    print(f"| Step | {place} · `{bar}` |")
+    print("|---|---|")
+    print(f"| **Plan** | {_plan_cell(names, current)} |")
+    print(f"| **Live** | {live} |")
+    print(f"| **Waiting** | {waiting} |")
+    print(f"| **Next** | {upcoming} |")
+    if decisions:
+        print()
+        print("\n".join(decisions))
     return 0
 
 
