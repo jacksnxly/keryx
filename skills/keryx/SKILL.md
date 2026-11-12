@@ -55,20 +55,25 @@ Stop and ask only for: an irreversible or destructive step; a security-sensitive
 - Subagents only as the executor, for the fresh review and for parallel slices; never a reviewer per task. Never chain review skills into each other. *(evidence: chained review skills cost ~$25 per review case in the benchmark)*
 - Read what you need, not whole trees; send long command output to a file and read its tail. *(evidence)*
 - Start slow things (builds, installs, executor runs) in the background and keep working. *(fact)*
-- Every message that ends your turn opens with what proves it — the check's result, the QA file and its screenshots, as paths — and closes with the status block that `keryx.py progress --slug <slug> --live "<what runs or is in use now, and where>" --next "<the next step>"` prints: paste its six lines as they are, after a blank line, and write nothing after them. A few lines, not a log. *(owner; evidence: "where are we / what's next?" was the owner's most common check-in, a median 4.8 h after their previous prompt)*
+- Every message that ends your turn opens with what proves it — the check's result, the QA file and its screenshots, as paths — and closes with the status block that `keryx.py progress --slug <slug> --live "<what runs or is in use now, and where>" --next "<the next step>"` prints: paste its lines as they are, after a blank line, and write nothing after them. A few lines, not a log. *(owner; evidence: "where are we / what's next?" was the owner's most common check-in, a median 4.8 h after their previous prompt)*
 
   ```markdown
-  | Step 5 of 9 | `■■■■ ■■■■ ■■■■ ■■■■ ▶▶▶▶ ···· ···· ···· ····` |
-  |---|---|
-  | **Plan** | Intake → Plan → Part A → Part B → **[ Part C ]** → Fixes → QA → Review → Merge |
-  | **Live** | Executor round 04 on its branch; a watch wakes me when it ends |
-  | **Waiting on you** | Nothing |
-  | **Next** | Check round 04, then one fix round |
+  **Step 5 of 9** · Part C
+
+  `■■■■ ■■■■ ■■■■ ■■■■ ▶▶▶▶ ···· ···· ···· ····`
+
+  - **Plan:** Intake → Plan → Part A → Part B → **[ Part C ]** → Fixes → QA → Review → Merge
+  - **Live:** Executor round 04 on its branch; a watch wakes me when it ends
+  - **Waiting on you:** 1 decision
+    1. **Keep the personal webhook on every paid plan?** (blocks: the price table)
+       - **A: yes, as today** (recommended)
+       - B: Business and above only
+  - **Next:** Check round 04, then one fix round
   ```
 
-  The bar has one segment per step, the Plan row marks the step the run is on, and **Waiting on you** comes straight from the inbox: every open question of this repository, with its options and the recommended one in bold. Never retype the block, and never add emoji to it. *(owner: "i never know what is planned and where we exactly are"; "too much emojis")*
+  The bar has one segment per step, the Plan item marks the step the run is on, and **Waiting on you** comes straight from the inbox: every open question of this repository with what it blocks and its options, the recommended one in bold. Never retype the block, never put it in a table and never add emoji. *(owner: "i never know what is planned and where we exactly are"; "too much emojis"; evidence: as a table the block came out as stacked "Header: value" records at 60 columns and with squeezed, wrapped labels at 80 and 120 — a table's layout depends on the terminal's width, a list wraps the same at 50 to 120 columns)*
 - Declare the steps as soon as the plan is settled, in the owner's words, a few words each: `keryx.py steps --slug <slug> "Intake" "Plan" "Part A: adapter" … "QA" "Review" "Merge"` (an S run: `"Check" "Fix" "Ship"`). Tick each one as it starts and as it ends — `keryx.py step --slug <slug> "Part A" running|done|failed --note "<what it is, or why it failed>"` — and declare them again when the plan changes: what is done stays done. Print the whole plan, `keryx.py progress --slug <slug> --full`, in the first message after the plan is settled, whenever the steps change, and when the owner asks where things stand. *(owner)*
-- Outside a run (a question, a task with no log) close with the last three rows alone, typed as the same two-column table: **Live**, **Waiting on you**, **Next**. *(owner)*
+- Outside a run (a question, a task with no log) close with the last three items alone, typed as the same list: **Live**, **Waiting on you**, **Next**. *(owner)*
 - Never end a turn idle while work is in flight. Start a watch in the background that wakes you when it ends — `keryx.py wait` for an executor, `gh run watch <id>` or `gh pr checks <pr> --watch` for CI, a small polling script for a verdict or a usage-limit reset — and log what you wait on: `keryx.py log --slug <slug> waiting "<who>: <what>" <why> <evidence> "<expected by>"` (`owner: …` when it is the owner). Under the autonomy you were given, a report is not a stopping point: stop only for §3's list. *(owner; evidence: 13 nudges in one week — "and?", "are we done?", "so we sit and wait?", "why did you stop in first place?")*
 
 ## 5. Run log
