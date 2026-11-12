@@ -248,5 +248,110 @@ class Steps(unittest.TestCase):
             self.assertEqual(out.splitlines()[0], "| Step | 2 of 12 · `■■ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ··` |")
 
 
+def second_run(repo, env, slug="tf"):
+    assert cli(repo, ["log", "--slug", slug, "intake", "task", "why", "ev", "ok"], env)[0] == 0
+    assert cli(repo, ["steps", "--slug", slug, "Check", "Fix", "Ship"], env)[0] == 0
+    assert cli(repo, ["step", "--slug", slug, "1", "done"], env)[0] == 0
+    assert cli(repo, ["step", "--slug", slug, "Fix", "running"], env)[0] == 0
+
+
+class SeveralRuns(unittest.TestCase):
+    """Seen 2026-11-12: a session that drove two runs ran `progress` for each, then typed one three-row table by
+    hand for its message, without a bar: the block was per run, and the owner asked where the bar had gone."""
+
+    def test_one_block_for_two_runs_keeps_both_bars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = started(tmp)
+            second_run(repo, env)
+            code, out, err = cli(repo, ["progress", "--slug", "pg", "--slug", "tf", "--live", "both building",
+                                        "--next", "check them"], env)
+            self.assertEqual(code, 0, out + err)
+            self.assertEqual(out.splitlines(), [
+                "| Step | 2 runs |",
+                "|---|---|",
+                "| **pg** | 3 of 7 · `■■■■ ■■■■ ▶▶▶▶ ···· ···· ···· ····` · Part A |",
+                "| **tf** | 2 of 3 · `■■■■ ▶▶▶▶ ····` · Fix |",
+                "| **Live** | both building |",
+                "| **Waiting** | Nothing |",
+                "| **Next** | check them |",
+            ])
+
+    def test_the_questions_of_every_run_named_are_listed_with_their_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = started(tmp)
+            second_run(repo, env)
+            self.assertEqual(cli(repo, ["ask", "--slug", "pg", "Which bar?", "--blocks", "the merge"], env)[0], 0)
+            self.assertEqual(cli(repo, ["ask", "--slug", "tf", "Ship today?", "--option", "A: yes", "--option",
+                                        "B: no", "--recommend", "A"], env)[0], 0)
+            self.assertEqual(cli(repo, ["ask", "--slug", "other", "Not mine?"], env)[0], 0)
+            lines = cli(repo, ["progress", "--slug", "pg", "--slug", "tf", "--live", "x", "--next", "y"], env)[1] \
+                .splitlines()
+            self.assertEqual(lines[5], "| **Waiting** | 2 decisions, listed below |")
+            self.assertEqual(lines[7:], [
+                "",
+                "1. **Which bar?** (pg; blocks: the merge)",
+                "2. **Ship today?** (tf)",
+                "   - **A: yes** (recommended)",
+                "   - B: no",
+            ])
+
+    def test_a_finished_run_and_a_failed_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = started(tmp)
+            second_run(repo, env)
+            self.assertEqual(cli(repo, ["step", "--slug", "tf", "2", "done"], env)[0], 0)
+            self.assertEqual(cli(repo, ["step", "--slug", "tf", "3", "done"], env)[0], 0)
+            self.assertEqual(cli(repo, ["step", "--slug", "pg", "3", "failed"], env)[0], 0)
+            lines = cli(repo, ["progress", "--slug", "tf", "--slug", "pg", "--live", "x", "--next", "y"], env)[1] \
+                .splitlines()
+            self.assertEqual(lines[2], "| **tf** | 3 of 3 done · `■■■■ ■■■■ ■■■■` |")
+            self.assertEqual(lines[3], "| **pg** | 3 of 7, failed · `■■■■ ■■■■ xxxx ···· ···· ···· ····` · Part A |")
+
+    def test_a_run_row_stays_short_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = started(tmp)
+            names = ["Check", "A step whose name is far too long to sit beside a bar of ten segments in one row", "Ship"]
+            self.assertEqual(cli(repo, ["steps", "--slug", "tf", *names], env)[0], 0)
+            self.assertEqual(cli(repo, ["step", "--slug", "tf", "1", "done"], env)[0], 0)
+            lines = cli(repo, ["progress", "--slug", "pg", "--slug", "tf", "--live", "x", "--next", "y"], env)[1] \
+                .splitlines()
+            self.assertEqual(lines[3], "| **tf** | 2 of 3 · `■■■■ ···· ····` |")
+
+    def test_the_whole_plan_is_of_one_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = started(tmp)
+            second_run(repo, env)
+            self.assertEqual(cli(repo, ["progress", "--slug", "pg", "--slug", "tf", "--full"], env)[0], 1)
+
+
+class NoRun(unittest.TestCase):
+    def test_a_session_without_a_run_gets_its_three_rows_from_the_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            env = machine(tmp)
+            code, out, err = cli(repo, ["progress", "--live", "the page on staging", "--next", "nothing scheduled"], env)
+            self.assertEqual(code, 0, out + err)
+            self.assertEqual(out.splitlines(), [
+                "| Step | no run |",
+                "|---|---|",
+                "| **Live** | the page on staging |",
+                "| **Waiting** | Nothing |",
+                "| **Next** | nothing scheduled |",
+            ])
+            out = cli(repo, ["progress", "--live", "x", "--waiting", "your pick: A or B", "--next", "y"], env)[1]
+            self.assertEqual(out.splitlines()[3], "| **Waiting** | your pick: A or B |")
+            self.assertEqual(cli(repo, ["progress", "--live", "x", "--waiting", "w" * 97, "--next", "y"], env)[0], 1)
+            self.assertEqual(cli(repo, ["progress", "--full"], env)[0], 1)
+
+
+class NeverRetyped(unittest.TestCase):
+    def test_the_command_says_to_paste_the_block_as_printed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = started(tmp)
+            code, out, err = cli(repo, ["progress", "--slug", "pg", "--live", "x", "--next", "y"], env)
+            self.assertIn("as printed", err)
+            self.assertNotIn("as printed", out)
+
+
 if __name__ == "__main__":
     unittest.main()
