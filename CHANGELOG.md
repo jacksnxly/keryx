@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **One status block for a session that drives several runs.** `keryx.py progress --slug <run> --slug <other run> …` prints one row with a bar per run (`| **smart-search** | 2 of 6 · ▶▶▶▶ … · Part 1 |`) above Live, Waiting and Next, and lists the open questions of those runs under it, each with its run's name. Without `--slug` it prints the three rows for a session with no run (`--waiting` says what waits). Seen in the field: a session with two runs ran `progress` for each and then typed a three-row table by hand, 14 times, so its block had no bar. The command also reminds on stderr to paste the block as printed.
+
 ## 1.7.2 — 2026-11-12
 
 - **The status block is a table again, built to stay one.** A terminal draws a Markdown table as a grid only while no cell needs more than about four lines: a 97-character cell held at 50 columns, a 164-character one came out as stacked "Header: value" records at 60. So every cell of the block stays within 96 shown characters: `keryx.py progress` refuses a `--live` or `--next` text longer than that, a long plan folds its finished steps into a count (`8 done → **[Part I]** → Part J → 2 more`), and the open decisions are listed under the table, never inside it. The labels are single words (`Step`, `Plan`, `Live`, `Waiting`, `Next`), which cannot wrap when the table is squeezed. Checked in the terminal at 50, 60, 80, 100 and 120 columns. `--full` stays a numbered list.
