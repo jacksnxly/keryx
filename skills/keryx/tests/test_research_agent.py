@@ -93,12 +93,14 @@ class ResearchCommand(unittest.TestCase):
         self.assertEqual(
             keryx.research_command("/tmp/a.md", "PROMPT", None, None),
             ["codex", "exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
+             "--ignore-rules",
              "--disable", "plugins", "--disable", "remote_plugin", "--disable", "apps", "--disable", "memories",
              "-s", "read-only", "-c", 'approval_policy="never"', "-c", 'web_search="live"',
              "-o", "/tmp/a.md", "--", "PROMPT"])
         self.assertEqual(
             keryx.research_command("/tmp/a.md", "PROMPT", "gpt-x", "high"),
             ["codex", "exec", "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
+             "--ignore-rules",
              "--disable", "plugins", "--disable", "remote_plugin", "--disable", "apps", "--disable", "memories",
              "-s", "read-only", "-c", 'approval_policy="never"', "-c", 'web_search="live"',
              "-m", "gpt-x", "-c", 'model_reasoning_effort="high"',

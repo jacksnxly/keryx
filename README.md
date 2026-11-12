@@ -77,7 +77,7 @@ By default the session does its own research. With a [Codex](https://learn.chatg
 keryx.py setup --research codex     # --research none turns it off
 ```
 
-Each question then runs as `keryx.py research --slug <run> "<question>"`: `codex exec` with your own Codex login, read-only, with live web search and without your Codex config, plugins, apps or memories. The answer comes back with its sources and is saved under the run (`.keryx/runs/<run>/research/`). `"model"` and `"effort"` in the config's `"research"` entry choose the model. When the run fails, the session researches the question itself.
+Each question then runs as `keryx.py research --slug <run> "<question>"`: `codex exec` with your own Codex login, read-only, with live web search and without your Codex config, rules, plugins, apps or memories. The answer comes back with its sources and is saved under the run (`.keryx/runs/<run>/research/`). `"model"` and `"effort"` in the config's `"research"` entry choose the model. When the run fails, the session researches the question itself.
 
 ## FAQ
 
