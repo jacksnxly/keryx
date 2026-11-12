@@ -64,7 +64,7 @@ class ClosingBlock(unittest.TestCase):
             for line in block(repo, env) + full:
                 self.assertFalse(line.lstrip().startswith("|"), line)
 
-    def test_the_waiting_item_is_the_repositorys_inbox(self):
+    def test_the_waiting_item_is_the_runs_own_questions(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = started(tmp)
             self.assertEqual(cli(repo, ["ask", "--slug", "pg", "Which bar?", "--option", "A: segments", "--option",
@@ -77,20 +77,36 @@ class ClosingBlock(unittest.TestCase):
                 "     - B: blocks",
             ])
             self.assertEqual(lines[10], "- **Next:** check it")
-            self.assertEqual(cli(repo, ["ask", "Rotate the secret?"], env)[0], 0)
+
+    def test_another_runs_question_is_not_this_sessions_to_show(self):
+        """Seen 2026-11-12: one run asked 10 questions, four parallel sessions of the repository each showed them,
+        and the owner answered once and then told three more sessions "already answered"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = started(tmp)
+            self.assertEqual(cli(repo, ["ask", "--slug", "other-run", "Rotate the secret?"], env)[0], 0)
+            self.assertEqual(cli(repo, ["ask", "Between runs?"], env)[0], 0)
+            self.assertEqual(block(repo, env)[6], "- **Waiting on you:** Nothing")
+            inbox = cli(repo, ["inbox"], env)[1]
+            self.assertIn("Rotate the secret?", inbox)
+            self.assertIn("Between runs?", inbox)
+
+    def test_a_slices_question_belongs_to_its_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = started(tmp)
+            (repo / ".keryx" / "runs" / "pg" / "PLAN.md").write_text("## Slices\n- pg-api: owns the API\n")
+            self.assertEqual(cli(repo, ["ask", "--slug", "pg-api", "Which limit?"], env)[0], 0)
+            self.assertEqual(cli(repo, ["ask", "--slug", "pg-unnamed", "Not a slice?"], env)[0], 0)
             lines = block(repo, env)
-            self.assertEqual(lines[6], "- **Waiting on you:** 2 decisions")
-            numbered = sorted(line[:5] for line in lines if line.endswith("**Rotate the secret?**")
-                              or "**Which bar?**" in line)
-            self.assertEqual(numbered, ["  1. ", "  2. "])
-            self.assertEqual(lines[-1], "- **Next:** check it")
+            self.assertEqual(lines[6:8], ["- **Waiting on you:** 1 decision", "  1. **Which limit?**"])
 
     def test_questions_keep_their_order_oldest_first_whatever_the_folders_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = started(tmp)
+            (repo / ".keryx" / "runs" / "pg" / "PLAN.md").write_text("## Slices\n- pg-aa\n- pg-zz\n- pg-mm\n")
             head = "ts\tphase\tdecision\twhy\tevidence\tresult\n"
-            for slug, stamp, question in (("aa", "2026-02-01T00:00:00Z", "Newer?"), ("zz", "2026-01-01T00:00:00Z", "Older?"),
-                                          ("mm", "2026-01-15T00:00:00Z", "Middle?")):
+            for slug, stamp, question in (("pg-aa", "2099-02-01T00:00:00Z", "Newer?"),
+                                          ("pg-zz", "2099-01-01T00:00:00Z", "Older?"),
+                                          ("pg-mm", "2099-01-15T00:00:00Z", "Middle?")):
                 folder = repo / ".keryx" / "runs" / slug
                 folder.mkdir(parents=True)
                 (folder / "decisions.tsv").write_text(f"{head}{stamp}\twaiting\towner: {question}\t-\t-\topen\n")
