@@ -38,45 +38,41 @@ def block(repo, env, *extra):
 
 
 class ClosingBlock(unittest.TestCase):
-    """No table: Claude Code draws a table as a grid, as stacked "Header: value" records or as raw pipes, by the
-    terminal's width (seen at 60, 80 and 120 columns). A bold line, a code span and a list wrap the same everywhere."""
+    """A table, as the owner wants it ("it should be a table"), built so the terminal keeps drawing it: the UI
+    draws a grid while no cell needs more than about four lines (a 97-character cell held at 50 columns, a
+    164-character one came out as stacked "Header: value" records at 60), so every cell stays within 96 shown
+    characters, the labels are single words that cannot wrap, and the decisions are listed under the table."""
 
     def test_the_block_shows_the_plan_and_the_place_in_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = started(tmp)
             self.assertEqual(block(repo, env), [
-                "**Step 3 of 7** · Part A",
-                "",
-                "`■■■■ ■■■■ ▶▶▶▶ ···· ···· ···· ····`",
-                "",
-                "- **Plan:** Intake → Plan → **[ Part A ]** → Build → QA → Review → Merge",
-                "- **Live:** round 02 runs",
-                "- **Waiting on you:** Nothing",
-                "- **Next:** check it",
+                "| Step | 3 of 7 · `■■■■ ■■■■ ▶▶▶▶ ···· ···· ···· ····` |",
+                "|---|---|",
+                "| **Plan** | Intake → Plan → **[Part A]** → Build → QA → Review → Merge |",
+                "| **Live** | round 02 runs |",
+                "| **Waiting** | Nothing |",
+                "| **Next** | check it |",
             ])
 
-    def test_no_line_of_either_view_is_a_table_row(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, env = started(tmp)
-            self.assertEqual(cli(repo, ["ask", "--slug", "pg", "Which bar?", "--option", "A: segments", "--option",
-                                        "B: blocks", "--recommend", "A", "--blocks", "the merge"], env)[0], 0)
-            full = cli(repo, ["progress", "--slug", "pg", "--full"], env)[1].splitlines()
-            for line in block(repo, env) + full:
-                self.assertFalse(line.lstrip().startswith("|"), line)
-
-    def test_the_waiting_item_is_the_runs_own_questions(self):
+    def test_the_decisions_are_listed_under_the_table(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = started(tmp)
             self.assertEqual(cli(repo, ["ask", "--slug", "pg", "Which bar?", "--option", "A: segments", "--option",
                                         "B: blocks", "--recommend", "A", "--blocks", "the merge"], env)[0], 0)
             lines = block(repo, env)
-            self.assertEqual(lines[6:10], [
-                "- **Waiting on you:** 1 decision",
-                "  1. **Which bar?** (blocks: the merge)",
-                "     - **A: segments** (recommended)",
-                "     - B: blocks",
+            self.assertEqual(lines[4], "| **Waiting** | 1 decision, listed below |")
+            self.assertEqual(lines[5], "| **Next** | check it |")
+            self.assertEqual(lines[6:], [
+                "",
+                "1. **Which bar?** (blocks: the merge)",
+                "   - **A: segments** (recommended)",
+                "   - B: blocks",
             ])
-            self.assertEqual(lines[10], "- **Next:** check it")
+            self.assertEqual(cli(repo, ["ask", "--slug", "pg", "And the colour?"], env)[0], 0)
+            lines = block(repo, env)
+            self.assertEqual(lines[4], "| **Waiting** | 2 decisions, listed below |")
+            self.assertEqual(lines[-1], "2. **And the colour?**")
 
     def test_another_runs_question_is_not_this_sessions_to_show(self):
         """Seen 2026-11-12: one run asked 10 questions, four parallel sessions of the repository each showed them,
@@ -85,7 +81,9 @@ class ClosingBlock(unittest.TestCase):
             repo, env = started(tmp)
             self.assertEqual(cli(repo, ["ask", "--slug", "other-run", "Rotate the secret?"], env)[0], 0)
             self.assertEqual(cli(repo, ["ask", "Between runs?"], env)[0], 0)
-            self.assertEqual(block(repo, env)[6], "- **Waiting on you:** Nothing")
+            lines = block(repo, env)
+            self.assertEqual(lines[4], "| **Waiting** | Nothing |")
+            self.assertEqual(len(lines), 6)
             inbox = cli(repo, ["inbox"], env)[1]
             self.assertIn("Rotate the secret?", inbox)
             self.assertIn("Between runs?", inbox)
@@ -97,7 +95,8 @@ class ClosingBlock(unittest.TestCase):
             self.assertEqual(cli(repo, ["ask", "--slug", "pg-api", "Which limit?"], env)[0], 0)
             self.assertEqual(cli(repo, ["ask", "--slug", "pg-unnamed", "Not a slice?"], env)[0], 0)
             lines = block(repo, env)
-            self.assertEqual(lines[6:8], ["- **Waiting on you:** 1 decision", "  1. **Which limit?**"])
+            self.assertEqual(lines[4], "| **Waiting** | 1 decision, listed below |")
+            self.assertEqual(lines[6:], ["", "1. **Which limit?**"])
 
     def test_questions_keep_their_order_oldest_first_whatever_the_folders_order(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -111,50 +110,84 @@ class ClosingBlock(unittest.TestCase):
                 folder.mkdir(parents=True)
                 (folder / "decisions.tsv").write_text(f"{head}{stamp}\twaiting\towner: {question}\t-\t-\topen\n")
             lines = block(repo, env)
-            self.assertEqual([line for line in lines if line.startswith("  ")],
-                             ["  1. **Older?**", "  2. **Middle?**", "  3. **Newer?**"])
+            self.assertEqual(lines[7:], ["1. **Older?**", "2. **Middle?**", "3. **Newer?**"])
             inbox = cli(repo, ["inbox"], env)[1].splitlines()
             self.assertEqual([line.rsplit("  ", 1)[-1] for line in inbox], ["Older?", "Middle?", "Newer?"])
 
-    def test_a_pipe_or_a_line_break_in_the_text_stays_one_plain_line(self):
+    def test_a_pipe_or_a_line_break_in_the_text_cannot_break_the_table(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = started(tmp)
             code, out, err = cli(repo, ["progress", "--slug", "pg", "--live", "a | b\nc", "--next", "d"], env)
             self.assertEqual(code, 0, out + err)
-            self.assertEqual(out.splitlines()[5], "- **Live:** a | b c")
+            self.assertEqual(out.splitlines()[3], "| **Live** | a \\| b c |")
+
+    def test_a_cell_too_long_for_the_terminal_to_keep_the_table_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = started(tmp)
+            fits = "x" * 96
+            code, out, err = cli(repo, ["progress", "--slug", "pg", "--live", fits, "--next", "**" + fits + "**"], env)
+            self.assertEqual(code, 0, out + err)
+            for flag in ("--live", "--next"):
+                argv = ["progress", "--slug", "pg", "--live", "ok", "--next", "ok"]
+                argv[argv.index(flag) + 1] = "x" * 97
+                code, out, err = cli(repo, argv, env)
+                self.assertEqual(code, 1, flag)
+                self.assertEqual(out, "", flag)
+                self.assertIn("96", err, flag)
+                self.assertIn(flag, err, flag)
+
+    def test_a_long_plan_folds_what_is_done_so_its_row_stays_short(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, run, base, head = _two_commit_repo(tmp)
+            env = machine(tmp)
+            names = [f"Implementation part {chr(65 + i)}" for i in range(12)]
+            self.assertEqual(cli(repo, ["steps", "--slug", "pg", *names], env)[0], 0)
+            for n in range(1, 9):
+                self.assertEqual(cli(repo, ["step", "--slug", "pg", str(n), "done"], env)[0], 0)
+            self.assertEqual(cli(repo, ["step", "--slug", "pg", "9", "running"], env)[0], 0)
+            lines = block(repo, env)
+            self.assertEqual(lines[2],
+                             "| **Plan** | 8 done → **[Implementation part I]** → Implementation part J → 2 more |")
+            self.assertEqual(cli(repo, ["step", "--slug", "pg", "9", "done"], env)[0], 0)
+            self.assertEqual(cli(repo, ["step", "--slug", "pg", "10", "done"], env)[0], 0)
+            self.assertEqual(block(repo, env)[2], "| **Plan** | 10 done → **[Implementation part K]** → "
+                                                  "Implementation part L |")
+            for line in lines[2:6]:
+                shown = line.split(" | ", 1)[1].rstrip(" |").replace("**", "").replace("`", "")
+                self.assertLessEqual(len(shown), 96, line)
 
     def test_everything_done(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = started(tmp, done=("1", "2", "3", "4", "5", "6", "7"), running=None)
             lines = block(repo, env)
-            self.assertEqual(lines[0], "**7 of 7 done**")
-            self.assertEqual(lines[2], "`■■■■ ■■■■ ■■■■ ■■■■ ■■■■ ■■■■ ■■■■`")
-            self.assertEqual(lines[4], "- **Plan:** Intake → Plan → Part A → Build → QA → Review → Merge")
+            self.assertEqual(lines[0], "| Step | 7 of 7 done · `■■■■ ■■■■ ■■■■ ■■■■ ■■■■ ■■■■ ■■■■` |")
+            self.assertEqual(lines[2], "| **Plan** | Intake → Plan → Part A → Build → QA → Review → Merge |")
 
     def test_a_failed_step_is_where_the_run_is(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = started(tmp, running=None)
             self.assertEqual(cli(repo, ["step", "--slug", "pg", "3", "failed", "--note", "usage limit"], env)[0], 0)
             lines = block(repo, env)
-            self.assertEqual(lines[0], "**Step 3 of 7** · Part A — failed")
-            self.assertEqual(lines[2], "`■■■■ ■■■■ xxxx ···· ···· ···· ····`")
-            self.assertIn("**[ Part A ]**", lines[4])
+            self.assertEqual(lines[0], "| Step | 3 of 7, failed · `■■■■ ■■■■ xxxx ···· ···· ···· ····` |")
+            self.assertIn("**[Part A]**", lines[2])
 
     def test_nothing_running_points_at_the_next_step(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = started(tmp, running=None)
             lines = block(repo, env)
-            self.assertEqual(lines[0], "**Step 3 of 7** · Part A")
-            self.assertEqual(lines[2], "`■■■■ ■■■■ ···· ···· ···· ···· ····`")
-            self.assertIn("**[ Part A ]**", lines[4])
+            self.assertEqual(lines[0], "| Step | 3 of 7 · `■■■■ ■■■■ ···· ···· ···· ···· ····` |")
+            self.assertIn("**[Part A]**", lines[2])
 
 
 class FullPlan(unittest.TestCase):
+    """The whole plan stays a numbered list: four columns of free text are what a narrow terminal stacks."""
+
     def test_the_full_plan_is_a_numbered_list_of_every_step(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, env = started(tmp)
             code, out, err = cli(repo, ["progress", "--slug", "pg", "--full"], env)
             self.assertEqual(code, 0, out + err)
+            self.assertFalse([line for line in out.splitlines() if line.startswith("|")])
             self.assertEqual(out.splitlines(), [
                 "**The plan** · step 3 of 7",
                 "",
@@ -182,9 +215,8 @@ class Steps(unittest.TestCase):
             again = STEPS[:4] + ["Fixes"] + STEPS[4:]
             self.assertEqual(cli(repo, ["steps", "--slug", "pg", *again], env)[0], 0)
             lines = block(repo, env)
-            self.assertEqual(lines[0], "**Step 3 of 8** · Part A")
-            self.assertEqual(lines[2], "`■■■■ ■■■■ ▶▶▶▶ ···· ···· ···· ···· ····`")
-            self.assertIn("Build → Fixes → QA", lines[4])
+            self.assertEqual(lines[0], "| Step | 3 of 8 · `■■■■ ■■■■ ▶▶▶▶ ···· ···· ···· ···· ····` |")
+            self.assertIn("Build → Fixes → QA", lines[2])
 
     def test_a_step_is_named_by_its_number_its_name_or_the_part_before_the_colon(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,8 +245,7 @@ class Steps(unittest.TestCase):
             self.assertEqual(cli(repo, ["steps", "--slug", "pg", *names], env)[0], 0)
             self.assertEqual(cli(repo, ["step", "--slug", "pg", "1", "done"], env)[0], 0)
             code, out, err = cli(repo, ["progress", "--slug", "pg", "--live", "x", "--next", "y"], env)
-            self.assertEqual(out.splitlines()[0], "**Step 2 of 12** · Step B")
-            self.assertEqual(out.splitlines()[2], "`■■ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ··`")
+            self.assertEqual(out.splitlines()[0], "| Step | 2 of 12 · `■■ ·· ·· ·· ·· ·· ·· ·· ·· ·· ·· ··` |")
 
 
 if __name__ == "__main__":
