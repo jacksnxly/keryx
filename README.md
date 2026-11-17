@@ -58,7 +58,7 @@ The first time it needs an executor, keryx runs a short setup: it shows which ex
 | `subagent` | Nothing: the plugin's `keryx:executor` agent on Sonnet. Always available. It runs with your session's environment, without MCP tools, and cannot push from its worktree. |
 | `cli` | The [Cursor CLI](https://cursor.com/cli), logged in (`agent login`). |
 | `glm` | A GLM Coding Plan key in `$GLM_API_KEY` or `~/.config/glm/coding-plan.key`. |
-| `<provider>` | A provider declared in `~/.config/keryx/config.json` (`"runner": "codex"`): the [Codex CLI](https://developers.openai.com/codex/) driving any model behind an https API, with the key in a file (`keyFile`) — never in the config, never printed. |
+| `<provider>` | A provider declared in `~/.config/keryx/config.json` (`"runner": "codex"`): the [Codex CLI](https://developers.openai.com/codex/) driving any model behind an https API, with the key in a file (`keyFile`) — never in the config, never printed — or on a ChatGPT login kept in a Codex home of its own (`codexHome`, one per account; `CODEX_HOME=<home> codex login` once). |
 | `cloud` | A Cursor API key and the repository on GitHub. |
 
 When an executor fails (an error, a stop, a dispatch that never starts), keryx moves the same work to the next one in your order, and writes the code itself after the last.

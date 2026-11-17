@@ -24,6 +24,8 @@ the coordinator. Two runners do the implementing:
          "keyFile": …, "model": …}}), run through `codex exec` against that provider's API. Same
          worktree model: .worktrees/<name>-<slug>, branch <name>/<slug>. The key is read from keyFile
          and passed only as $KERYX_CODEX_API_KEY in the executor's own CODEX_HOME; it is never printed.
+         Instead of baseUrl and keyFile a provider may name "codexHome": a Codex home where the owner ran
+         `codex login` with a ChatGPT account; no API key is used and keryx owns that home's config.toml.
 
 The ladder of executors a machine has, in the order to try them, is saved once with `setup`;
 after a failed run, `create` on the same slug hands it to the next executor (the last rung is
@@ -174,7 +176,10 @@ CODEX_KEY_ENV = "KERYX_CODEX_API_KEY"
 PROVIDER_NAME = re.compile(r"[a-z][a-z0-9-]{1,30}")
 # codexConfig may carry any scalar Codex setting except the ones keryx writes itself.
 CODEX_OWNED_CONFIG = ("model_provider", "model_providers", "model", "model_reasoning_effort", "sandbox_mode",
-                      "approval_policy", "shell_environment_policy")
+                      "approval_policy", "shell_environment_policy", "cli_auth_credentials_store", "features")
+# A login provider names a Codex home (`codexHome`) where the owner ran `codex login` with a ChatGPT account.
+# keryx owns that home's config.toml (this first line marks it) and never reads or writes its auth.json.
+LOGIN_HOME_MARK = "# keryx writes this file for a provider's ChatGPT login; edit config.json instead"
 
 
 class LoopError(RuntimeError):
@@ -968,6 +973,69 @@ def codex_key_file(provider: dict, environ: dict) -> Path:
     return Path(home + name[1:]) if name.startswith("~") else Path(name)
 
 
+def is_login_provider(provider: dict) -> bool:
+    """True for a provider that runs on a ChatGPT login in its own Codex home, not on an API key."""
+    return "codexHome" in provider
+
+
+def codex_login_home(provider: dict, environ: dict) -> Path:
+    """The login provider's Codex home, a leading ~ read against the run's HOME."""
+    name = str(provider.get("codexHome") or "")
+    home = str(environ.get("HOME") or os.path.expanduser("~"))
+    return Path(home + name[1:]) if name.startswith("~") else Path(name)
+
+
+def write_login_home(provider: dict, environ: dict) -> Path:
+    """Create the login provider's Codex home and write its config.toml: the default OpenAI provider with the
+    home's own ChatGPT login, the model and effort, approvals off, the login kept in a file, and the features
+    that reach beyond the repository switched off. A config.toml keryx did not write (its first line is not
+    LOGIN_HOME_MARK) is refused and left alone. Never reads, writes or prints auth.json."""
+    home = codex_login_home(provider, environ)
+    config = home / "config.toml"
+    if config.exists():
+        try:
+            first = config.read_text().split("\n", 1)[0]
+        except OSError as exc:
+            raise LoopError(f"cannot read {config}: {exc}")
+        if first != LOGIN_HOME_MARK:
+            raise LoopError(f"{home} already has a config.toml that keryx did not write; "
+                            "point codexHome at a folder of its own (a fresh one keryx can own)")
+    home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lines = [LOGIN_HOME_MARK, f"model = {_toml(provider['model'])}"]
+    if provider.get("effort"):
+        lines.append(f"model_reasoning_effort = {_toml(provider['effort'])}")
+    lines += ['approval_policy = "never"', 'cli_auth_credentials_store = "file"']
+    lines += [f"{key} = {_toml(value)}" for key, value in (provider.get("codexConfig") or {}).items()]
+    lines += ["", "[features]"] + [f"{f} = false" for f in ("plugins", "remote_plugin", "apps", "memories")]
+    fd, tmp = tempfile.mkstemp(dir=home, prefix=".config.toml.")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.replace(tmp, config)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return home
+
+
+def codex_login_check(name: str, provider: dict, environ: dict) -> Path:
+    """Write the login home, then ask `codex login status` there. Returns the home, or raises a LoopError that
+    says how to log in. Prints nothing; the status text is not shown."""
+    home = write_login_home(provider, environ)
+    try:
+        res = subprocess.run(["codex", "login", "status"], capture_output=True, text=True, timeout=60,
+                             env=codex_env(environ, str(home), None), stdin=subprocess.DEVNULL)
+        ok = res.returncode == 0 and "Logged in" in (res.stdout + res.stderr)
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    if not ok:
+        raise LoopError(f"{name}: no ChatGPT login in {home}: run  CODEX_HOME={home} codex login")
+    return home
+
+
 def codex_key(provider: dict, environ: dict) -> str:
     """The provider's key, read from its keyFile (~ is the run's HOME). Never printed or written to disk."""
     path = codex_key_file(provider, environ)
@@ -977,7 +1045,7 @@ def codex_key(provider: dict, environ: dict) -> str:
     return key
 
 
-def codex_env(base: dict, codex_home: str, key: str) -> dict:
+def codex_env(base: dict, codex_home: str, key: str | None, gh_dir: str | None = None) -> dict:
     """The cli runner's guard rails, without credentials or any other runner's settings, with the provider's
     key the only one reaching Codex — through its own CODEX_HOME and env_key. gh gets a placeholder token
     so gh commands fail (an empty GH_CONFIG_DIR is not enough: `gh auth token` still reads the keychain);
@@ -994,11 +1062,12 @@ def codex_env(base: dict, codex_home: str, key: str) -> dict:
     env["GIT_CONFIG_VALUE_1"] = ""
     env["GIT_SSH_COMMAND"] = "false"
     env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GH_CONFIG_DIR"] = str(Path(codex_home) / "gh")
+    env["GH_CONFIG_DIR"] = gh_dir or str(Path(codex_home) / "gh")
     env.pop("GITHUB_TOKEN", None)  # gh prefers GH_TOKEN; a real GITHUB_TOKEN must not survive beside it
     env["GH_TOKEN"] = "keryx-provider-round-has-no-github-access"
     env["CODEX_HOME"] = codex_home
-    env[CODEX_KEY_ENV] = key
+    if key is not None:
+        env[CODEX_KEY_ENV] = key
     env.update(EXECUTOR_ENV)
     return env
 
@@ -1084,6 +1153,9 @@ GLM_UTC_OFFSET = dt.timedelta(hours=8)  # Z.ai prints its reset time in UTC+8, n
 # and only these: "unexpected status 402", "last status: 402" once retries are spent, or
 # "raw_status_code":402. The same three for 429. A looser "status 402" would match another runner's words.
 CODEX_ALLOWANCE = re.compile(r'unexpected status 402\b|last status: 402\b|"raw_status_code":402\b')
+# The ChatGPT plan's message (codex-rs protocol error.rs): "You’ve hit your usage limit. … or try again at <T>."
+# or "… try again later."; <T> is the machine's local time, a bare time on the same day.
+CHATGPT_LIMIT = re.compile(r"You[’']ve hit your usage limit[^\n]*?[Tt]ry again (?:at (?P<at>[^\n]+?)|(?P<later>later))\.(?:\s|$)")
 CODEX_RATE = re.compile(r'unexpected status 429\b|last status: 429\b|"raw_status_code":429\b')
 
 
@@ -1092,6 +1164,26 @@ def _first_of_next_month(at: dt.datetime) -> dt.datetime:
     moment = _as_utc(at)
     year, month = (moment.year + 1, 1) if moment.month == 12 else (moment.year, moment.month + 1)
     return dt.datetime(year, month, 1, tzinfo=dt.timezone.utc)
+
+
+def _chatgpt_reset(stamp: str, at: dt.datetime | None) -> str | None:
+    """A ChatGPT reset time (`3:45 PM`, or `Nov 20th, 2026 3:45 PM`) read as machine-local time, as a UTC
+    stamp; None when it does not parse. A bare time takes the local date of `at` (now), and a bare time
+    already past means tomorrow."""
+    stamp = re.sub(r"(\d)(?:st|nd|rd|th)\b", r"\1", stamp.strip())
+    now = (at or dt.datetime.now(dt.timezone.utc))
+    now = (now if now.tzinfo else now.replace(tzinfo=dt.timezone.utc)).astimezone()
+    try:
+        local = dt.datetime.strptime(stamp, "%b %d, %Y %I:%M %p")
+    except ValueError:
+        try:
+            clock = dt.datetime.strptime(stamp, "%I:%M %p")
+        except ValueError:
+            return None
+        local = dt.datetime.combine(now.date(), clock.time())
+        if local.astimezone() < now:
+            local += dt.timedelta(days=1)
+    return _stamp(local.astimezone(dt.timezone.utc))
 
 
 def usage_limit(text: str, at: dt.datetime | None = None, codex: bool = True) -> dict | None:
@@ -1113,6 +1205,10 @@ def usage_limit(text: str, at: dt.datetime | None = None, codex: bool = True) ->
     if not codex:
         return None
     body = text or ""
+    m = CHATGPT_LIMIT.search(body)
+    if m:
+        reset = _chatgpt_reset(m.group("at"), at) if m.group("at") else None
+        return {"kind": "plan", "resetsAt": reset, "resetsIn": None if reset else "5 hours"}
     if CODEX_ALLOWANCE.search(body):
         moment = at or dt.datetime.now(dt.timezone.utc)
         return {"kind": "allowance", "resetsAt": _stamp(_first_of_next_month(moment)), "resetsIn": None}
@@ -1260,7 +1356,8 @@ def _validated_resets(path: Path, resets: object, providers=()) -> dict:
 
 def _validated_providers(path: Path, providers: object) -> dict:
     """`providers` as saved: name -> a normalised entry (runner, baseUrl, keyFile, model, effort?,
-    codexConfig?). Every refusal names `path` first. A provider names a key file, never a key."""
+    codexConfig?), or for a ChatGPT login (runner, codexHome, model, effort?, codexConfig?). Every refusal
+    names `path` first. A provider names a key file or a Codex home, never a key."""
     if not isinstance(providers, dict):
         raise LoopError(f'{path}: "providers" must be an object')
     out: dict[str, dict] = {}
@@ -1275,10 +1372,18 @@ def _validated_providers(path: Path, providers: object) -> dict:
             raise LoopError(f'{where} "runner" must be one of: {", ".join(PROVIDER_RUNNERS)}')
         if "key" in spec:
             raise LoopError(f'{where} names a key file (keyFile), never a key ("key")')
-        if not isinstance(spec.get("baseUrl"), str) or not spec["baseUrl"].startswith("https://"):
-            raise LoopError(f'{where} "baseUrl" must be an https:// URL')
-        if not isinstance(spec.get("keyFile"), str) or not spec["keyFile"].strip():
-            raise LoopError(f'{where} needs "keyFile" as a path holding the API key')
+        login = "codexHome" in spec
+        if login:
+            if "baseUrl" in spec or "keyFile" in spec:
+                raise LoopError(f'{where} has "codexHome" (a ChatGPT login) and "baseUrl"/"keyFile" (an API key): '
+                                "a provider has one or the other")
+            if not isinstance(spec["codexHome"], str) or not spec["codexHome"].strip():
+                raise LoopError(f'{where} "codexHome" must be a path to a Codex home with a ChatGPT login')
+        else:
+            if not isinstance(spec.get("baseUrl"), str) or not spec["baseUrl"].startswith("https://"):
+                raise LoopError(f'{where} "baseUrl" must be an https:// URL (or name a "codexHome" for a ChatGPT login)')
+            if not isinstance(spec.get("keyFile"), str) or not spec["keyFile"].strip():
+                raise LoopError(f'{where} needs "keyFile" as a path holding the API key')
         if not isinstance(spec.get("model"), str) or not spec["model"].strip():
             raise LoopError(f'{where} needs "model" as the model id to run')
         if spec.get("effort") is not None and not isinstance(spec["effort"], str):
@@ -1294,8 +1399,11 @@ def _validated_providers(path: Path, providers: object) -> dict:
                     raise LoopError(f"{where} codexConfig setting {key!r} is not a plain setting name")
                 if not isinstance(value, (str, int, float, bool)):
                     raise LoopError(f"{where} codexConfig setting {key!r} needs a string, number or boolean value")
-        entry = {"runner": spec["runner"], "baseUrl": spec["baseUrl"], "keyFile": spec["keyFile"],
-                 "model": spec["model"]}
+        if login:
+            entry = {"runner": spec["runner"], "codexHome": spec["codexHome"], "model": spec["model"]}
+        else:
+            entry = {"runner": spec["runner"], "baseUrl": spec["baseUrl"], "keyFile": spec["keyFile"],
+                     "model": spec["model"]}
         if spec.get("effort") is not None:
             entry["effort"] = spec["effort"]
         if config is not None:
@@ -2316,10 +2424,16 @@ def cli_launch(d: Path, r: Path, agent: dict, prompt: str, mode: str) -> int:
         environ = dict(os.environ)
         provider = _codex_provider(agent, environ)
         # create and followup both launch here, so a changed baseUrl or codexConfig is written first.
-        home = write_codex_home(d, provider)
+        if is_login_provider(provider):
+            home = write_login_home(provider, environ)
+            gh = _codex_home_dir(d) / "gh"
+            gh.mkdir(parents=True, exist_ok=True)
+            env = codex_env(environ, str(home), None, gh_dir=str(gh))
+        else:
+            home = write_codex_home(d, provider)
+            env = codex_env(environ, str(home), codex_key(provider, environ))
         agent["configDir"] = str(home)
         cmd = codex_command(agent["model"], prompt, agent.get("sessionId"), mode, provider.get("effort"))
-        env = codex_env(environ, str(home), codex_key(provider, environ))
         env.update(agent.get("env") or {})
         return _spawn(r, agent, cmd, env, mode, "none (own CODEX_HOME)")
     if agent.get("runner") == "glm":
@@ -2654,23 +2768,41 @@ def _preflight_codex(name: str, provider: dict) -> int:
     version = subprocess.run(["codex", "--version"], capture_output=True, text=True).stdout.strip()
     print(f"ok    Codex CLI {version} at {found.stdout.strip()}")
     environ = dict(os.environ)
-    try:
-        key = codex_key(provider, environ)
-    except LoopError as exc:
-        print(f"FAIL  {exc}")
-        return 1
-    print("ok    provider key found (not shown)")
-    key_file = codex_key_file(provider, environ)
-    if key_file.is_file() and key_file.stat().st_mode & 0o077:
-        print(f"WARN  {key_file} is readable by others: chmod 600 it")
-        problems += 1
-    print(f"ok    model {provider['model']} at {provider['baseUrl']}")
-    print(f"ok    worktrees go to {worktree_path('example').parent}/{name}-<slug>, branches {name}/<slug>")
-    with tempfile.TemporaryDirectory() as tmp:  # the probe's own CODEX_HOME, thrown away with its session
-        home = write_codex_home(Path(tmp), provider)
-        cmd = codex_probe_command(provider["model"], provider.get("effort"))
+    login = is_login_provider(provider)
+    key = None
+    if login:
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, env=codex_env(environ, str(home), key),
+            home = codex_login_check(name, provider, environ)
+        except LoopError as exc:
+            print(f"FAIL  {exc}")
+            return 1
+        print(f"ok    model {provider['model']} with the ChatGPT login in {home}")
+    else:
+        try:
+            key = codex_key(provider, environ)
+        except LoopError as exc:
+            print(f"FAIL  {exc}")
+            return 1
+        print("ok    provider key found (not shown)")
+        key_file = codex_key_file(provider, environ)
+        if key_file.is_file() and key_file.stat().st_mode & 0o077:
+            print(f"WARN  {key_file} is readable by others: chmod 600 it")
+            problems += 1
+        print(f"ok    model {provider['model']} at {provider['baseUrl']}")
+    print(f"ok    worktrees go to {worktree_path('example').parent}/{name}-<slug>, branches {name}/<slug>")
+    with tempfile.TemporaryDirectory() as tmp:  # the probe's own folder, thrown away with it
+        if login:  # the account's own home, so the probe leaves no session in it
+            cmd = codex_probe_command(provider["model"], provider.get("effort"))
+            cmd.insert(cmd.index("--skip-git-repo-check") + 1, "--ephemeral")
+            gh = Path(tmp) / "gh"
+            gh.mkdir()
+            env = codex_env(environ, str(home), None, gh_dir=str(gh))
+        else:
+            home = write_codex_home(Path(tmp), provider)
+            cmd = codex_probe_command(provider["model"], provider.get("effort"))
+            env = codex_env(environ, str(home), key)
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, env=env,
                                  cwd=tmp, timeout=300, stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             print("FAIL  probe run did not answer within 300s")
@@ -2722,6 +2854,23 @@ def _detect_executors() -> None:
         providers = {}
     for name, provider in providers.items():
         installed = subprocess.run(["sh", "-c", "command -v codex"], capture_output=True, text=True).returncode == 0
+        if is_login_provider(provider):
+            home = codex_login_home(provider, environ)
+            codex_state = "codex installed" if installed else "codex not installed"
+            usable = False
+            try:
+                if installed:
+                    codex_login_check(name, provider, environ)
+                    usable = True
+                    state = f"{codex_state}, logged in at {home}"
+                else:
+                    state = f"{codex_state}, no ChatGPT login in {home}"
+            except LoopError as exc:
+                state = (f"{codex_state}, no ChatGPT login in {home}" if "no ChatGPT login" in str(exc) else str(exc))
+            except OSError as exc:
+                state = f"{codex_state}, cannot use {home}: {exc.strerror or exc}"
+            print(f"{name}  {'yes' if usable else 'no'}  {state}")
+            continue
         try:
             codex_key(provider, environ)
             key_state = "key file present"
@@ -3199,7 +3348,10 @@ def cmd_create(args) -> int:
         extra_env = parse_env(args.env)
         if glm:
             glm_env(dict(os.environ), "")  # no key, or a wrong endpoint: fail before a worktree exists
-        if provider:
+        login_home = None
+        if provider and is_login_provider(provider):
+            login_home = codex_login_check(runner, provider, dict(os.environ))  # no login: fail before a worktree
+        elif provider:
             codex_key(provider, dict(os.environ))  # no key file: fail before a worktree exists
         ensure_ignored(wt.parent)  # .worktrees/ ignores itself before a worktree lands in it, as .keryx/ does
         if switch:
@@ -3234,13 +3386,15 @@ def cmd_create(args) -> int:
                  "baseRef": (switch or {}).get("baseRef", args.ref), "model": model, "sessionId": None,
                  "createdAt": now(), "env": extra_env,
                  "configDir": str(write_glm_config(d) if glm else
+                                  login_home if login_home else
                                   write_codex_home(d, provider) if provider else write_cli_config(d))}
         if provider:
             agent["runnerKind"] = "codex"
         save_json(d / "agent.json", agent)
         r = new_round(d, args.prompt_file)
         pid = cli_launch(d, r, agent, read_prompt(args.prompt_file), args.mode)
-        who = (f"{runner} (codex exec on {provider['model']} at {provider['baseUrl']})" if provider
+        who = (f"{runner} (codex exec on {provider['model']} with the ChatGPT login in {login_home})" if login_home
+               else f"{runner} (codex exec on {provider['model']} at {provider['baseUrl']})" if provider
                else "GLM (Claude Code on the GLM Coding Plan)" if glm else "Cursor CLI")
         append_log(d, "dispatch", f"run {r.name}: started {who} ({args.mode} mode, model {model})", "keryx create",
                    f"pid {pid}, worktree {wt}, branch {branch}, base {start[:12]}", "RUNNING")
