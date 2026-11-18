@@ -2830,7 +2830,7 @@ def cost_estimate(samples: list[dict], runner: str, mode: str, size: str | None,
                 found.append(max(float(value), 0.5))
         return found
     mine = [s for s in samples if isinstance(s, dict) and s.get("runner") == runner and s.get("mode") == mode
-            and s.get("status", "FINISHED") == "FINISHED"]
+            and s.get("status", "FINISHED") == "FINISHED" and s.get("overlap") is not True]
     values, used = numbers(s for s in mine if s.get("size") == size), size
     if not values:
         values, used = numbers(mine), None
@@ -2946,6 +2946,19 @@ def reserved(environ: dict, at: dt.datetime) -> dict[str, dict[str, float]]:
         return {}
 
 
+def overlapped(environ: dict, runner: str, slug: str, at: dt.datetime) -> bool:
+    """True when a live reservation (under 3 h old) on this login belongs to a slug other than `slug`."""
+    try:
+        moment = _as_utc(at)
+        for name, entry in _read_reservations(_reservations_path(environ)).get(runner, {}).items():
+            when = _parse_stamp(entry.get("at")) if isinstance(entry, dict) else None
+            if name != slug and when is not None and (moment - when).total_seconds() <= RESERVATION_HOURS * 3600:
+                return True
+        return False
+    except (OSError, ValueError, AttributeError, TypeError, OverflowError):
+        return False
+
+
 def _round_size(d: Path) -> str | None:
     """The run's size; a slice named in its parent's log takes the parent's."""
     size = run_size(d)
@@ -2971,8 +2984,8 @@ def _reserve_round(d: Path, runner: str, prompt: str, environ: dict) -> None:
             est = cost_estimate(samples, runner, mode, size, window)
             if est:
                 windows[window] = est["p80"]
-        if windows:
-            reserve(environ, runner, d.name, windows, at)
+        # Reserve even with no estimate yet (empty windows): the entry still tells another round it overlapped.
+        reserve(environ, runner, d.name, windows, at)
     except Exception:
         pass
 
@@ -3041,6 +3054,12 @@ def choose_executors(config: dict, environ: dict, at: dt.datetime, mode: str, si
                 if est["p80"] > left[window]:
                     failed.append(found_window)
         fits = None if not estimates else not failed
+        scarce = None
+        if fits is None and metered:
+            lefts = [100 - w["usedPercent"] - held.get(name, {}).get(str(w.get("minutes")), 0.0)
+                     for w in _meter_windows(meter)]
+            if lefts and min(lefts) < 25:
+                scarce = max(min(lefts), 0)
         if failed:
             stamps = [w.get("resetsAt") for w in failed if _parse_stamp(w.get("resetsAt")) is not None]
             until = max(stamps, key=_parse_stamp) if stamps else None
@@ -3053,7 +3072,8 @@ def choose_executors(config: dict, environ: dict, at: dt.datetime, mode: str, si
             if hours > 0 and rate > 0:
                 pressure = (max(left["10080"], 0) / hours) / rate
         if fits is None:
-            reason = f"{name}: unknown — no meter or no estimate yet"
+            reason = (f"{name}: unknown — no estimate yet, and only {_fmt_pct(scarce)} left" if scarce is not None
+                      else f"{name}: unknown — no meter or no estimate yet")
         else:
             parts = []
             for window, label in (("300", "5h"), ("10080", "week")):
@@ -3068,19 +3088,19 @@ def choose_executors(config: dict, environ: dict, at: dt.datetime, mode: str, si
                 if until:
                     reason += f"; fits after {_fmt_when(until, at)}"
         found.append({"name": name, "fits": fits, "pressure": pressure, "until": until, "reason": reason,
-                      "_index": index,
+                      "_index": index, "_scarce": scarce is not None,
                       "_tight": left["300"] - estimates["300"]["p80"] if "300" in estimates else float("inf")})
     def key(item):
         if item["fits"] is True:
             p = item["pressure"]
             return (0, 0 if p is not None else 1, -(p or 0.0), item["_tight"], item["_index"])
         if item["fits"] is None:
-            return (1, 0, 0.0, 0.0, item["_index"])
+            return (1, 1 if item["_scarce"] else 0, 0.0, 0.0, item["_index"])
         when = _parse_stamp(item["until"]) if item["until"] else None
         return (2, 0 if when else 1, when.timestamp() if when else 0.0, 0.0, item["_index"])
     found.sort(key=key)
     for item in found:
-        del item["_index"], item["_tight"]
+        del item["_index"], item["_tight"], item["_scarce"]
     return found
 
 
@@ -3101,8 +3121,16 @@ def _record_round_cost(d: Path, agent: dict, r: Path, run: dict, events: list[di
         cost = round_cost(before, after, events, round_minutes(run))
         size = _round_size(d)
         prompt = (r / "prompt.md").read_text() if (r / "prompt.md").exists() else ""
+        slug = str(agent.get("slug") or d.name)
+        overlap = False
+        try:
+            overlap = bool(json.loads((r / "overlap.json").read_text()).get("overlap"))
+        except (OSError, ValueError, AttributeError):
+            pass
+        overlap = overlap or overlapped(environ, str(agent.get("runner") or ""), slug,
+                                        dt.datetime.now(dt.timezone.utc))
         entry = {"runner": agent.get("runner", "cli"), "mode": brief_mode(prompt), "size": size,
-                 "status": run["status"], "at": now(), **cost}
+                 "status": run["status"], "at": now(), "overlap": overlap, **cost}
         try:
             cost_file = cost_path.open("x")  # only one concurrent wait can claim the round
         except FileExistsError:
@@ -3135,6 +3163,12 @@ def cli_launch(d: Path, r: Path, agent: dict, prompt: str, mode: str) -> int:
                         save_json(r / "meter-before.json", meter)
                 except Exception as exc:  # a side record: never stops the launch
                     print(f"meter before not read: {exc}")
+                try:
+                    save_json(r / "overlap.json", {"overlap": overlapped(
+                        environ, str(agent.get("runner") or ""), str(agent.get("slug") or d.name),
+                        dt.datetime.now(dt.timezone.utc))})
+                except Exception as exc:
+                    print(f"overlap not read: {exc}")
         else:
             home = write_codex_home(d, provider)
             env = codex_env(environ, str(home), codex_key(provider, environ))
@@ -3894,7 +3928,7 @@ def cmd_executors(args) -> int:
         return 0
     if config.get("budget") and getattr(args, "mode", None):
         meters = codex_meters(config, environ, at, max_age=0)
-        ranked = choose_executors(config, environ, at, args.mode.upper(), args.size, meters, cost_samples(environ))
+        ranked = choose_executors(config, environ, at, brief_mode("Mode: " + args.mode), args.size, meters, cost_samples(environ))
         if not any(item["fits"] is True for item in ranked):
             for name in ladder:
                 provider = config.get("providers", {}).get(name)
@@ -3933,7 +3967,7 @@ def cmd_executors(args) -> int:
                         meters[name] = fresh
                         _cache_meter(name, provider, fresh, environ)
                 if spend is None or outcome is not None:
-                    ranked = choose_executors(config, environ, at, args.mode.upper(), args.size, meters,
+                    ranked = choose_executors(config, environ, at, brief_mode("Mode: " + args.mode), args.size, meters,
                                               cost_samples(environ))
                     break
         kept = {item["name"] for item in ranked}
@@ -5294,6 +5328,14 @@ def cmd_mark(args) -> int:
     record_status(r / "run.json", args.status)
     append_log(d, "review", f"round {r.name}: marked {args.status} by the coordinator",
                "the coordinator judged the round's report", str(r / "run.json"), args.status)
+    environ = dict(os.environ)
+    if _budget_config(environ) is not None:
+        try:
+            run = json.loads((r / "run.json").read_text())
+            run.setdefault("endedAt", now())
+            _record_round_cost(d, load_agent(d), r, run, [], environ)
+        except Exception as exc:  # a side record: it must not change the mark
+            print(f"cost not recorded: {exc}")
     return 0
 
 
