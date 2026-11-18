@@ -2756,6 +2756,246 @@ def cost_estimate(samples: list[dict], runner: str, mode: str, size: str | None,
             "n": len(values), "size": used}
 
 
+class _locked_file:
+    """An exclusive lock on `path`'s sidecar, where fcntl exists. Without it the atomic replace still holds."""
+
+    def __init__(self, path: Path):
+        self.path, self.handle, self.fcntl = path, None, None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import fcntl
+        except ImportError:
+            return self
+        self.fcntl = fcntl
+        self.handle = open(self.path.with_name(self.path.name + ".lock"), "a")
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        if self.handle is not None:
+            self.fcntl.flock(self.handle.fileno(), self.fcntl.LOCK_UN)
+            self.handle.close()
+        return False
+
+
+def clear_limit(environ: dict, runner: str) -> None:
+    """Drop `runner`'s record from limits.json, locked and written like record_limit. Never raises."""
+    path = _limits_path(environ)
+    try:
+        with _locked_file(path):
+            current = _saved_limits(path)
+            if runner in current:
+                del current[runner]
+                _write_limits(path, current)
+    except OSError:
+        pass
+
+
+RESERVATION_HOURS = 3
+
+
+def _reservations_path(environ: dict) -> Path:
+    return config_path(environ).parent / "reservations.json"
+
+
+def _read_reservations(path: Path) -> dict:
+    data = _read_limits(path)
+    return {runner: slugs for runner, slugs in data.items() if isinstance(runner, str) and isinstance(slugs, dict)}
+
+
+def reserve(environ: dict, runner: str, slug: str, windows: dict, at: dt.datetime) -> None:
+    """Hold a running round's p80 per window, so the next choice counts it. Entries older than 3 h are dropped."""
+    path = _reservations_path(environ)
+    kept = {w: float(v) for w, v in windows.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0}
+    with _locked_file(path):
+        current = _read_reservations(path)
+        moment = _as_utc(at)
+        for name in list(current):
+            for key in list(current[name]):
+                entry = current[name][key]
+                when = _parse_stamp(entry.get("at")) if isinstance(entry, dict) else None
+                if when is None or (moment - when).total_seconds() > RESERVATION_HOURS * 3600:
+                    del current[name][key]
+            if not current[name]:
+                del current[name]
+        current.setdefault(runner, {})[slug] = {"at": _stamp(at), "windows": kept}
+        _write_json_atomic(path, current, ".reservations-")
+
+
+def release(environ: dict, runner: str, slug: str) -> None:
+    """End a round's reservation. A missing file or entry is nothing to do."""
+    path = _reservations_path(environ)
+    if not path.exists():
+        return
+    with _locked_file(path):
+        current = _read_reservations(path)
+        if slug in current.get(runner, {}):
+            del current[runner][slug]
+            if not current[runner]:
+                del current[runner]
+            _write_json_atomic(path, current, ".reservations-")
+
+
+def reserved(environ: dict, at: dt.datetime) -> dict[str, dict[str, float]]:
+    """Per runner and window, the sum of the reservations made within the last 3 h. Never raises."""
+    try:
+        moment = _as_utc(at)
+        found: dict[str, dict[str, float]] = {}
+        for runner, slugs in _read_reservations(_reservations_path(environ)).items():
+            for entry in slugs.values():
+                when = _parse_stamp(entry.get("at")) if isinstance(entry, dict) else None
+                windows = entry.get("windows") if isinstance(entry, dict) else None
+                if when is None or not isinstance(windows, dict) or (moment - when).total_seconds() > RESERVATION_HOURS * 3600:
+                    continue
+                for window, value in windows.items():
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                        total = found.setdefault(runner, {})
+                        total[window] = total.get(window, 0.0) + float(value)
+        return found
+    except (OSError, ValueError, AttributeError, TypeError, OverflowError):
+        return {}
+
+
+def _round_size(d: Path) -> str | None:
+    """The run's size; a slice named in its parent's log takes the parent's."""
+    size = run_size(d)
+    if size is None and "-" in d.name:
+        parent = d.parent / d.name.rpartition("-")[0]
+        log = parent / "decisions.tsv"
+        if log.is_file() and re.search(rf"(?<![\w-]){re.escape(d.name)}(?![\w-])", log.read_text()):
+            size = run_size(parent)
+    return size
+
+
+def _reserve_round(d: Path, runner: str, prompt: str, environ: dict) -> None:
+    """With the budget on, hold the p80 of this round on a metered runner until its wait ends. Never raises."""
+    try:
+        config = _budget_config(environ)
+        provider = config["providers"].get(runner) if config else None
+        if not provider or not is_login_provider(provider):
+            return
+        at = dt.datetime.now(dt.timezone.utc)
+        mode, size, samples = brief_mode(prompt), _round_size(d), cost_samples(environ)
+        windows = {}
+        for window in ("300", "10080"):
+            est = cost_estimate(samples, runner, mode, size, window)
+            if est:
+                windows[window] = est["p80"]
+        if windows:
+            reserve(environ, runner, d.name, windows, at)
+    except Exception:
+        pass
+
+
+def _release_round(d: Path, agent: dict, environ: dict) -> None:
+    try:
+        release(environ, str(agent.get("runner") or ""), d.name)
+    except Exception:
+        pass
+
+
+def _fmt_pct(value: float) -> str:
+    return f"{round(value)}%"
+
+
+def _fmt_when(stamp: str, at: dt.datetime) -> str:
+    when = _parse_stamp(stamp)
+    if when is None:
+        return stamp
+    return when.strftime("%H:%M") if when.date() == _as_utc(at).date() else when.strftime("%m-%d %H:%M")
+
+
+def _runner_ratio(samples: list[dict], runner: str) -> float | None:
+    """The median of weekly / 5 h cost over this runner's finished samples that have both windows."""
+    ratios = []
+    for s in samples:
+        windows = s.get("windows") if isinstance(s, dict) else None
+        if not isinstance(windows, dict) or s.get("runner") != runner or s.get("status", "FINISHED") != "FINISHED":
+            continue
+        five, week = windows.get("300"), windows.get("10080")
+        if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (five, week)) and five > 0:
+            ratios.append(week / five)
+    return statistics.median(ratios) if ratios else None
+
+
+def choose_executors(config: dict, environ: dict, at: dt.datetime, mode: str, size: str | None,
+                     meters: dict, samples: list[dict]) -> list[dict]:
+    """The available executors, best first: those whose p80 cost fits (most pressed weekly window first, then the
+    tightest fit), then those with nothing to judge by, then those that wait for a reset."""
+    ladder = ordered_ladder(config, at)
+    held = reserved(environ, at)
+    limited = limited_runners(environ, at)
+    found = []
+    for index, name in enumerate(ladder):
+        meter = meters.get(name)
+        metered = isinstance(meter, dict)
+        if metered:
+            reached = meter.get("reached")
+            if (isinstance(reached, str) and reached) or limit_from_meter(meter) is not None:
+                continue
+            if name in limited:
+                clear_limit(environ, name)  # the meter shows room: the record is stale
+        elif name in limited:
+            continue
+        left, estimates, failed = {}, {}, []
+        pressure = until = None
+        if metered:
+            by_minutes = {w.get("minutes"): w for w in _meter_windows(meter)}
+            for window in ("300", "10080"):
+                found_window = by_minutes.get(int(window))
+                est = cost_estimate(samples, name, mode, size, window)
+                if found_window is None or est is None:
+                    continue
+                left[window] = 100 - found_window["usedPercent"] - held.get(name, {}).get(window, 0.0)
+                estimates[window] = est
+                if est["p80"] > left[window]:
+                    failed.append(found_window)
+        fits = None if not estimates else not failed
+        if failed:
+            stamps = [w.get("resetsAt") for w in failed if _parse_stamp(w.get("resetsAt")) is not None]
+            until = max(stamps, key=_parse_stamp) if stamps else None
+        ratio = _runner_ratio(samples, name) if metered else None
+        week = next((w for w in _meter_windows(meter) if w.get("minutes") == 10080), None) if metered else None
+        reset = _parse_stamp(week.get("resetsAt")) if week else None
+        if "300" in estimates and "10080" in estimates and ratio and reset is not None:
+            hours = (reset - _as_utc(at)).total_seconds() / 3600
+            rate = 100 * ratio / (300 / 60)
+            if hours > 0 and rate > 0:
+                pressure = (max(left["10080"], 0) / hours) / rate
+        if fits is None:
+            reason = f"{name}: unknown — no meter or no estimate yet"
+        else:
+            parts = []
+            for window, label in (("300", "5h"), ("10080", "week")):
+                if window in estimates:
+                    parts.append(f"p80 {_fmt_pct(estimates[window]['p80'])} of {label}, left {_fmt_pct(left[window])}")
+            if fits:
+                reason = f"{name}: fits — " + "; ".join(parts)
+                if pressure is not None:
+                    reason += f"; pressure {pressure:.2f}"
+            else:
+                reason = f"{name}: waits — " + "; ".join(parts)
+                if until:
+                    reason += f"; fits after {_fmt_when(until, at)}"
+        found.append({"name": name, "fits": fits, "pressure": pressure, "until": until, "reason": reason,
+                      "_index": index,
+                      "_tight": left["300"] - estimates["300"]["p80"] if "300" in estimates else float("inf")})
+    def key(item):
+        if item["fits"] is True:
+            p = item["pressure"]
+            return (0, 0 if p is not None else 1, -(p or 0.0), item["_tight"], item["_index"])
+        if item["fits"] is None:
+            return (1, 0, 0.0, 0.0, item["_index"])
+        return (2, 0 if item["until"] else 1, 0.0, 0.0, item["_index"])
+    found.sort(key=lambda item: (key(item), item["until"] or "") if item["fits"] is False else (key(item), ""))
+    for item in found:
+        del item["_index"], item["_tight"]
+    return found
+
+
 def _record_round_cost(d: Path, agent: dict, r: Path, run: dict, events: list[dict], environ: dict) -> None:
     """Save cost.json and add a ledger line, only with the budget on. Never changes the round's outcome."""
     cost_path = r / "cost.json"
@@ -2771,12 +3011,7 @@ def _record_round_cost(d: Path, agent: dict, r: Path, run: dict, events: list[di
         if (r / "meter-before.json").exists():
             before = json.loads((r / "meter-before.json").read_text())
         cost = round_cost(before, after, events, round_minutes(run))
-        size = run_size(d)
-        if size is None and "-" in d.name:
-            parent = d.parent / d.name.rpartition("-")[0]
-            log = parent / "decisions.tsv"
-            if log.is_file() and re.search(rf"(?<![\w-]){re.escape(d.name)}(?![\w-])", log.read_text()):
-                size = run_size(parent)
+        size = _round_size(d)
         prompt = (r / "prompt.md").read_text() if (r / "prompt.md").exists() else ""
         entry = {"runner": agent.get("runner", "cli"), "mode": brief_mode(prompt), "size": size,
                  "status": run["status"], "at": now(), **cost}
@@ -3569,6 +3804,18 @@ def cmd_executors(args) -> int:
         _resolve_runner(args.after, environ)  # a typo'd rung is an error, not the ladder's first rung
         print(_executor_after(ladder, args.after, environ, at))
         return 0
+    if config.get("budget") and getattr(args, "mode", None):
+        meters = codex_meters(config, environ, at)
+        ranked = choose_executors(config, environ, at, args.mode.upper(), args.size, meters, cost_samples(environ))
+        kept = {item["name"] for item in ranked}
+        limited = limited_runners(environ, at)
+        for name in ladder:
+            if name not in kept and name in limited:
+                print(f"{name}: usage limit until {limited[name]}; left out until then", file=sys.stderr)
+        for item in ranked:
+            print(item["reason"], file=sys.stderr)
+        print("\n".join(item["name"] for item in ranked) if ranked else "inline")
+        return 0
     limited = limited_runners(environ, at)
     for name in ladder:
         if name in limited:
@@ -3802,6 +4049,7 @@ def cmd_create(args) -> int:
         save_json(d / "agent.json", agent)
         r = new_round(d, args.prompt_file)
         pid = cli_launch(d, r, agent, read_prompt(args.prompt_file), args.mode)
+        _reserve_round(d, runner, read_prompt(args.prompt_file), environ)
         who = (f"{runner} (codex exec on {provider['model']} with the ChatGPT login in {login_home})" if login_home
                else f"{runner} (codex exec on {provider['model']} at {provider['baseUrl']})" if provider
                else "GLM (Claude Code on the GLM Coding Plan)" if glm else "Cursor CLI")
@@ -3881,6 +4129,7 @@ def cmd_followup(args) -> int:
             raise LoopError("no session id recorded yet; run `wait` on the previous run first")
         r = new_round(d, args.prompt_file)
         pid = cli_launch(d, r, agent, read_prompt(args.prompt_file), args.mode)
+        _reserve_round(d, str(agent.get("runner") or ""), read_prompt(args.prompt_file), environ)
         append_log(d, "dispatch", f"run {r.name}: follow-up ({args.mode} mode)", "keryx followup",
                    f"pid {pid}, session {agent['sessionId']}", "RUNNING")
         print(f"run {r.name} started: pid {pid} (resuming session {agent['sessionId']})")
@@ -4001,6 +4250,7 @@ def _wait_cli(d: Path, args) -> int:
         run["usageLimit"] = limit
     save_json(r / "run.json", run)
     _record_round_cost(d, agent, r, run, events_all, dict(os.environ))
+    _release_round(d, agent, dict(os.environ))
     head = git("rev-parse", "HEAD", cwd=agent["workspace"])
     dirty = git("status", "--porcelain", cwd=agent["workspace"])
     print(f"branch {agent['branch']} at {head}" + ("  (UNCOMMITTED changes in the worktree)" if dirty else ""))
@@ -5577,6 +5827,8 @@ def main(argv=None) -> int:
                     help="seconds to wait for the agent (default 900)")
     rs.add_argument("question", metavar="QUESTION")
     ex = sub.add_parser("executors")
+    ex.add_argument("--mode", metavar="MODE", help="with the budget on, rank by the cost of a round of this mode")
+    ex.add_argument("--size", choices=["S", "M", "L"], default="M", help="the run's size (default M)")
     ex.add_argument("--after", metavar="RUNNER",
                     help="print the next executor after this one that is not at a usage limit (inline = the coordinator)")
     budget = sub.add_parser("budget", help="show how much quota each executor has left")
