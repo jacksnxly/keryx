@@ -1863,6 +1863,8 @@ def _credits_path(environ: dict) -> Path:
 def _spend_credit(name: str, provider: dict, credit: dict, environ: dict) -> str | None:
     """Spend one credit on a login and log it (never the credit id)."""
     outcome = consume_reset_credit(codex_login_home(provider, environ), environ, credit["id"], str(uuid.uuid4()))
+    if outcome is None:
+        return None  # the call failed: nothing was spent, so nothing is logged
     path = _credits_path(environ)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1872,6 +1874,18 @@ def _spend_credit(name: str, provider: dict, credit: dict, environ: dict) -> str
     except OSError:
         pass
     return outcome
+
+
+def _cache_meter(name: str, provider: dict, meter: dict | None, environ: dict) -> None:
+    """Write one login's fresh reading into meters.json, in the shape codex_meters keeps."""
+    path = config_path(environ).parent / "meters.json"
+    cache = _read_meter_cache(path)
+    cache[name] = {"read": _stamp(dt.datetime.now(dt.timezone.utc)),
+                   "home": str(codex_login_home(provider, environ)), "meter": meter}
+    try:
+        _write_json_atomic(path, cache, ".meters-")
+    except OSError:
+        pass
 
 
 def executor_left(name: str, config: dict, environ: dict, at: dt.datetime, meters: dict) -> dict:
@@ -3062,8 +3076,9 @@ def choose_executors(config: dict, environ: dict, at: dt.datetime, mode: str, si
             return (0, 0 if p is not None else 1, -(p or 0.0), item["_tight"], item["_index"])
         if item["fits"] is None:
             return (1, 0, 0.0, 0.0, item["_index"])
-        return (2, 0 if item["until"] else 1, 0.0, 0.0, item["_index"])
-    found.sort(key=lambda item: (key(item), item["until"] or "") if item["fits"] is False else (key(item), ""))
+        when = _parse_stamp(item["until"]) if item["until"] else None
+        return (2, 0 if when else 1, when.timestamp() if when else 0.0, 0.0, item["_index"])
+    found.sort(key=key)
     for item in found:
         del item["_index"], item["_tight"]
     return found
@@ -3881,7 +3896,6 @@ def cmd_executors(args) -> int:
         meters = codex_meters(config, environ, at, max_age=0)
         ranked = choose_executors(config, environ, at, args.mode.upper(), args.size, meters, cost_samples(environ))
         if not any(item["fits"] is True for item in ranked):
-            repository = main_worktree().name
             for name in ladder:
                 provider = config.get("providers", {}).get(name)
                 if not provider or not is_login_provider(provider):
@@ -3889,16 +3903,39 @@ def cmd_executors(args) -> int:
                 spend = credit_to_spend(meters.get(name), at, True)
                 if spend is None:
                     continue
-                if _grant_lookup(environ, "reset-credits", repository) == "allow":
-                    outcome = _spend_credit(name, provider, spend, environ)
-                    print(f"spent a reset credit on {name} (expired {spend['expiresAt']} otherwise): {outcome}",
+                hint = f"keryx.py budget --spend-credit {name}"
+                try:
+                    repository = main_worktree().name
+                except Exception:
+                    repository = ""  # outside a checkout: the default scope only
+                if os.environ.get("KERYX_EXECUTOR"):
+                    print(f"{name}: a reset credit expiring {spend['expiresAt']} would free it — {hint}",
                           file=sys.stderr)
-                    meters[name] = read_codex_meter(codex_login_home(provider, environ), environ)
+                    continue
+                if _grant_lookup(environ, "reset-credits", repository) != "allow":
+                    print(f"{name}: a reset credit expiring {spend['expiresAt']} would free it — {hint}",
+                          file=sys.stderr)
+                    continue
+                home = codex_login_home(provider, environ)
+                with _locked_file(config_path(environ).parent / "credits"):
+                    fresh = read_codex_meter(home, environ)
+                    if fresh is None:
+                        fresh = meters.get(name)  # the re-read failed: go on with the reading we have
+                    spend = credit_to_spend(fresh, at, True)
+                    outcome = _spend_credit(name, provider, spend, environ) if spend is not None else None
+                    if spend is not None and outcome is None:
+                        print(f"{name}: reset credit not spent (the call failed)", file=sys.stderr)
+                    elif outcome is not None:
+                        print(f"spent a reset credit on {name} (expired {spend['expiresAt']} otherwise): {outcome}",
+                              file=sys.stderr)
+                        fresh = read_codex_meter(home, environ)
+                    if spend is None or outcome is not None:
+                        meters[name] = fresh
+                        _cache_meter(name, provider, fresh, environ)
+                if spend is None or outcome is not None:
                     ranked = choose_executors(config, environ, at, args.mode.upper(), args.size, meters,
                                               cost_samples(environ))
                     break
-                print(f"{name}: a reset credit expiring {spend['expiresAt']} would free it — "
-                      f"keryx.py budget --spend-credit {name}", file=sys.stderr)
         kept = {item["name"] for item in ranked}
         limited = limited_runners(environ, at)
         for name in ladder:
@@ -3938,11 +3975,14 @@ def cmd_budget(args) -> int:
     for entry in entries:
         meter = meters.get(entry["name"])
         if isinstance(meter, dict):
-            stamps = sorted(c["expiresAt"] for c in meter.get("credits") or []
-                            if isinstance(c, dict) and c.get("status") == "available" and c.get("expiresAt"))
-            entry["credits"] = sum(1 for c in meter.get("credits") or []
-                                   if isinstance(c, dict) and c.get("status") == "available")
-            entry["creditExpires"] = stamps[0] if stamps else None
+            live = []
+            for c in meter.get("credits") or []:
+                if isinstance(c, dict) and c.get("status") == "available":
+                    expires = _parse_stamp(c.get("expiresAt"))
+                    if expires is not None and expires > _as_utc(at):
+                        live.append((expires, c["expiresAt"]))
+            entry["credits"] = len(live)
+            entry["creditExpires"] = min(live)[1] if live else None
         else:
             entry["credits"], entry["creditExpires"] = None, None
     samples = cost_samples(environ)
@@ -3975,6 +4015,8 @@ def _spend_credit_by_hand(name: str, config: dict, environ: dict) -> int:
     if credit is None:
         raise LoopError(f"{name} has no available reset credit")
     outcome = _spend_credit(name, provider, credit, environ)
+    if outcome is None:
+        raise LoopError(f"{name}: reset credit not spent (the call failed)")
     print(f"spent a reset credit on {name}: {outcome}")
     return 0
 
