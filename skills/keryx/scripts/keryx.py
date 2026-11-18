@@ -1762,7 +1762,7 @@ def _read_meter_cache(path: Path) -> dict:
 
 
 def codex_meters(config: dict, environ: dict, at: dt.datetime, max_age: int = 600) -> dict[str, dict | None]:
-    """Read or reuse each Codex login's meter. A failed read leaves the cache alone."""
+    """Read each Codex login's meter or reuse its latest result, including a failed read."""
     providers = config.get("providers", {})
     logins = {name: providers[name] for name in ordered_ladder(config, at)
               if name in providers and is_login_provider(providers[name])}
@@ -1774,17 +1774,18 @@ def codex_meters(config: dict, environ: dict, at: dt.datetime, max_age: int = 60
     meters = {}
     updates = {}
     for name, provider in logins.items():
+        home = codex_login_home(provider, environ)
         entry = cache.get(name)
-        if isinstance(entry, dict):
+        if isinstance(entry, dict) and entry.get("home") == str(home) and "meter" in entry:
             read = _parse_stamp(entry.get("read"))
-            cached = entry.get("meter")
-            if read is not None and 0 <= (moment - read).total_seconds() < max_age and isinstance(cached, dict):
+            cached = entry["meter"]
+            if (read is not None and 0 <= (moment - read).total_seconds() < max_age
+                    and (cached is None or isinstance(cached, dict))):
                 meters[name] = cached
                 continue
-        meter = read_codex_meter(codex_login_home(provider, environ), environ)
+        meter = read_codex_meter(home, environ)
         meters[name] = meter
-        if meter is not None:
-            updates[name] = {"read": _stamp(moment), "meter": meter}
+        updates[name] = {"read": _stamp(moment), "home": str(home), "meter": meter}
     if updates:
         # Re-read after the exchanges to keep other entries published while they were in flight.
         cache = _read_meter_cache(path)
@@ -1800,8 +1801,12 @@ def executor_left(name: str, config: dict, environ: dict, at: dt.datetime, meter
     """What remains for one executor, from its meter or the live limit on record."""
     meter = meters.get(name)
     if isinstance(meter, dict):
-        used = max((window["usedPercent"] for window in _meter_windows(meter)), default=None)
-        left = max(0, round(100 - used)) if used is not None else None
+        reached = meter.get("reached")
+        if isinstance(reached, str) and reached:
+            left = 0
+        else:
+            used = max((window["usedPercent"] for window in _meter_windows(meter)), default=None)
+            left = max(0, round(100 - used)) if used is not None else None
         limit = limit_from_meter(meter)
         until = limit["resetsAt"] if limit is not None else None
         reset = _parse_stamp(until)
@@ -3163,6 +3168,7 @@ def _print_setup(environ: dict) -> None:
     cfg = load_config(environ)
     print("\n".join(cfg["executors"]))
     print(f"order: {cfg['order']}")
+    print(f"budget: {'on' if cfg['budget'] else 'off'}")
     for name, spec in cfg["resets"].items():
         every = spec.get("every") if isinstance(spec, dict) else None
         nxt = spec.get("next") if isinstance(spec, dict) else ""
