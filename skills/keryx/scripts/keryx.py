@@ -93,12 +93,14 @@ import calendar
 import datetime as dt
 import fnmatch
 import json
+import math
 import mimetypes
 import os
 import re
 import selectors
 import signal
 import subprocess
+import statistics
 import sys
 import tempfile
 import textwrap
@@ -456,8 +458,10 @@ def standard_phase(phase: str) -> bool:
     return phase in STANDARD_PHASES or phase.startswith("finish-")
 
 
-def run_size(rows: list[tuple[int, list[str]]]) -> str | None:
-    """The latest size row's letter, or None when that row does not parse."""
+def run_size(rows: list[tuple[int, list[str]]] | Path) -> str | None:
+    """The latest size row's letter, or None when that row does not parse. A run folder reads its own log."""
+    if isinstance(rows, Path):
+        rows = read_log_rows(rows)
     row = next((cells for _, cells in reversed(rows) if cells[1] == "size"), None)
     return _size_letter(row[2]) if row is not None else None
 
@@ -2652,6 +2656,145 @@ def _codex_provider(agent: dict, environ: dict) -> dict:
     return provider
 
 
+def round_minutes(run: dict) -> float:
+    """Use the runner's duration when available, otherwise the round's elapsed time."""
+    duration = run.get("durationMs")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+        return duration / 60000
+    started = _parse_stamp(run.get("startedAt"))
+    ended = _parse_stamp(run.get("endedAt"))
+    return (ended - started).total_seconds() / 60 if started is not None and ended is not None else 0.0
+
+
+def round_cost(before: dict | None, after: dict | None, events: list[dict], minutes: float) -> dict:
+    """What a round cost: the used-percent difference per meter window (only a window in both meters with the
+    same reset and no drop), the summed token counts of Codex and Claude Code result events, and the minutes."""
+    windows: dict[str, float] = {}
+    if isinstance(before, dict) and isinstance(after, dict):
+        earlier = {w.get("minutes"): w for w in _meter_windows(before)}
+        for window in _meter_windows(after):
+            old = earlier.get(window.get("minutes"))
+            if old is None or old.get("resetsAt") != window.get("resetsAt"):
+                continue
+            diff = window["usedPercent"] - old["usedPercent"]
+            if diff >= 0:
+                windows[str(window["minutes"])] = diff
+    tokens = {"input": 0, "cached": 0, "output": 0}
+    for event in events:
+        usage = event.get("usage") if isinstance(event, dict) else None
+        if not isinstance(usage, dict) or event.get("type") not in ("turn.completed", "result"):
+            continue
+        for key, names in (("input", ("input_tokens",)), ("cached", ("cached_input_tokens", "cache_read_input_tokens")),
+                           ("output", ("output_tokens",))):
+            for name in names:
+                value = usage.get(name)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    tokens[key] += value
+    return {"windows": windows, "tokens": tokens, "minutes": minutes}
+
+
+def brief_mode(text: str) -> str:
+    """The first word after `Mode` on the first line that has it, upper-cased; UNKNOWN when there is none."""
+    for line in text.splitlines():
+        match = re.search(r"\bMode[:\s]+([A-Za-z][\w-]*)", line)
+        if match:
+            return match.group(1).upper()
+    return "UNKNOWN"
+
+
+def _costs_path(environ: dict) -> Path:
+    return config_path(environ).parent / "costs.jsonl"
+
+
+def record_cost(environ: dict, entry: dict) -> None:
+    """Append one entry to the machine-wide cost ledger, creating its folder."""
+    path = _costs_path(environ)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        fh.write(json.dumps(entry) + "\n")
+
+
+def cost_samples(environ: dict) -> list[dict]:
+    """Every ledger line that parses to an object; a missing or unreadable file is empty."""
+    try:
+        lines = _costs_path(environ).read_text().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    samples = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            samples.append(value)
+    return samples
+
+
+def cost_estimate(samples: list[dict], runner: str, mode: str, size: str | None, window: str = "300") -> dict | None:
+    """A log-normal estimate of a round's cost in one window: median and 80th percentile, from this runner's and
+    mode's finished and legacy samples of this size first, else of any size."""
+    def numbers(rows):
+        found = []
+        for row in rows:
+            windows = row.get("windows")
+            value = windows.get(window) if isinstance(windows, dict) else None
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                found.append(max(float(value), 0.5))
+        return found
+    mine = [s for s in samples if isinstance(s, dict) and s.get("runner") == runner and s.get("mode") == mode
+            and s.get("status", "FINISHED") == "FINISHED"]
+    values, used = numbers(s for s in mine if s.get("size") == size), size
+    if not values:
+        values, used = numbers(mine), None
+    if not values:
+        return None
+    logs = [math.log(v) for v in values]
+    mu = statistics.fmean(logs)
+    sigma = 0.6 if len(logs) == 1 else max(statistics.stdev(logs), 0.25)
+    return {"median": round(math.exp(mu), 1), "p80": round(math.exp(mu + 0.8416 * sigma), 1),
+            "n": len(values), "size": used}
+
+
+def _record_round_cost(d: Path, agent: dict, r: Path, run: dict, events: list[dict], environ: dict) -> None:
+    """Save cost.json and add a ledger line, only with the budget on. Never changes the round's outcome."""
+    cost_path = r / "cost.json"
+    if cost_path.exists() or _budget_config(environ) is None:
+        return
+    try:
+        after = None
+        if agent.get("runnerKind") in PROVIDER_RUNNERS:
+            provider = _codex_provider(agent, environ)
+            if is_login_provider(provider):
+                after = read_codex_meter(codex_login_home(provider, environ), environ)
+        before = None
+        if (r / "meter-before.json").exists():
+            before = json.loads((r / "meter-before.json").read_text())
+        cost = round_cost(before, after, events, round_minutes(run))
+        size = run_size(d)
+        if size is None and "-" in d.name:
+            parent = d.parent / d.name.rpartition("-")[0]
+            log = parent / "decisions.tsv"
+            if log.is_file() and re.search(rf"(?<![\w-]){re.escape(d.name)}(?![\w-])", log.read_text()):
+                size = run_size(parent)
+        prompt = (r / "prompt.md").read_text() if (r / "prompt.md").exists() else ""
+        entry = {"runner": agent.get("runner", "cli"), "mode": brief_mode(prompt), "size": size,
+                 "status": run["status"], "at": now(), **cost}
+        try:
+            cost_file = cost_path.open("x")  # only one concurrent wait can claim the round
+        except FileExistsError:
+            return
+        try:
+            with cost_file:
+                cost_file.write(json.dumps(cost, indent=2, sort_keys=True) + "\n")
+            record_cost(environ, entry)
+        except Exception:
+            cost_path.unlink(missing_ok=True)
+            raise
+    except Exception as exc:  # recording is a side record: it must not change the round's outcome
+        print(f"cost not recorded: {exc}")
+
+
 def cli_launch(d: Path, r: Path, agent: dict, prompt: str, mode: str) -> int:
     if agent.get("runnerKind") in PROVIDER_RUNNERS:
         environ = dict(os.environ)
@@ -2662,6 +2805,13 @@ def cli_launch(d: Path, r: Path, agent: dict, prompt: str, mode: str) -> int:
             gh = _codex_home_dir(d) / "gh"
             gh.mkdir(parents=True, exist_ok=True)
             env = codex_env(environ, str(home), None, gh_dir=str(gh))
+            if _budget_config(environ) is not None:
+                try:
+                    meter = read_codex_meter(home, environ)
+                    if meter is not None:
+                        save_json(r / "meter-before.json", meter)
+                except Exception as exc:  # a side record: never stops the launch
+                    print(f"meter before not read: {exc}")
         else:
             home = write_codex_home(d, provider)
             env = codex_env(environ, str(home), codex_key(provider, environ))
@@ -3435,14 +3585,19 @@ def cmd_budget(args) -> int:
     meters = codex_meters(config, environ, dt.datetime.now(dt.timezone.utc), max_age=0)
     at = dt.datetime.now(dt.timezone.utc)
     entries = [executor_left(name, config, environ, at, meters) for name in ordered_ladder(config, at)]
+    samples = cost_samples(environ)
+    for entry in entries:
+        entry["cost"] = cost_estimate(samples, entry["name"], "IMPLEMENT", "M")
     if args.json:
         print(json.dumps(entries, indent=2))
         return 0
-    print("name  plan  left  until  source")
+    print("name  plan  left  until  source  implement-M")
     for entry in entries:
         left = f"{entry['left']}%" if entry["left"] is not None else "-"
         plan = entry["plan"] if entry["plan"] is not None else "-"
-        print(f"{entry['name']}  {plan}  {left}  {entry['until'] or '-'}  {entry['source']}")
+        cost = entry["cost"]
+        shown = f"≈{cost['median']}% (p80 {cost['p80']}%, n={cost['n']})" if cost else "-"
+        print(f"{entry['name']}  {plan}  {left}  {entry['until'] or '-'}  {entry['source']}  {shown}")
     return 0
 
 
@@ -3845,6 +4000,7 @@ def _wait_cli(d: Path, args) -> int:
     if limit:
         run["usageLimit"] = limit
     save_json(r / "run.json", run)
+    _record_round_cost(d, agent, r, run, events_all, dict(os.environ))
     head = git("rev-parse", "HEAD", cwd=agent["workspace"])
     dirty = git("status", "--porcelain", cwd=agent["workspace"])
     print(f"branch {agent['branch']} at {head}" + ("  (UNCOMMITTED changes in the worktree)" if dirty else ""))
