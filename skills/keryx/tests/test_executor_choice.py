@@ -31,16 +31,27 @@ def meter(used5, used7, reset5="2026-11-18T05:00:00Z", reset7="2026-11-25T00:00:
                         {"minutes": 10080, "usedPercent": used7, "resetsAt": reset7}]}
 
 
+class _Isolated(unittest.TestCase):
+    """Every test gets a config folder of its own: keryx must never read or clear the real ~/.config/keryx."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.env = {"KERYX_CONFIG": str(Path(self._tmp.name) / "config.json"), "HOME": self._tmp.name}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+
 def samples(runner, five, seven, n=3, mode="IMPLEMENT", size="M"):
     return [{"runner": runner, "mode": mode, "size": size, "windows": {"300": five, "10080": seven}}] * n
 
 
-class Fit(unittest.TestCase):
+class Fit(_Isolated):
     def test_an_executor_whose_p80_does_not_fit_goes_after_one_that_fits(self):
         cfg = config("codex-a", "codex-b")
         meters = {"codex-a": meter(70, 10), "codex-b": meter(0, 30)}
         hist = samples("codex-a", 50, 8) + samples("codex-b", 50, 8)
-        ranked = keryx.choose_executors(cfg, {}, AT, "IMPLEMENT", "M", meters, hist)
+        ranked = keryx.choose_executors(cfg, self.env, AT, "IMPLEMENT", "M", meters, hist)
         self.assertEqual([r["name"] for r in ranked], ["codex-b", "codex-a"])
         self.assertIs(ranked[0]["fits"], True)
         self.assertIs(ranked[1]["fits"], False)
@@ -48,13 +59,13 @@ class Fit(unittest.TestCase):
 
     def test_the_weekly_window_must_fit_too(self):
         cfg = config("codex-a")
-        ranked = keryx.choose_executors(cfg, {}, AT, "IMPLEMENT", "M", {"codex-a": meter(0, 95)},
+        ranked = keryx.choose_executors(cfg, self.env, AT, "IMPLEMENT", "M", {"codex-a": meter(0, 95)},
                                         samples("codex-a", 50, 8))
         self.assertIs(ranked[0]["fits"], False)
 
     def test_no_estimate_or_no_meter_is_unknown_and_keeps_ladder_order(self):
         cfg = config("codex-a", "cli", "subagent")
-        ranked = keryx.choose_executors(cfg, {}, AT, "IMPLEMENT", "M", {"codex-a": meter(10, 10)}, [])
+        ranked = keryx.choose_executors(cfg, self.env, AT, "IMPLEMENT", "M", {"codex-a": meter(10, 10)}, [])
         self.assertEqual([(r["name"], r["fits"]) for r in ranked],
                          [("codex-a", None), ("cli", None), ("subagent", None)])
 
@@ -68,20 +79,20 @@ class Fit(unittest.TestCase):
             self.assertEqual([r["name"] for r in ranked], ["subagent"])
 
 
-class Pressure(unittest.TestCase):
+class Pressure(_Isolated):
     def test_among_fitting_executors_the_one_closer_to_lapsing_goes_first(self):
         # codex-a: 80 % of the week left, 24 h to its reset; codex-b: 80 % left, 6 days to its reset.
         cfg = config("codex-b", "codex-a")
         meters = {"codex-a": meter(0, 20, reset7="2026-11-19T01:00:00Z"), "codex-b": meter(0, 20)}
         hist = samples("codex-a", 50, 8) + samples("codex-b", 50, 8)
-        ranked = keryx.choose_executors(cfg, {}, AT, "IMPLEMENT", "M", meters, hist)
+        ranked = keryx.choose_executors(cfg, self.env, AT, "IMPLEMENT", "M", meters, hist)
         self.assertEqual([r["name"] for r in ranked], ["codex-a", "codex-b"])
         self.assertGreater(ranked[0]["pressure"], ranked[1]["pressure"])
 
     def test_pressure_is_the_rate_needed_over_the_rate_possible(self):
         # weekly per 5 h-window ratio 8/50 → a full 5 h window burns 16 % of the week → 3.2 %/h possible.
         # 80 % left over 24 h needs 3.33 %/h → pressure 80/24/3.2.
-        ranked = keryx.choose_executors(config("codex-a"), {}, AT, "IMPLEMENT", "M",
+        ranked = keryx.choose_executors(config("codex-a"), self.env, AT, "IMPLEMENT", "M",
                                         {"codex-a": meter(0, 20, reset7="2026-11-19T01:00:00Z")},
                                         samples("codex-a", 50, 8))
         self.assertAlmostEqual(ranked[0]["pressure"], (80 / 24) / 3.2, places=2)
@@ -90,7 +101,7 @@ class Pressure(unittest.TestCase):
         cfg = config("codex-a", "codex-b")
         meters = {"codex-a": meter(0, 20), "codex-b": meter(30, 20)}
         hist = samples("codex-a", 50, 8) + samples("codex-b", 50, 8)
-        ranked = keryx.choose_executors(cfg, {}, AT, "IMPLEMENT", "M", meters, hist)
+        ranked = keryx.choose_executors(cfg, self.env, AT, "IMPLEMENT", "M", meters, hist)
         self.assertEqual([r["name"] for r in ranked], ["codex-b", "codex-a"])
 
 
