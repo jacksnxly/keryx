@@ -107,6 +107,7 @@ import textwrap
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 API = os.environ.get("CURSOR_API_BASE", "https://api.cursor.com")
@@ -1117,8 +1118,10 @@ def parse_codex_meter(result: object) -> dict | None:
             "credits": credits}
 
 
-def read_codex_meter(home: Path, environ: dict, timeout: float = CODEX_METER_TIMEOUT) -> dict | None:
-    """Read the login's meter with one deadline for the whole app-server exchange."""
+def _app_server_call(home: Path, environ: dict, method: str, params: dict | None,
+                     timeout: float = CODEX_METER_TIMEOUT) -> dict | None:
+    """One request to the login's own `codex app-server` (initialize, initialized, the call) with one deadline
+    for the whole exchange. The result object, or None on any failure."""
     deadline = time.monotonic() + timeout
     try:
         with tempfile.TemporaryDirectory() as gh_dir:
@@ -1155,19 +1158,42 @@ def read_codex_meter(home: Path, environ: dict, timeout: float = CODEX_METER_TIM
                         messages = [{"id": 1, "method": "initialize",
                                      "params": {"clientInfo": {"name": "keryx",
                                                                "version": USER_AGENT.partition("/")[2]}}},
-                                    {"method": "initialized"}, {"id": 2, "method": "account/rateLimits/read"}]
+                                    {"method": "initialized"}, {"id": 2, "method": method}]
+                        if params is not None:
+                            messages[-1]["params"] = params
                         result = None
                         for message in messages:
                             process.stdin.write(json.dumps(message).encode("utf-8") + b"\n")
                             process.stdin.flush()
                             if "id" in message:
                                 result = receive(message["id"])
-                        return parse_codex_meter(result)
+                        return result if isinstance(result, dict) else None
                 finally:
                     # The Popen context waits for the killed process.
                     process.kill()
     except (OSError, ValueError, KeyError, RecursionError, subprocess.SubprocessError):
         return None
+
+
+def read_codex_meter(home: Path, environ: dict, timeout: float = CODEX_METER_TIMEOUT) -> dict | None:
+    """Read the login's meter with one deadline for the whole app-server exchange."""
+    result = _app_server_call(home, environ, "account/rateLimits/read", None, timeout)
+    if result is None:
+        return None
+    try:
+        return parse_codex_meter(result)
+    except (ValueError, KeyError, RecursionError):
+        return None
+
+
+def consume_reset_credit(home: Path, environ: dict, credit_id: str, idempotency_key: str,
+                         timeout: float = CODEX_METER_TIMEOUT) -> str | None:
+    """Spend one reset credit through the login's own app-server; the outcome, or None on any failure."""
+    result = _app_server_call(home, environ, "account/rateLimitResetCredit/consume",
+                              {"creditId": credit_id, "idempotencyKey": idempotency_key}, timeout)
+    if result is None or "outcome" not in result:
+        return None
+    return str(result["outcome"])
 
 
 def _codex_home_dir(d: Path) -> Path:
@@ -1801,6 +1827,67 @@ def codex_meters(config: dict, environ: dict, at: dt.datetime, max_age: int = 60
     return meters
 
 
+def credit_to_spend(meter: dict | None, at: dt.datetime, work_waiting: bool, within_days: int = 3) -> dict | None:
+    """The reset credit worth spending now: work is waiting, the weekly window is used up and an available
+    credit would expire within `within_days`. The one expiring first, else None."""
+    if not work_waiting or not isinstance(meter, dict):
+        return None
+    if not any(window.get("minutes") == 10080 and window["usedPercent"] >= 100 for window in _meter_windows(meter)):
+        return None
+    moment = _as_utc(at)
+    limit = moment + dt.timedelta(days=within_days)
+    found = []
+    for credit in meter.get("credits") or []:
+        if not isinstance(credit, dict) or credit.get("status") != "available":
+            continue
+        expires = _parse_stamp(credit.get("expiresAt"))
+        if expires is not None and moment < expires <= limit:
+            found.append((expires, credit))
+    return min(found, key=lambda pair: pair[0])[1] if found else None
+
+
+def _soonest_credit(meter: dict | None, at: dt.datetime) -> dict | None:
+    found = []
+    for credit in (meter.get("credits") or []) if isinstance(meter, dict) else []:
+        if isinstance(credit, dict) and credit.get("status") == "available":
+            expires = _parse_stamp(credit.get("expiresAt"))
+            if expires is None or expires > _as_utc(at):
+                found.append((expires or dt.datetime.max.replace(tzinfo=dt.timezone.utc), credit))
+    return min(found, key=lambda pair: pair[0])[1] if found else None
+
+
+def _credits_path(environ: dict) -> Path:
+    return config_path(environ).parent / "credits.jsonl"
+
+
+def _spend_credit(name: str, provider: dict, credit: dict, environ: dict) -> str | None:
+    """Spend one credit on a login and log it (never the credit id)."""
+    outcome = consume_reset_credit(codex_login_home(provider, environ), environ, credit["id"], str(uuid.uuid4()))
+    if outcome is None:
+        return None  # the call failed: nothing was spent, so nothing is logged
+    path = _credits_path(environ)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as fh:
+            fh.write(json.dumps({"runner": name, "at": _stamp(dt.datetime.now(dt.timezone.utc)),
+                                 "expiresAt": credit.get("expiresAt"), "outcome": outcome}) + "\n")
+    except OSError:
+        pass
+    return outcome
+
+
+def _cache_meter(name: str, provider: dict, meter: dict | None, environ: dict) -> None:
+    """Write one login's fresh reading into meters.json, in the shape codex_meters keeps."""
+    path = config_path(environ).parent / "meters.json"
+    cache = _read_meter_cache(path)
+    cache[name] = {"read": _stamp(dt.datetime.now(dt.timezone.utc)),
+                   "home": str(codex_login_home(provider, environ)), "meter": meter}
+    try:
+        _write_json_atomic(path, cache, ".meters-")
+    except OSError:
+        pass
+
+
 def executor_left(name: str, config: dict, environ: dict, at: dt.datetime, meters: dict) -> dict:
     """What remains for one executor, from its meter or the live limit on record."""
     meter = meters.get(name)
@@ -1909,7 +1996,7 @@ def _write_json_atomic(path: Path, data: dict, prefix: str) -> None:
 
 
 GRANT_ACTIONS = ("push", "pr", "merge", "deploy-staging", "deploy-production", "production-data",
-                 "branch-delete", "followups")
+                 "branch-delete", "followups", "reset-credits")
 
 
 def _grants_path(environ: dict) -> Path:
@@ -2989,8 +3076,9 @@ def choose_executors(config: dict, environ: dict, at: dt.datetime, mode: str, si
             return (0, 0 if p is not None else 1, -(p or 0.0), item["_tight"], item["_index"])
         if item["fits"] is None:
             return (1, 0, 0.0, 0.0, item["_index"])
-        return (2, 0 if item["until"] else 1, 0.0, 0.0, item["_index"])
-    found.sort(key=lambda item: (key(item), item["until"] or "") if item["fits"] is False else (key(item), ""))
+        when = _parse_stamp(item["until"]) if item["until"] else None
+        return (2, 0 if when else 1, when.timestamp() if when else 0.0, 0.0, item["_index"])
+    found.sort(key=key)
     for item in found:
         del item["_index"], item["_tight"]
     return found
@@ -3807,6 +3895,47 @@ def cmd_executors(args) -> int:
     if config.get("budget") and getattr(args, "mode", None):
         meters = codex_meters(config, environ, at, max_age=0)
         ranked = choose_executors(config, environ, at, args.mode.upper(), args.size, meters, cost_samples(environ))
+        if not any(item["fits"] is True for item in ranked):
+            for name in ladder:
+                provider = config.get("providers", {}).get(name)
+                if not provider or not is_login_provider(provider):
+                    continue
+                spend = credit_to_spend(meters.get(name), at, True)
+                if spend is None:
+                    continue
+                hint = f"keryx.py budget --spend-credit {name}"
+                try:
+                    repository = main_worktree().name
+                except Exception:
+                    repository = ""  # outside a checkout: the default scope only
+                if os.environ.get("KERYX_EXECUTOR"):
+                    print(f"{name}: a reset credit expiring {spend['expiresAt']} would free it — {hint}",
+                          file=sys.stderr)
+                    continue
+                if _grant_lookup(environ, "reset-credits", repository) != "allow":
+                    print(f"{name}: a reset credit expiring {spend['expiresAt']} would free it — {hint}",
+                          file=sys.stderr)
+                    continue
+                home = codex_login_home(provider, environ)
+                with _locked_file(config_path(environ).parent / "credits"):
+                    fresh = read_codex_meter(home, environ)
+                    if fresh is None:
+                        fresh = meters.get(name)  # the re-read failed: go on with the reading we have
+                    spend = credit_to_spend(fresh, at, True)
+                    outcome = _spend_credit(name, provider, spend, environ) if spend is not None else None
+                    if spend is not None and outcome is None:
+                        print(f"{name}: reset credit not spent (the call failed)", file=sys.stderr)
+                    elif outcome is not None:
+                        print(f"spent a reset credit on {name} (expired {spend['expiresAt']} otherwise): {outcome}",
+                              file=sys.stderr)
+                        fresh = read_codex_meter(home, environ)
+                    if spend is None or outcome is not None:
+                        meters[name] = fresh
+                        _cache_meter(name, provider, fresh, environ)
+                if spend is None or outcome is not None:
+                    ranked = choose_executors(config, environ, at, args.mode.upper(), args.size, meters,
+                                              cost_samples(environ))
+                    break
         kept = {item["name"] for item in ranked}
         limited = limited_runners(environ, at)
         for name in ladder:
@@ -3838,22 +3967,57 @@ def cmd_budget(args) -> int:
     """Print each executor's plan and remaining quota from fresh meter readings."""
     environ = dict(os.environ)
     config = load_config(environ)
+    if getattr(args, "spend_credit", None):
+        return _spend_credit_by_hand(args.spend_credit, config, environ)
     meters = codex_meters(config, environ, dt.datetime.now(dt.timezone.utc), max_age=0)
     at = dt.datetime.now(dt.timezone.utc)
     entries = [executor_left(name, config, environ, at, meters) for name in ordered_ladder(config, at)]
+    for entry in entries:
+        meter = meters.get(entry["name"])
+        if isinstance(meter, dict):
+            live = []
+            for c in meter.get("credits") or []:
+                if isinstance(c, dict) and c.get("status") == "available":
+                    expires = _parse_stamp(c.get("expiresAt"))
+                    if expires is not None and expires > _as_utc(at):
+                        live.append((expires, c["expiresAt"]))
+            entry["credits"] = len(live)
+            entry["creditExpires"] = min(live)[1] if live else None
+        else:
+            entry["credits"], entry["creditExpires"] = None, None
     samples = cost_samples(environ)
     for entry in entries:
         entry["cost"] = cost_estimate(samples, entry["name"], "IMPLEMENT", "M")
     if args.json:
         print(json.dumps(entries, indent=2))
         return 0
-    print("name  plan  left  until  source  implement-M")
+    print("name  plan  left  until  source  implement-M  credits")
     for entry in entries:
         left = f"{entry['left']}%" if entry["left"] is not None else "-"
         plan = entry["plan"] if entry["plan"] is not None else "-"
         cost = entry["cost"]
         shown = f"≈{cost['median']}% (p80 {cost['p80']}%, n={cost['n']})" if cost else "-"
-        print(f"{entry['name']}  {plan}  {left}  {entry['until'] or '-'}  {entry['source']}  {shown}")
+        credits = "-" if entry["credits"] is None else (
+            f"{entry['credits']}" + (f" (soonest {entry['creditExpires']})" if entry["creditExpires"] else ""))
+        print(f"{entry['name']}  {plan}  {left}  {entry['until'] or '-'}  {entry['source']}  {shown}  {credits}")
+    return 0
+
+
+def _spend_credit_by_hand(name: str, config: dict, environ: dict) -> int:
+    """`budget --spend-credit NAME`: the owner asked, so spend the soonest-expiring available credit."""
+    _refuse_executor()
+    provider = config.get("providers", {}).get(name)
+    if not provider or not is_login_provider(provider):
+        raise LoopError(f"{name!r} is not a ChatGPT login provider; only a login has reset credits")
+    at = dt.datetime.now(dt.timezone.utc)
+    meter = read_codex_meter(codex_login_home(provider, environ), environ)
+    credit = _soonest_credit(meter, at)
+    if credit is None:
+        raise LoopError(f"{name} has no available reset credit")
+    outcome = _spend_credit(name, provider, credit, environ)
+    if outcome is None:
+        raise LoopError(f"{name}: reset credit not spent (the call failed)")
+    print(f"spent a reset credit on {name}: {outcome}")
     return 0
 
 
@@ -5842,6 +6006,8 @@ def main(argv=None) -> int:
                     help="print the next executor after this one that is not at a usage limit (inline = the coordinator)")
     budget = sub.add_parser("budget", help="show how much quota each executor has left")
     budget.add_argument("--json", action="store_true", help="print executor budgets as JSON")
+    budget.add_argument("--spend-credit", metavar="NAME",
+                        help="spend this ChatGPT login's soonest-expiring reset credit (owner only)")
     rm = sub.add_parser("remember")
     rm.add_argument("--repo", action="store_true", help="save for this repository only")
     rm.add_argument("note")
