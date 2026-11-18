@@ -992,21 +992,32 @@ def write_login_home(provider: dict, environ: dict) -> Path:
     LOGIN_HOME_MARK) is refused and left alone. Never reads, writes or prints auth.json."""
     home = codex_login_home(provider, environ)
     config = home / "config.toml"
-    if config.exists():
-        try:
+    user_home = str(environ.get("HOME") or os.path.expanduser("~"))
+    if os.path.abspath(home) == os.path.abspath(Path(user_home) / ".codex"):
+        raise LoopError(f"{home} is the default Codex home; point codexHome at a folder of its own "
+                        "(a fresh one keryx can own)")
+    try:
+        if config.exists():
             first = config.read_text().split("\n", 1)[0]
-        except OSError as exc:
-            raise LoopError(f"cannot read {config}: {exc}")
-        if first != LOGIN_HOME_MARK:
-            raise LoopError(f"{home} already has a config.toml that keryx did not write; "
+            if first != LOGIN_HOME_MARK:
+                raise LoopError(f"{home} already has a config.toml that keryx did not write; "
+                                "point codexHome at a folder of its own (a fresh one keryx can own)")
+        elif home.is_dir() and any(home.iterdir()):
+            raise LoopError(f"{home} already has files and no config.toml of keryx's; "
                             "point codexHome at a folder of its own (a fresh one keryx can own)")
-    home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LoopError(f"cannot read {config}: {exc}")
+    try:
+        home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise LoopError(f"cannot create {home}: {exc}")
     lines = [LOGIN_HOME_MARK, f"model = {_toml(provider['model'])}"]
     if provider.get("effort"):
         lines.append(f"model_reasoning_effort = {_toml(provider['effort'])}")
     lines += ['approval_policy = "never"', 'cli_auth_credentials_store = "file"']
     lines += [f"{key} = {_toml(value)}" for key, value in (provider.get("codexConfig") or {}).items()]
     lines += ["", "[features]"] + [f"{f} = false" for f in ("plugins", "remote_plugin", "apps", "memories")]
+    lines += ["", "[shell_environment_policy]", 'exclude = ["CODEX_HOME"]']
     fd, tmp = tempfile.mkstemp(dir=home, prefix=".config.toml.")
     try:
         with os.fdopen(fd, "w") as fh:
@@ -1028,7 +1039,7 @@ def codex_login_check(name: str, provider: dict, environ: dict) -> Path:
     try:
         res = subprocess.run(["codex", "login", "status"], capture_output=True, text=True, timeout=60,
                              env=codex_env(environ, str(home), None), stdin=subprocess.DEVNULL)
-        ok = res.returncode == 0 and "Logged in" in (res.stdout + res.stderr)
+        ok = res.returncode == 0 and "Logged in using ChatGPT" in (res.stdout + res.stderr)
     except (OSError, subprocess.SubprocessError):
         ok = False
     if not ok:
@@ -1168,8 +1179,7 @@ def _first_of_next_month(at: dt.datetime) -> dt.datetime:
 
 def _chatgpt_reset(stamp: str, at: dt.datetime | None) -> str | None:
     """A ChatGPT reset time (`3:45 PM`, or `Nov 20th, 2026 3:45 PM`) read as machine-local time, as a UTC
-    stamp; None when it does not parse. A bare time takes the local date of `at` (now), and a bare time
-    already past means tomorrow."""
+    stamp; None when it does not parse. A bare time takes the local date of `at` (now), never rolled on."""
     stamp = re.sub(r"(\d)(?:st|nd|rd|th)\b", r"\1", stamp.strip())
     now = (at or dt.datetime.now(dt.timezone.utc))
     now = (now if now.tzinfo else now.replace(tzinfo=dt.timezone.utc)).astimezone()
@@ -1181,8 +1191,6 @@ def _chatgpt_reset(stamp: str, at: dt.datetime | None) -> str | None:
         except ValueError:
             return None
         local = dt.datetime.combine(now.date(), clock.time())
-        if local.astimezone() < now:
-            local += dt.timedelta(days=1)
     return _stamp(local.astimezone(dt.timezone.utc))
 
 
@@ -1234,9 +1242,10 @@ def round_usage_limit(r: Path) -> dict | None:
     texts = []
     for name in ("result.md", "stderr.log"):
         if (r / name).exists():
-            texts.append((r / name).read_text(errors="replace"))
-    for text in texts:
-        found = usage_limit(text, codex=codex)
+            written = dt.datetime.fromtimestamp((r / name).stat().st_mtime, dt.timezone.utc)
+            texts.append(((r / name).read_text(errors="replace"), written))
+    for text, written in texts:
+        found = usage_limit(text, written, codex=codex)
         if found:
             return found
     return None
