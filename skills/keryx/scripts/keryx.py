@@ -96,6 +96,7 @@ import json
 import mimetypes
 import os
 import re
+import selectors
 import signal
 import subprocess
 import sys
@@ -172,6 +173,7 @@ GLM_DENY = [f"Bash({c} *)" for c in (
 # only as $KERYX_CODEX_API_KEY in the environment of its own CODEX_HOME.
 PROVIDER_RUNNERS = ("codex",)
 CODEX_KEY_ENV = "KERYX_CODEX_API_KEY"
+CODEX_METER_TIMEOUT = 20
 # A provider name is no built-in executor (EXECUTORS): lowercase, 2-31 characters, a letter first.
 PROVIDER_NAME = re.compile(r"[a-z][a-z0-9-]{1,30}")
 # codexConfig may carry any scalar Codex setting except the ones keryx writes itself.
@@ -1083,6 +1085,87 @@ def codex_env(base: dict, codex_home: str, key: str | None, gh_dir: str | None =
     return env
 
 
+def parse_codex_meter(result: object) -> dict | None:
+    """Keep only the plan, windows and reset credits from account/rateLimits/read."""
+    limits = result.get("rateLimits") if isinstance(result, dict) else None
+    if not isinstance(limits, dict):
+        return None
+
+    def stamp(seconds: object) -> str | None:
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+            try:
+                return _stamp(dt.datetime.fromtimestamp(seconds, dt.timezone.utc))
+            except (OSError, OverflowError, ValueError):
+                pass
+        return None
+
+    windows = []
+    for name in ("primary", "secondary"):
+        window = limits.get(name)
+        if isinstance(window, dict):
+            windows.append({"minutes": window.get("windowDurationMins"), "usedPercent": window.get("usedPercent"),
+                            "resetsAt": stamp(window.get("resetsAt"))})
+    resets = result.get("rateLimitResetCredits")
+    raw_credits = resets.get("credits") if isinstance(resets, dict) else None
+    credits = [{"id": credit.get("id"), "status": credit.get("status"), "expiresAt": stamp(credit.get("expiresAt"))}
+               for credit in raw_credits if isinstance(credit, dict)] if isinstance(raw_credits, list) else []
+    return {"plan": limits.get("planType"), "reached": limits.get("rateLimitReachedType"), "windows": windows,
+            "credits": credits}
+
+
+def read_codex_meter(home: Path, environ: dict, timeout: float = CODEX_METER_TIMEOUT) -> dict | None:
+    """Read the login's meter with one deadline for the whole app-server exchange."""
+    deadline = time.monotonic() + timeout
+    try:
+        with tempfile.TemporaryDirectory() as gh_dir:
+            env = codex_env(environ, str(home), None, gh_dir=gh_dir)
+            with subprocess.Popen(["codex", "app-server"], env=env, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+                try:
+                    with selectors.DefaultSelector() as selector:
+                        selector.register(process.stdout, selectors.EVENT_READ)
+                        pending = b""
+
+                        def receive(reply_id: int):
+                            nonlocal pending
+                            while (remaining := deadline - time.monotonic()) > 0:
+                                line, newline, rest = pending.partition(b"\n")
+                                if newline:
+                                    pending = rest
+                                    reply = json.loads(line)
+                                    if isinstance(reply, dict) and reply.get("id") == reply_id:
+                                        if "error" in reply:
+                                            break
+                                        return reply["result"]
+                                else:
+                                    # A ready pipe can hold only part of a line. A buffered readline
+                                    # could then wait beyond the exchange deadline.
+                                    if not selector.select(remaining):
+                                        break
+                                    chunk = os.read(process.stdout.fileno(), 65536)
+                                    if not chunk:
+                                        break
+                                    pending += chunk
+                            raise ValueError("incomplete app-server exchange")
+
+                        messages = [{"id": 1, "method": "initialize",
+                                     "params": {"clientInfo": {"name": "keryx",
+                                                               "version": USER_AGENT.partition("/")[2]}}},
+                                    {"method": "initialized"}, {"id": 2, "method": "account/rateLimits/read"}]
+                        result = None
+                        for message in messages:
+                            process.stdin.write(json.dumps(message).encode("utf-8") + b"\n")
+                            process.stdin.flush()
+                            if "id" in message:
+                                result = receive(message["id"])
+                        return parse_codex_meter(result)
+                finally:
+                    # The Popen context waits for the killed process.
+                    process.kill()
+    except (OSError, ValueError, KeyError, RecursionError, subprocess.SubprocessError):
+        return None
+
+
 def _codex_home_dir(d: Path) -> Path:
     """Where a provider run's Codex config lives: beside the runs (.keryx/codex/<slug>/), like the GLM
     runner's own config dir; a run folder somewhere else keeps it inside itself."""
@@ -1258,18 +1341,30 @@ def round_usage_limit(r: Path) -> dict | None:
 
 
 def report_usage_limit(d: Path, r: Path, limit: dict) -> None:
-    when = f"resets at {limit['resetsAt']}" if limit.get("resetsAt") else f"resets in {limit['resetsIn']}"
+    environ = dict(os.environ)
+    runner = load_agent(d).get("runner")
+    if isinstance(runner, str) and runner:
+        config = _budget_config(environ)
+        provider = config["providers"].get(runner, {}) if config else {}
+        if is_login_provider(provider):
+            meter = read_codex_meter(codex_login_home(provider, environ), environ)
+            limit = limit_from_meter(meter) or limit
+    if limit.get("resetsAt"):
+        when = f"resets at {limit['resetsAt']}"
+    elif limit.get("resetsIn"):
+        when = f"resets in {limit['resetsIn']}"
+    else:
+        when = "reset time unknown"
     print(f"USAGE_LIMIT  {limit['kind']} limit; {when}")
     print("      reset within ~45 min: wait, then followup on this slug (or create on it again if followup finds "
           "no session); later: the next rung (keryx.py executors --after RUNNER; inline means you)")
     append_log(d, "dispatch", f"round {r.name}: usage limit ({limit['kind']})", "the executor reported its limit",
                f"{r / 'result.md'}", when)
-    runner = load_agent(d).get("runner")
     if isinstance(runner, str) and runner:
         # The same limit applies to every session on this machine, not only this round's run.json.
         # A limits file that cannot be written must not take down wait or status: the round already ended.
         try:
-            until = record_limit(dict(os.environ), runner, limit, dt.datetime.now(dt.timezone.utc))
+            until = record_limit(environ, runner, limit, dt.datetime.now(dt.timezone.utc))
         except OSError as exc:
             print(f"could not record the limit for {runner}: {exc.strerror or exc}")
         else:
@@ -1462,8 +1557,7 @@ def _kept_research(current: object, agent: str) -> dict:
 
 
 def _config_view(path: Path, data: object) -> dict:
-    """executors, order, resets, providers, caps, roots and research. Unknown keys are ignored. Every refusal
-    names `path` first.
+    """The validated executor settings. Unknown keys are ignored. Every refusal names `path` first.
 
     While the order is `ladder` a bad `resets` is read as none, so the dates can never break the saved order;
     in the `resets` order it is refused."""
@@ -1480,6 +1574,9 @@ def _config_view(path: Path, data: object) -> dict:
     order = data.get("order", "ladder")
     if order not in _ORDERS:
         raise LoopError(f"{path}: unknown order {order!r}; choose from {', '.join(_ORDERS)}")
+    budget = data.get("budget", False)
+    if not isinstance(budget, bool):
+        raise LoopError(f'{path}: "budget" must be a boolean')
     try:
         resets = _validated_resets(path, data.get("resets", {}), providers)
     except LoopError:
@@ -1494,7 +1591,7 @@ def _config_view(path: Path, data: object) -> dict:
     roots = data.get("roots", [])
     if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
         raise LoopError(f'{path}: "roots" must be a list of folders that hold repositories')
-    return {"executors": ladder, "order": order, "resets": resets, "providers": providers,
+    return {"executors": ladder, "order": order, "budget": budget, "resets": resets, "providers": providers,
             "maxParallel": caps, "roots": roots, "research": _validated_research(path, data.get("research"))}
 
 
@@ -1504,16 +1601,26 @@ def load_config(environ: dict) -> dict:
     `order` is `ladder` (the saved order) unless the file says `resets`. `resets` is read either way
     and changes the order only when `order` is `resets`. `providers` is the declared provider runners,
     an empty mapping when none are declared. `research` is the optional research agent, or None when
-    none is set, a missing file included."""
+    none is set, a missing file included. `budget` is off unless explicitly enabled."""
     path = config_path(environ)
     if not path.exists():
-        return {"executors": ["subagent"], "order": "ladder", "resets": {}, "providers": {},
+        return {"executors": ["subagent"], "order": "ladder", "budget": False, "resets": {}, "providers": {},
                 "maxParallel": {}, "roots": [], "research": None}
     try:
         data = json.loads(path.read_text())
     except ValueError as exc:
         raise LoopError(f"{path} is not valid JSON: {exc}") from exc
     return _config_view(path, data)
+
+
+def _budget_config(environ: dict) -> dict | None:
+    """The settings for optional budget lookups inside existing commands."""
+    try:
+        config = load_config(environ)
+    except (OSError, LoopError):
+        # Progress and usage-limit reporting also work without a readable executor config.
+        return None
+    return config if config["budget"] else None
 
 
 def _add_months(anchor: dt.datetime, k: int) -> dt.datetime:
@@ -1622,6 +1729,96 @@ def _parse_stamp(value: object) -> dt.datetime | None:
         return dt.datetime.strptime(value, _LIMIT_STAMP).replace(tzinfo=dt.timezone.utc)
     except ValueError:
         return None
+
+
+def _meter_windows(meter: dict | None) -> list[dict]:
+    windows = meter.get("windows") if isinstance(meter, dict) else None
+    if not isinstance(windows, list):
+        return []
+    return [window for window in windows if isinstance(window, dict)
+            and isinstance(used := window.get("usedPercent"), (int, float))
+            and not isinstance(used, bool) and 0 <= used < float("inf")]
+
+
+def limit_from_meter(meter: dict | None) -> dict | None:
+    """The exhausted window whose reset is latest."""
+    earliest = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+    exhausted = (window for window in _meter_windows(meter) if window["usedPercent"] >= 100)
+    window = max(exhausted, key=lambda item: _parse_stamp(item.get("resetsAt")) or earliest, default=None)
+    if window is None:
+        return None
+    minutes = window.get("minutes")
+    kind = "5 hour" if minutes == 300 else "weekly" if minutes == 10080 else f"{minutes} minute"
+    reset = _parse_stamp(window.get("resetsAt"))
+    return {"kind": kind, "resetsAt": _stamp(reset) if reset is not None else None, "resetsIn": None}
+
+
+def _read_meter_cache(path: Path) -> dict:
+    try:
+        cache = json.loads(path.read_text())
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return cache if isinstance(cache, dict) else {}
+
+
+def codex_meters(config: dict, environ: dict, at: dt.datetime, max_age: int = 600) -> dict[str, dict | None]:
+    """Read each Codex login's meter or reuse its latest result, including a failed read."""
+    providers = config.get("providers", {})
+    logins = {name: providers[name] for name in ordered_ladder(config, at)
+              if name in providers and is_login_provider(providers[name])}
+    if not logins:
+        return {}
+    path = config_path(environ).parent / "meters.json"
+    cache = _read_meter_cache(path) if max_age > 0 else {}
+    moment = _as_utc(at)
+    meters = {}
+    updates = {}
+    for name, provider in logins.items():
+        home = codex_login_home(provider, environ)
+        entry = cache.get(name)
+        if isinstance(entry, dict) and entry.get("home") == str(home) and "meter" in entry:
+            read = _parse_stamp(entry.get("read"))
+            cached = entry["meter"]
+            if (read is not None and 0 <= (moment - read).total_seconds() < max_age
+                    and (cached is None or isinstance(cached, dict))):
+                meters[name] = cached
+                continue
+        meter = read_codex_meter(home, environ)
+        meters[name] = meter
+        updates[name] = {"read": _stamp(moment), "home": str(home), "meter": meter}
+    if updates:
+        # Re-read after the exchanges to keep other entries published while they were in flight.
+        cache = _read_meter_cache(path)
+        cache.update(updates)
+        try:
+            _write_json_atomic(path, cache, ".meters-")
+        except OSError:
+            pass  # The readings are still useful if the cache cannot be written.
+    return meters
+
+
+def executor_left(name: str, config: dict, environ: dict, at: dt.datetime, meters: dict) -> dict:
+    """What remains for one executor, from its meter or the live limit on record."""
+    meter = meters.get(name)
+    if isinstance(meter, dict):
+        reached = meter.get("reached")
+        if isinstance(reached, str) and reached:
+            left = 0
+        else:
+            used = max((window["usedPercent"] for window in _meter_windows(meter)), default=None)
+            left = max(0, round(100 - used)) if used is not None else None
+        limit = limit_from_meter(meter)
+        until = limit["resetsAt"] if limit is not None else None
+        reset = _parse_stamp(until)
+        if reset is not None and reset <= _as_utc(at):
+            left, until = None, None
+        plan = meter.get("plan")
+        return {"name": name, "plan": plan if isinstance(plan, str) else None,
+                "left": left, "until": until, "source": "meter"}
+    until = limited_runners(environ, at).get(name)
+    if until is not None:
+        return {"name": name, "plan": None, "left": 0, "until": until, "source": "limit"}
+    return {"name": name, "plan": None, "left": None, "until": None, "source": "none"}
 
 
 def _until_from_limit(limit: dict, at: dt.datetime) -> str | None:
@@ -1938,6 +2135,27 @@ def _shown_width(text: str) -> int:
 def _cell(text: str) -> str:
     """Text as one table cell: one line, and no pipe that would end the cell."""
     return _one_line(text).replace("|", "\\|")
+
+
+def executors_cell(entries: list[dict], at: dt.datetime) -> str:
+    """The Executors row in ladder order, with reset times shown in the local time zone."""
+    today = _as_utc(at).astimezone().date()
+    parts = []
+    for entry in entries:
+        part = _cell(entry["name"])
+        if entry["left"] is not None:
+            part += f" {entry['left']}%"
+            until = _parse_stamp(entry["until"])
+            if until is not None:
+                local = until.astimezone()
+                part += " → " + local.strftime("%H:%M" if local.date() == today else "%m-%d")
+        parts.append(part)
+    while True:
+        omitted = len(entries) - len(parts)
+        cell = " · ".join(parts + ([f"+{omitted} more"] if omitted else []))
+        if _shown_width(cell) <= ROW_WIDTH:
+            return cell
+        parts.pop()
 
 
 def _waiting(folders: list[Path]) -> tuple[str, list[str]]:
@@ -2950,6 +3168,7 @@ def _print_setup(environ: dict) -> None:
     cfg = load_config(environ)
     print("\n".join(cfg["executors"]))
     print(f"order: {cfg['order']}")
+    print(f"budget: {'on' if cfg['budget'] else 'off'}")
     for name, spec in cfg["resets"].items():
         every = spec.get("every") if isinstance(spec, dict) else None
         nxt = spec.get("next") if isinstance(spec, dict) else ""
@@ -2968,7 +3187,7 @@ def _print_setup(environ: dict) -> None:
 
 
 def cmd_setup(args) -> int:
-    """Save the ladder, the order, when each plan resets and the research agent, or print what is saved.
+    """Save executor settings and the research agent, or print the setup.
 
     Starts from the whole saved file, so a key keryx does not know stays. The file is written only
     after `load_config` would read the result: setup never saves a file keryx then refuses, and the off
@@ -2977,7 +3196,7 @@ def cmd_setup(args) -> int:
     environ = dict(os.environ)
     path = config_path(environ)
     reset_args = list(args.reset or [])
-    writing = bool(args.executors or args.order or reset_args or args.research is not None)
+    writing = bool(args.executors or args.order or reset_args or args.research is not None or args.budget)
     if writing:
         data, broken = _setup_base(path, bool(args.executors))
         providers = data.get("providers")
@@ -2986,6 +3205,8 @@ def cmd_setup(args) -> int:
             data["executors"] = parse_executors(args.executors, providers)
         if args.order:
             data["order"] = args.order
+        if args.budget:
+            data["budget"] = args.budget == "on"
         if reset_args:
             current = data.get("resets", {})
             if not isinstance(current, dict):
@@ -3204,6 +3425,24 @@ def cmd_executors(args) -> int:
             print(f"{name}: usage limit until {limited[name]}; left out until then", file=sys.stderr)
     available = available_ladder(ladder, environ, at)
     print("\n".join(available) if available else "inline")
+    return 0
+
+
+def cmd_budget(args) -> int:
+    """Print each executor's plan and remaining quota from fresh meter readings."""
+    environ = dict(os.environ)
+    config = load_config(environ)
+    meters = codex_meters(config, environ, dt.datetime.now(dt.timezone.utc), max_age=0)
+    at = dt.datetime.now(dt.timezone.utc)
+    entries = [executor_left(name, config, environ, at, meters) for name in ordered_ladder(config, at)]
+    if args.json:
+        print(json.dumps(entries, indent=2))
+        return 0
+    print("name  plan  left  until  source")
+    for entry in entries:
+        left = f"{entry['left']}%" if entry["left"] is not None else "-"
+        plan = entry["plan"] if entry["plan"] is not None else "-"
+        print(f"{entry['name']}  {plan}  {left}  {entry['until'] or '-'}  {entry['source']}")
     return 0
 
 
@@ -4923,6 +5162,13 @@ def cmd_progress(args) -> int:
                 cell = named if _shown_width(named) <= ROW_WIDTH else cell
             rows.append(f"| **{slug}** | {cell} |")
     rows.append(f"| **Live** | {live} |")
+    environ = dict(os.environ)
+    config = _budget_config(environ)
+    if config is not None:
+        meters = codex_meters(config, environ, dt.datetime.now(dt.timezone.utc))
+        at = dt.datetime.now(dt.timezone.utc)
+        entries = [executor_left(name, config, environ, at, meters) for name in ordered_ladder(config, at)]
+        rows.append(f"| **Executors** | {executors_cell(entries, at)} |")
     rows.append(f"| **Waiting** | {waiting} |")
     rows.append(f"| **Next** | {upcoming} |")
     print("\n".join(rows))
@@ -5161,6 +5407,7 @@ def main(argv=None) -> int:
     su.add_argument("--executors", metavar="LIST", help="save this executor order, e.g. cli,glm,subagent")
     su.add_argument("--order", choices=["ladder", "resets"],
                     help="ladder (the saved order) or resets (the plan that resets soonest first)")
+    su.add_argument("--budget", choices=["on", "off"], help="show executor quota in the status block")
     su.add_argument("--reset", action="append", default=None, metavar="RUNNER=WHEN[/EVERY]",
                     help="when RUNNER's plan resets (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ, "
                          "optionally /month or /week); RUNNER=none clears it")
@@ -5176,6 +5423,8 @@ def main(argv=None) -> int:
     ex = sub.add_parser("executors")
     ex.add_argument("--after", metavar="RUNNER",
                     help="print the next executor after this one that is not at a usage limit (inline = the coordinator)")
+    budget = sub.add_parser("budget", help="show how much quota each executor has left")
+    budget.add_argument("--json", action="store_true", help="print executor budgets as JSON")
     rm = sub.add_parser("remember")
     rm.add_argument("--repo", action="store_true", help="save for this repository only")
     rm.add_argument("note")

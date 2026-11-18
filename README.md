@@ -69,7 +69,7 @@ Plans with a usage quota lose what is left of it at their reset. Turn on the res
 keryx.py setup --order resets --reset cli=2026-11-06/month --reset glm=2026-11-11T03:24:16Z/week
 ```
 
-Each `--reset` is a plan's next reset in UTC and how often it repeats (`month`, `week`, or nothing for once); keryx rolls it forward on its own. `--order ladder` turns it off and keeps the dates. keryx never asks a provider for your usage: the dates are the ones you give it, and an executor that hits its limit is still skipped until its limit lifts.
+Each `--reset` gives a plan's next reset in UTC and how often it repeats (`month`, `week`, or nothing for once). keryx rolls it forward on its own. `--order ladder` turns it off and keeps the dates. Reset ordering uses the dates you give it, and an executor that hits its limit is skipped until its limit lifts. Use `keryx.py setup --budget on` to show remaining quota in the status block, or `keryx.py budget` to read it on demand.
 
 By default the session does its own research. With a [Codex](https://learn.chatgpt.com/docs/non-interactive-mode) account, keryx can hand research — official docs, versions, how a library or API behaves — to it instead, so those questions run on your Codex plan:
 
