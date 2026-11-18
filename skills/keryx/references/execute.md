@@ -27,6 +27,13 @@ A provider (a model behind an https API that Codex can drive) is declared by the
                                "effort": "high", "codexConfig": {"web_search": "disabled"}}}
 ```
 
+A provider can instead run on a ChatGPT login: it names `codexHome`, a Codex home of its own (one per account), and no `baseUrl` or `keyFile`. Create the home's login once with `CODEX_HOME=<home> codex login` (keryx writes the home's `config.toml` first, so the login is kept in `auth.json` there); keryx owns that `config.toml` (its first line says so) and refuses a home whose `config.toml` it did not write, a home with other files and no `config.toml`, and always `~/.codex`; it keeps `CODEX_HOME` out of the executor's shells (`shell_environment_policy`), and only a ChatGPT login counts (an API-key login is refused). keryx never reads or prints `auth.json`; the round's environment carries no API key, only `CODEX_HOME`. `setup --detect` and `preflight --runner <name>` check the login with `codex login status`. The plan's usage-limit message ("You’ve hit your usage limit … try again at <time>") is read as a `plan` limit, the time in this machine's local time; "try again later" waits five hours.
+
+```json
+"providers": {"codex-a": {"runner": "codex", "codexHome": "~/.config/keryx/codex/a",
+                          "model": "gpt-6.2-sol", "effort": "high"}}
+```
+
 ### A usage limit
 
 A round stopped by a usage limit ends ERROR, and `wait` prints `USAGE_LIMIT` with the reset: a time in UTC for GLM (which prints UTC+8), a span such as "4 days" for Cursor. If the reset is within about 45 minutes, wait for it and `followup` on the same slug: the round resumes its session and its uncommitted work; when `followup` finds no session (the run died before it started one), `create` on the same slug and runner again. Otherwise take the next rung (`executors --after`; `inline` means you). *(evidence: runs that resumed after a GLM reset lost ~25 minutes; GLM prints its reset time in UTC+8)*
