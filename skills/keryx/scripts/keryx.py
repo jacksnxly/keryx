@@ -3805,13 +3805,22 @@ def cmd_executors(args) -> int:
         print(_executor_after(ladder, args.after, environ, at))
         return 0
     if config.get("budget") and getattr(args, "mode", None):
-        meters = codex_meters(config, environ, at)
+        meters = codex_meters(config, environ, at, max_age=0)
         ranked = choose_executors(config, environ, at, args.mode.upper(), args.size, meters, cost_samples(environ))
         kept = {item["name"] for item in ranked}
         limited = limited_runners(environ, at)
         for name in ladder:
             if name not in kept and name in limited:
                 print(f"{name}: usage limit until {limited[name]}; left out until then", file=sys.stderr)
+        for name in ladder:
+            meter = meters.get(name)
+            if name in kept or not isinstance(meter, dict):
+                continue
+            limit = limit_from_meter(meter)
+            if limit is not None:
+                print(f"{name}: out — {limit['kind']} window used up until {limit['resetsAt']}", file=sys.stderr)
+            elif meter.get("reached"):
+                print(f"{name}: out — blocked ({meter['reached']})", file=sys.stderr)
         for item in ranked:
             print(item["reason"], file=sys.stderr)
         print("\n".join(item["name"] for item in ranked) if ranked else "inline")
