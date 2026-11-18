@@ -2984,8 +2984,8 @@ def _reserve_round(d: Path, runner: str, prompt: str, environ: dict) -> None:
             est = cost_estimate(samples, runner, mode, size, window)
             if est:
                 windows[window] = est["p80"]
-        if windows:
-            reserve(environ, runner, d.name, windows, at)
+        # Reserve even with no estimate yet (empty windows): the entry still tells another round it overlapped.
+        reserve(environ, runner, d.name, windows, at)
     except Exception:
         pass
 
