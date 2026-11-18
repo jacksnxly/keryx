@@ -2656,6 +2656,16 @@ def _codex_provider(agent: dict, environ: dict) -> dict:
     return provider
 
 
+def round_minutes(run: dict) -> float:
+    """Use the runner's duration when available, otherwise the round's elapsed time."""
+    duration = run.get("durationMs")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+        return duration / 60000
+    started = _parse_stamp(run.get("startedAt"))
+    ended = _parse_stamp(run.get("endedAt"))
+    return (ended - started).total_seconds() / 60 if started is not None and ended is not None else 0.0
+
+
 def round_cost(before: dict | None, after: dict | None, events: list[dict], minutes: float) -> dict:
     """What a round cost: the used-percent difference per meter window (only a window in both meters with the
     same reset and no drop), the summed token counts of Codex and Claude Code result events, and the minutes."""
@@ -2723,7 +2733,7 @@ def cost_samples(environ: dict) -> list[dict]:
 
 def cost_estimate(samples: list[dict], runner: str, mode: str, size: str | None, window: str = "300") -> dict | None:
     """A log-normal estimate of a round's cost in one window: median and 80th percentile, from this runner's and
-    mode's samples of this size first, else of any size."""
+    mode's finished and legacy samples of this size first, else of any size."""
     def numbers(rows):
         found = []
         for row in rows:
@@ -2732,7 +2742,8 @@ def cost_estimate(samples: list[dict], runner: str, mode: str, size: str | None,
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 found.append(max(float(value), 0.5))
         return found
-    mine = [s for s in samples if isinstance(s, dict) and s.get("runner") == runner and s.get("mode") == mode]
+    mine = [s for s in samples if isinstance(s, dict) and s.get("runner") == runner and s.get("mode") == mode
+            and s.get("status", "FINISHED") == "FINISHED"]
     values, used = numbers(s for s in mine if s.get("size") == size), size
     if not values:
         values, used = numbers(mine), None
@@ -2747,7 +2758,8 @@ def cost_estimate(samples: list[dict], runner: str, mode: str, size: str | None,
 
 def _record_round_cost(d: Path, agent: dict, r: Path, run: dict, events: list[dict], environ: dict) -> None:
     """Save cost.json and add a ledger line, only with the budget on. Never changes the round's outcome."""
-    if _budget_config(environ) is None:
+    cost_path = r / "cost.json"
+    if cost_path.exists() or _budget_config(environ) is None:
         return
     try:
         after = None
@@ -2758,15 +2770,27 @@ def _record_round_cost(d: Path, agent: dict, r: Path, run: dict, events: list[di
         before = None
         if (r / "meter-before.json").exists():
             before = json.loads((r / "meter-before.json").read_text())
-        minutes = (run.get("durationMs") or 0) / 60000
-        cost = round_cost(before, after, events, minutes)
-        save_json(r / "cost.json", cost)
+        cost = round_cost(before, after, events, round_minutes(run))
         size = run_size(d)
         if size is None and "-" in d.name:
-            size = run_size(d.parent / d.name.rpartition("-")[0])
+            parent = d.parent / d.name.rpartition("-")[0]
+            log = parent / "decisions.tsv"
+            if log.is_file() and re.search(rf"(?<![\w-]){re.escape(d.name)}(?![\w-])", log.read_text()):
+                size = run_size(parent)
         prompt = (r / "prompt.md").read_text() if (r / "prompt.md").exists() else ""
-        record_cost(environ, {"runner": agent.get("runner", "cli"), "mode": brief_mode(prompt), "size": size,
-                              "at": now(), **cost})
+        entry = {"runner": agent.get("runner", "cli"), "mode": brief_mode(prompt), "size": size,
+                 "status": run["status"], "at": now(), **cost}
+        try:
+            cost_file = cost_path.open("x")  # only one concurrent wait can claim the round
+        except FileExistsError:
+            return
+        try:
+            with cost_file:
+                cost_file.write(json.dumps(cost, indent=2, sort_keys=True) + "\n")
+            record_cost(environ, entry)
+        except Exception:
+            cost_path.unlink(missing_ok=True)
+            raise
     except Exception as exc:  # recording is a side record: it must not change the round's outcome
         print(f"cost not recorded: {exc}")
 
