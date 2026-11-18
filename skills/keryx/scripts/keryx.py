@@ -1167,6 +1167,10 @@ CODEX_ALLOWANCE = re.compile(r'unexpected status 402\b|last status: 402\b|"raw_s
 # The ChatGPT plan's message (codex-rs protocol error.rs): "You’ve hit your usage limit. … or try again at <T>."
 # or "… try again later."; <T> is the machine's local time, a bare time on the same day.
 CHATGPT_LIMIT = re.compile(r"You[’']ve hit your usage limit[^\n]*?[Tt]ry again (?:at (?P<at>[^\n]+?)|(?P<later>later))\.(?:\s|$)")
+# A ChatGPT workspace with no credit left or at its spend cap (the same file, RateLimitReachedType::Workspace*).
+# Codex gives no reset time and someone must act, so the rung is looked at again a day later.
+CHATGPT_WORKSPACE = re.compile(r"Your workspace is out of credits\.|You hit your spend cap set (?:in|by the owner of) "
+                               r"your workspace\.")
 CODEX_RATE = re.compile(r'unexpected status 429\b|last status: 429\b|"raw_status_code":429\b')
 
 
@@ -1217,6 +1221,8 @@ def usage_limit(text: str, at: dt.datetime | None = None, codex: bool = True) ->
     if m:
         reset = _chatgpt_reset(m.group("at"), at) if m.group("at") else None
         return {"kind": "plan", "resetsAt": reset, "resetsIn": None if reset else "5 hours"}
+    if CHATGPT_WORKSPACE.search(body):
+        return {"kind": "workspace", "resetsAt": None, "resetsIn": "1 day"}
     if CODEX_ALLOWANCE.search(body):
         moment = at or dt.datetime.now(dt.timezone.utc)
         return {"kind": "allowance", "resetsAt": _stamp(_first_of_next_month(moment)), "resetsIn": None}
